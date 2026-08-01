@@ -23,7 +23,11 @@ function canvas(size) {
   return c;
 }
 
-function makeTexture(canvasEl, { srgb = false, repeat = 1, aniso = 8 } = {}) {
+// Ground planes are always seen at a grazing angle, which is the worst case for
+// mip selection: without a wide anisotropic tap count the GPU picks a mip from
+// the *short* axis of the footprint and the surface crawls as the camera moves.
+// 16 is the ceiling on every GPU we care about and three clamps it down safely.
+function makeTexture(canvasEl, { srgb = false, repeat = 1, aniso = 16 } = {}) {
   const tex = new THREE.CanvasTexture(canvasEl);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
@@ -91,230 +95,523 @@ function grayCanvas(size, buf, scale = 255) {
   });
 }
 
+/**
+ * A tint, kept in the space the canvas is actually stored in.
+ *
+ * Every `map` here is written as 8-bit sRGB and tagged SRGBColorSpace, so the
+ * bytes must be sRGB-encoded. `new THREE.Color(hex)` does the opposite: with
+ * colour management on it *decodes* the hex to linear-sRGB, and painting that
+ * back out as sRGB bytes darkens the surface by the transfer function twice.
+ * The error is worst on dark tints — asphalt was landing at 0.011 linear
+ * albedo instead of 0.10, roughly a ninth of real tarmac, which is why the
+ * road only ever looked lit when its normal map was over-driven into the sun.
+ */
+function paintTint(hex) {
+  return new THREE.Color().setHex(hex, THREE.NoColorSpace);
+}
+
+/**
+ * A noise basis paired with the sampling scale that makes it tile.
+ *
+ * `makeValueNoise2D(seed, P)` only repeats after P *noise cells*, so sampling
+ * it at `x / k` wraps at `P * k` texels — the two numbers have to agree or the
+ * texture seams. Worse, they fail silently in the other direction: a
+ * non-integer P indexes the lookup table between slots, every sample comes
+ * back NaN, and the whole map paints black with no error anywhere. Deriving
+ * both from one "texels per noise cell" figure makes both faults impossible.
+ */
+function tiling(seed, size, texelsPerCell) {
+  const period = Math.max(2, Math.round(size / texelsPerCell));
+  return { n: makeValueNoise2D(seed, period), k: size / period };
+}
+
+/** sRGB -> linear, matching what the GPU does when it samples an sRGB texture. */
+function srgbToLinear(v) {
+  return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+}
+
+/**
+ * Mean *linear* luminance of a painted canvas.
+ *
+ * Shaders that re-sample a tile at a second, much larger scale need a pivot to
+ * modulate around; using the tile's own mean is the only way to add macro
+ * variation without also shifting the surface's overall brightness (and with it
+ * the frame exposure, which is not ours to move).
+ */
+function meanLinearLuma(canvasEl) {
+  const size = canvasEl.width;
+  const d = canvasEl.getContext('2d').getImageData(0, 0, size, size).data;
+  let sum = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    sum += 0.2126 * srgbToLinear(d[i] / 255)
+      + 0.7152 * srgbToLinear(d[i + 1] / 255)
+      + 0.0722 * srgbToLinear(d[i + 2] / 255);
+  }
+  return sum / (size * size);
+}
+
 // ---------------------------------------------------------------------------
 // Material generators. Each returns { map, normalMap, roughnessMap, ... }.
 // ---------------------------------------------------------------------------
 
 /**
- * Asphalt: aggregate stones embedded in binder, with wear polish in the
- * wheel lines and a subtle large-scale patchiness from resurfacing.
+ * Asphalt: graded aggregate chippings set in bitumen binder.
+ *
+ * The previous version put most of its energy into a 4-texel-period grain,
+ * which is below the Nyquist limit of every mip the road is actually drawn at.
+ * That is what made the surface hiss and crawl: the eye tracks a pattern the
+ * sampler cannot hold still. Here the *stones* carry the height and the
+ * fine grain survives only in albedo, where mipmapping averages it away
+ * gracefully instead of turning into moving specular noise.
+ *
+ * Macro-scale storytelling — racing line, patch repairs, kerb grime — is not
+ * baked here on purpose: it belongs in road space, not in a 6 m tile that
+ * repeats five times a second at racing speed. TrackBuilder layers it on.
  */
 export function asphalt({ size = 1024, seed = 7, tint = 0x3a3d44 } = {}) {
   const key = `asphalt_${size}_${seed}_${tint}`;
   if (_textureCache.has(key)) return _textureCache.get(key);
 
-  const n1 = makeValueNoise2D(seed, size / 4);
-  const n2 = makeValueNoise2D(seed + 91, size / 16);
-  const n3 = makeValueNoise2D(seed + 311, size / 64);
+  // Three scales, in texels of the 6 m road tile: ~2 cm grain, ~40 cm binder
+  // mottling, ~20 cm crack cells that fbm grows into metre-long fissures.
+  const grainN = tiling(seed, size, 4);
+  const binderN = tiling(seed + 91, size, 64);
+  const crackN = tiling(seed + 311, size, 32);
   const rng = makeRng(seed + 5);
 
-  // Aggregate: scattered stones via a jittered-grid distance field.
-  const cells = 96;
+  // Jittered-grid aggregate at ~3.5 cm on the 6 m road tile. Real chippings are
+  // 6-14 mm, which is under two texels here — draw them at true scale and they
+  // alias, draw them big enough to resolve and the road turns into pebbledash.
+  // The way out is to carry them almost entirely in *relief*: the height field
+  // gets the stones, the albedo barely acknowledges them, and what the eye
+  // reads as texture at a distance is the 40 cm binder mottling instead.
+  const cells = 168;
   const cellSize = size / cells;
-  const sites = new Float32Array(cells * cells * 3);
+  const sites = new Float32Array(cells * cells * 4);
   for (let i = 0; i < cells * cells; i++) {
-    sites[i * 3] = rng();
-    sites[i * 3 + 1] = rng();
-    sites[i * 3 + 2] = 0.30 + rng() * 0.52; // stone radius, in cell units
+    sites[i * 4] = rng();
+    sites[i * 4 + 1] = rng();
+    // A wide radius spread is what separates "graded aggregate" from "gravel":
+    // real tarmac mixes fines and coarse stone in the same square metre.
+    sites[i * 4 + 2] = 0.26 + Math.pow(rng(), 1.6) * 0.62;
+    sites[i * 4 + 3] = rng();
   }
-  const stoneAt = (px, py) => {
-    const cx = Math.floor(px / cellSize), cy = Math.floor(py / cellSize);
-    let best = 0;
-    for (let oy = -1; oy <= 1; oy++) {
-      for (let ox = -1; ox <= 1; ox++) {
-        const gx = mod(cx + ox, cells), gy = mod(cy + oy, cells);
-        const k = (gy * cells + gx) * 3;
-        const sx = (cx + ox + sites[k]) * cellSize;
-        const sy = (cy + oy + sites[k + 1]) * cellSize;
-        const r = sites[k + 2] * cellSize;
-        const d = Math.hypot(px - sx, py - sy);
-        if (d < r) best = Math.max(best, 1 - smoothstep(d / r));
+
+  // Coverage of the winning stone at each texel, plus which stone won — the
+  // per-stone lottery is what stops the aggregate reading as one grey mush.
+  const cov = new Float32Array(size * size);
+  const who = new Float32Array(size * size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const cx = Math.floor(x / cellSize), cy = Math.floor(y / cellSize);
+      let best = 0, bestId = 0.5;
+      for (let oy = -1; oy <= 1; oy++) {
+        for (let ox = -1; ox <= 1; ox++) {
+          const gx = mod(cx + ox, cells), gy = mod(cy + oy, cells);
+          const k = (gy * cells + gx) * 4;
+          const sx = (cx + ox + sites[k]) * cellSize;
+          const sy = (cy + oy + sites[k + 1]) * cellSize;
+          const r = sites[k + 2] * cellSize;
+          const d = Math.hypot(x - sx, y - sy);
+          if (d < r) {
+            // Domed, not spherical: chippings are rolled flat by the paver.
+            const c = Math.pow(1 - smoothstep(d / r), 0.65);
+            if (c > best) { best = c; bestId = sites[k + 3]; }
+          }
+        }
       }
+      cov[y * size + x] = best;
+      who[y * size + x] = bestId;
     }
-    return best;
-  };
+  }
 
   const height = new Float32Array(size * size);
-  const macro = new Float32Array(size * size);
+  const crackBuf = new Float32Array(size * size);
+  const binderBuf = new Float32Array(size * size);
+  const grainBuf = new Float32Array(size * size);
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
       const i = y * size + x;
-      const grain = fbm2D(n1, x / 4, y / 4, 4) * 0.42;
-      const stone = stoneAt(x, y);
-      const patch = fbm2D(n3, x / 64, y / 64, 3);
-      macro[i] = patch;
-      height[i] = grain * 0.55 + stone * 0.55 + patch * 0.12;
+      // Ridged noise raised to a high power leaves only the thin crests, which
+      // read as the hairline shrinkage cracks tarmac develops as it ages.
+      const ridge = 1 - Math.abs(fbm2D(crackN.n, x / crackN.k, y / crackN.k, 3) * 2 - 1);
+      const crack = Math.pow(clamp01(ridge), 9);
+      const binder = fbm2D(binderN.n, x / binderN.k, y / binderN.k, 3);
+      const grain = fbm2D(grainN.n, x / grainN.k, y / grainN.k, 2);
+      crackBuf[i] = crack;
+      binderBuf[i] = binder;
+      grainBuf[i] = grain;
+      // Stones dominate the relief; the grain contributes barely enough to
+      // break the stone silhouettes without becoming a normal-map carpet.
+      height[i] = cov[i] * 0.70 + grain * 0.14 + binder * 0.10 - crack * 0.32 + 0.10;
     }
   }
 
-  const base = new THREE.Color(tint);
+  const base = paintTint(tint);
   const mapC = paint(size, (x, y, o) => {
     const i = y * size + x;
-    const h = height[i];
-    const patch = macro[i];
-    // Stones read slightly lighter and cooler than the binder around them.
-    const l = lerp(0.62, 1.22, h) * lerp(0.88, 1.10, patch);
-    const speck = fbm2D(n2, x / 2, y / 2, 2);
-    const r = base.r * l + (speck - 0.5) * 0.045;
-    const g = base.g * l + (speck - 0.5) * 0.045;
-    const b = base.b * l + (speck - 0.5) * 0.05 + h * 0.012;
-    o[0] = r * 255; o[1] = g * 255; o[2] = b * 255;
+    const c = cov[i];
+    // Bitumen mottling is the *visible* texture of tarmac at any distance you
+    // actually drive it from: 40 cm patches where the binder pooled richer or
+    // leaner during laying. It has to carry the read, because it is the only
+    // scale here that survives two mip levels intact.
+    const binderL = lerp(0.89, 1.06, binderBuf[i]) * lerp(0.97, 1.03, grainBuf[i]);
+    // Per-stone albedo lottery, held to a whisper — the stones are relief, not
+    // spots. A wide spread here is what turned the road into pebbledash.
+    const stoneL = binderL * lerp(0.95, 1.14, Math.pow(who[i], 1.25));
+    let l = lerp(binderL, stoneL, smoothstep(c));
+    l *= 1 - crackBuf[i] * 0.34;
+    // Stones scatter more short-wavelength light than the binder they sit in,
+    // so the aggregate reads a touch cooler as it gets lighter. Kept small:
+    // enough of this and tarmac turns navy the moment the sun drops.
+    const cool = c * 0.008;
+    o[0] = (base.r * l) * 255;
+    o[1] = (base.g * l + cool * 0.4) * 255;
+    o[2] = (base.b * l + cool) * 255;
   });
 
   const roughC = paint(size, (x, y, o) => {
     const i = y * size + x;
-    const h = height[i];
-    // Exposed aggregate is rougher; binder between stones is slicker.
-    let rgh = lerp(0.94, 0.66, clamp01(h * 1.4));
-    rgh *= lerp(0.94, 1.04, macro[i]);
-    o[0] = o[1] = o[2] = rgh * 255;
+    // Bitumen is the *smoother* phase — it is what makes a wet road shine, and
+    // what gives dry tarmac its long sheen under a low sun — while the exposed
+    // stone faces are near-Lambertian.
+    let rgh = lerp(0.76, 0.93, smoothstep(cov[i] * 1.3));
+    rgh = lerp(rgh, 0.99, crackBuf[i]);
+    rgh *= lerp(0.97, 1.02, binderBuf[i]);
+    o[0] = o[1] = o[2] = clamp01(rgh) * 255;
   });
 
   const result = {
     map: makeTexture(mapC, { srgb: true }),
-    normalMap: makeTexture(heightToNormal(height, size, 2.4)),
+    // Deliberately gentle. Tarmac relief is millimetres; drive it harder and a
+    // low sun rakes the chippings into a sandpaper glare that reads as gravel.
+    normalMap: makeTexture(heightToNormal(height, size, 1.8)),
     roughnessMap: makeTexture(roughC),
-    normalScale: 0.85,
+    normalScale: 0.44,
+    // Pivot for the second-scale sample TrackBuilder layers on; see meanLinearLuma.
+    meanLuma: meanLinearLuma(mapC),
   };
   _textureCache.set(key, result);
   return result;
 }
 
-/** Painted road markings drawn as a separate decal-ready alpha texture. */
-export function laneMarkings({ size = 512 } = {}) {
-  const key = `lane_${size}`;
+/**
+ * Painted road markings, as an alpha decal over the tarmac.
+ *
+ * Track paint is a thin thermoplastic film, not vinyl: it is laid by a machine
+ * that wanders, it is thinnest wherever traffic crosses it, and it fails by
+ * flaking off in patches rather than fading evenly. The dashed centre line is
+ * therefore markedly more eaten than the edge lines, which nothing drives on.
+ * The film also stands a couple of millimetres proud of the road, so it gets a
+ * normal map — at a low sun that raised lip is most of what says "painted".
+ */
+export function laneMarkings({ size = 512, tint = 0xeae5d6 } = {}) {
+  const key = `lane_${size}_${tint}`;
   if (_textureCache.has(key)) return _textureCache.get(key);
-  const n = makeValueNoise2D(41, size / 8);
-  const c = paint(size, (x, y, o) => {
-    const u = x / size;
-    // Two edge lines and a dashed centre line, with worn edges.
-    const edge = Math.min(Math.abs(u - 0.045), Math.abs(u - 0.955));
-    const edgeLine = 1 - smoothstep(edge / 0.016);
-    const centre = 1 - smoothstep(Math.abs(u - 0.5) / 0.012);
-    const dash = mod(y / size, 0.25) < 0.145 ? 1 : 0;
-    let a = clamp01(edgeLine + centre * dash);
-    const wear = fbm2D(n, x / 6, y / 6, 3);
-    a *= lerp(0.55, 1, wear);
-    o[0] = o[1] = o[2] = 255;
-    o[3] = a * 255;
-  });
-  const result = { map: makeTexture(c, { srgb: true }) };
-  _textureCache.set(key, result);
-  return result;
-}
+  // V tiles every 12 m of road, U spans the full width exactly once, so only
+  // the V scales have to divide the tile — see `tiling`.
+  const driftN = tiling(41, size, 64);   // where the machine wandered, over metres
+  const widthN = tiling(97, size, 32);   // how thick it laid the film, over metres
+  const wearN = tiling(77, size, 4);     // flaking, over centimetres
+  const gritN = tiling(131, size, 2);
+  const filmN = tiling(151, size, 4);
+  const base = paintTint(tint);
 
-/** Red/white rumble strip. `stripeLength` is in texture V units. */
-export function curb({ size = 512, colorA = 0xd8352a, colorB = 0xf2f2f2 } = {}) {
-  const key = `curb_${size}_${colorA}_${colorB}`;
-  if (_textureCache.has(key)) return _textureCache.get(key);
-  const n = makeValueNoise2D(17, size / 8);
-  const A = new THREE.Color(colorA), B = new THREE.Color(colorB);
+  const alpha = new Float32Array(size * size);
+  const film = new Float32Array(size * size);
   const height = new Float32Array(size * size);
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
-      // Ridged profile across the strip plus paint grain.
-      const u = x / size;
-      const ridge = 0.5 + 0.5 * Math.cos(u * TAU * 3);
-      height[y * size + x] = ridge * 0.7 + fbm2D(n, x / 5, y / 5, 3) * 0.3;
+      const i = y * size + x;
+      const u = x / size, v = y / size;
+      // The whole set of lines drifts together — they were laid in one pass.
+      const wob = fbm2D(driftN.n, 2.0, y / driftN.k, 3) - 0.5;
+      const eW = 0.016 * lerp(0.74, 1.12, fbm2D(widthN.n, 5.0, y / widthN.k, 2));
+      const dE = Math.min(Math.abs(u - 0.045 - wob * 0.005), Math.abs(u - 0.955 - wob * 0.005));
+      let a = 1 - smoothstep(dE / eW);
+
+      // Centre line: dashed, and eaten back hard because every kart on the
+      // circuit crosses it. Its width alone tells you the racing traffic.
+      const ph = mod(v, 0.25);
+      const dash = smoothstep((0.145 - ph) / 0.022) * smoothstep(ph / 0.016);
+      const cW = 0.012 * lerp(0.42, 1.0, fbm2D(widthN.n, 9.0, y / widthN.k, 2));
+      const dC = Math.abs(u - 0.5 - wob * 0.004);
+      const centre = (1 - smoothstep(dC / cW)) * dash;
+      a = Math.max(a, centre * lerp(0.55, 1.0, fbm2D(wearN.n, 13.0, y / wearN.k, 3)));
+
+      // Flaking, not fading: the film lifts in patches with hard borders and
+      // leaves most of the line intact, which is what an old marking does.
+      const flake = smoothstep((fbm2D(wearN.n, x / wearN.k, y / wearN.k, 4) - 0.30) * 3.0);
+      a *= lerp(0.14, 1.0, flake);
+      a *= lerp(0.80, 1.0, fbm2D(gritN.n, x / gritN.k, y / gritN.k, 2));
+
+      alpha[i] = clamp01(a);
+      // Thickness drives the colour and is deliberately not the coverage: the
+      // RGB has to stay bright even where nothing is painted, because a canvas
+      // stores premultiplied alpha and would otherwise hand the sampler black
+      // to bleed down every line edge.
+      film[i] = lerp(0.72, 1.0, clamp01(a));
+      height[i] = clamp01(a) * 0.72 + fbm2D(filmN.n, x / filmN.k, y / filmN.k, 2) * 0.28 * clamp01(a);
     }
   }
+
   const c = paint(size, (x, y, o) => {
-    const stripe = Math.floor((y / size) * 8) % 2 === 0;
-    const col = stripe ? A : B;
-    const grime = lerp(0.78, 1.0, fbm2D(n, x / 12, y / 12, 4));
-    const h = height[y * size + x];
-    const l = grime * lerp(0.86, 1.10, h);
-    o[0] = col.r * 255 * l; o[1] = col.g * 255 * l; o[2] = col.b * 255 * l;
+    const i = y * size + x;
+    // Sun-bleached and slightly dusty; brand-new white would out-read the sky.
+    const l = film[i] * lerp(0.90, 1.05, fbm2D(filmN.n, x / filmN.k, y / filmN.k, 3));
+    o[0] = base.r * 255 * l;
+    o[1] = base.g * 255 * l;
+    o[2] = base.b * 255 * l;
   });
+  // Coverage rides in its own opaque texture rather than in the map's alpha,
+  // for the premultiplication reason above.
+  const alphaC = grayCanvas(size, alpha);
   const roughC = paint(size, (x, y, o) => {
-    const v = lerp(0.52, 0.80, fbm2D(n, x / 10, y / 10, 3));
-    o[0] = o[1] = o[2] = v * 255;
+    // Fresh film keeps a sheen; where it has worn to a stain it is as matt as
+    // the road under it, which is what stops thin paint reading as new paint.
+    o[0] = o[1] = o[2] = lerp(0.90, 0.44, alpha[y * size + x]) * 255;
   });
   const result = {
     map: makeTexture(c, { srgb: true }),
-    normalMap: makeTexture(heightToNormal(height, size, 3.0)),
+    alphaMap: makeTexture(alphaC),
+    normalMap: makeTexture(heightToNormal(height, size, 1.6)),
     roughnessMap: makeTexture(roughC),
-    normalScale: 1.1,
+    normalScale: 0.55,
   };
   _textureCache.set(key, result);
   return result;
 }
 
-/** Beach sand with wind ripples and shell speckle. */
-export function sand({ size = 1024, seed = 23, tint = 0xd8c08a } = {}) {
-  const key = `sand_${size}_${seed}_${tint}`;
+/**
+ * Rumble strip: painted concrete with a history, not a decal.
+ *
+ * The crown and the outer lip are geometry (see TrackBuilder), so nothing here
+ * fakes the kerb's shape — the old cosine corrugation across the strip fought
+ * the mesh and read as a flat plate with stripes on it. What this adds is
+ * wear: paint chips off at the stripe joints first, grit packs into the shaded
+ * outer roll and into the joint with the tarmac, and the crown carries rubber
+ * where karts cut across it. `dirtTint` is the surrounding ground colour, so
+ * the grime belongs to the place the circuit is in.
+ */
+export function curb({ size = 512, colorA = 0xd8352a, colorB = 0xf2f2f2, dirtTint = 0x8a7a5c } = {}) {
+  const key = `curb_${size}_${colorA}_${colorB}_${dirtTint}`;
   if (_textureCache.has(key)) return _textureCache.get(key);
-  const fine = makeValueNoise2D(seed, size / 2);
-  const rip = makeValueNoise2D(seed + 3, size / 16);
-  const macro = makeValueNoise2D(seed + 77, size / 64);
-  const base = new THREE.Color(tint);
+  // Only V has to tile here — U runs across the strip exactly once — but the
+  // strip repeats every 8 m, so a V seam would strobe past twice a second.
+  const paintN = tiling(17, size, 16);
+  const chipN = tiling(53, size, 8);
+  const rubN = tiling(71, size, 4);
+  const gritN = tiling(89, size, 2);
+  const A = paintTint(colorA), B = paintTint(colorB);
+  const D = paintTint(dirtTint), CONCRETE = paintTint(0xc2bcb1);
 
+  // Paint coverage and the concrete beneath it, resolved once so the albedo,
+  // roughness and height passes all agree on where the paint actually is.
+  const paintBuf = new Float32Array(size * size);
+  const gritBuf = new Float32Array(size * size);
   const height = new Float32Array(size * size);
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
-      // Wind ripples: a warped sine, so they meander instead of marching.
-      const warp = fbm2D(rip, x / 40, y / 40, 3) * 26;
-      const ripple = 0.5 + 0.5 * Math.sin((y + warp) * 0.19);
-      const grain = fbm2D(fine, x / 1.6, y / 1.6, 3);
-      height[y * size + x] = ripple * 0.55 + grain * 0.30 + fbm2D(macro, x / 90, y / 90, 3) * 0.15;
+      const i = y * size + x;
+      const v = y / size;
+      const grit = fbm2D(gritN.n, x / gritN.k, y / gritN.k, 3);
+      // Distance to the nearest stripe joint, in stripe units. Kerb paint is
+      // laid one stripe at a time and always lifts at those seams first.
+      const f = mod(v * 8, 1);
+      const joint = Math.min(f, 1 - f);
+      let p = smoothstep(joint / 0.055);
+      p *= 1 - clamp01((fbm2D(chipN.n, x / chipN.k, y / chipN.k, 3) - 0.70) * 5.0);
+      p = clamp01(p);
+      paintBuf[i] = p;
+      gritBuf[i] = grit;
+      // Two coats of paint stand a fraction of a millimetre proud of the
+      // concrete; at grazing light that lip is the whole read of "chipped".
+      height[i] = grit * 0.34 + p * 0.30 + 0.2;
+    }
+  }
+
+  const c = paint(size, (x, y, o) => {
+    const i = y * size + x;
+    const u = x / size, v = y / size;
+    const p = paintBuf[i], grit = gritBuf[i];
+    const col = Math.floor(v * 8) % 2 === 0 ? A : B;
+    // Each stripe weathers on its own schedule — a kerb where every red is the
+    // same red is the giveaway that it came out of a texture generator.
+    const fade = lerp(0.66, 1.02, fbm2D(paintN.n, 3.7, y / paintN.k, 2));
+    const cl = lerp(0.80, 1.06, grit);
+    let r = lerp(CONCRETE.r * cl, col.r * fade, p);
+    let g = lerp(CONCRETE.g * cl, col.g * fade, p);
+    let b = lerp(CONCRETE.b * cl, col.b * fade, p);
+    // Grit collects where water and wind drop it: the shaded outer roll, and
+    // the crevice where the kerb meets the tarmac.
+    const dirt = clamp01(smoothstep((u - 0.60) / 0.40) * 0.9 + (1 - smoothstep(u / 0.11)) * 0.55)
+      * lerp(0.55, 1.0, fbm2D(paintN.n, x / paintN.k, y / paintN.k, 3));
+    r = lerp(r, D.r * 0.88, dirt * 0.68);
+    g = lerp(g, D.g * 0.88, dirt * 0.68);
+    b = lerp(b, D.b * 0.88, dirt * 0.68);
+    // Rubber laid down on the crown, where the karts actually ride the kerb.
+    const rubber = smoothstep((0.62 - Math.abs(u - 0.42)) / 0.22)
+      * clamp01(fbm2D(rubN.n, x / rubN.k, y / rubN.k, 3) * 1.8 - 0.85);
+    const shade = lerp(1.0, 0.58, smoothstep((u - 0.78) / 0.22));
+    const k = shade * lerp(1.0, 0.42, rubber * 0.75);
+    o[0] = r * 255 * k; o[1] = g * 255 * k; o[2] = b * 255 * k;
+  });
+
+  const roughC = paint(size, (x, y, o) => {
+    const i = y * size + x;
+    const u = x / size;
+    const p = paintBuf[i];
+    // Road paint keeps a little gloss for years; bare concrete never had any.
+    let rgh = lerp(lerp(0.86, 0.96, gritBuf[i]), 0.58, p);
+    rgh = lerp(rgh, 0.97, smoothstep((u - 0.62) / 0.38) * 0.7);
+    o[0] = o[1] = o[2] = clamp01(rgh) * 255;
+  });
+
+  const result = {
+    map: makeTexture(c, { srgb: true }),
+    normalMap: makeTexture(heightToNormal(height, size, 2.2)),
+    roughnessMap: makeTexture(roughC),
+    normalScale: 0.75,
+  };
+  _textureCache.set(key, result);
+  return result;
+}
+
+/**
+ * Beach sand: wind-blown ripples over size-graded grain.
+ *
+ * Two things separate real sand from noise-with-a-yellow-tint. First the
+ * ripples have a *direction* — the prevailing wind — and a consistent
+ * wavelength, and they only ever meander around it; a warped sine gives that,
+ * pure fbm never will. Second the grain is graded: the fines are blown off the
+ * ripple crests and collect in the troughs, so the crests are coarser, paler
+ * and rougher than the hollows between them. That sorting is what the eye
+ * reads as "sand" rather than "sandpaper".
+ */
+export function sand({ size = 1024, seed = 23, tint = 0xd8c08a } = {}) {
+  const key = `sand_${size}_${seed}_${tint}`;
+  if (_textureCache.has(key)) return _textureCache.get(key);
+  const grainN = tiling(seed, size, 2);
+  const coarseN = tiling(seed + 41, size, 4);
+  const warpN = tiling(seed + 3, size, 32);
+  const duneN = tiling(seed + 77, size, 128);
+  const base = paintTint(tint);
+
+  // The tile spans 5 m of shoulder / 14 m of terrain, so ripples every ~28
+  // texels land at roughly a hand's width — the wavelength dry sand actually
+  // holds. The count must be a whole number or the ripples seam on the tile.
+  const ripples = 36;
+  // Prevailing wind, held a little off the tile axes so the ripples never look
+  // like they were drawn to the texture's grid.
+  const wx = Math.cos(0.42), wy = Math.sin(0.42);
+
+  const height = new Float32Array(size * size);
+  const crest = new Float32Array(size * size);
+  const grainBuf = new Float32Array(size * size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = y * size + x;
+      const warp = (fbm2D(warpN.n, x / warpN.k, y / warpN.k, 3) - 0.5) * 0.22;
+      const phase = ((x * wx + y * wy) / size + warp) * ripples * TAU;
+      // Asymmetric crests: the lee face of a ripple is steeper than the stoss.
+      const s = Math.sin(phase);
+      const ripple = 0.5 + 0.5 * Math.sign(s) * Math.pow(Math.abs(s), 0.7);
+      const grain = fbm2D(grainN.n, x / grainN.k, y / grainN.k, 3);
+      const coarse = fbm2D(coarseN.n, x / coarseN.k, y / coarseN.k, 2);
+      crest[i] = ripple;
+      // Coarse grains sit on the crests, fines settle in the troughs.
+      grainBuf[i] = lerp(grain, coarse, ripple * 0.8);
+      height[i] = ripple * 0.46 + grainBuf[i] * 0.22
+        + fbm2D(duneN.n, x / duneN.k, y / duneN.k, 3) * 0.32;
     }
   }
   const c = paint(size, (x, y, o) => {
-    const h = height[y * size + x];
-    const l = lerp(0.80, 1.14, h);
-    const shell = fbm2D(fine, x / 1.1, y / 1.1, 2);
-    const bright = shell > 0.86 ? 0.20 : 0;
-    o[0] = (base.r * l + bright) * 255;
-    o[1] = (base.g * l + bright) * 255;
-    o[2] = (base.b * l * 0.98 + bright) * 255;
+    const i = y * size + x;
+    // Dry, wind-sorted crests are paler than the damper packed troughs.
+    const l = lerp(0.84, 1.10, height[i]) * lerp(0.97, 1.05, crest[i]);
+    const shell = grainBuf[i] > 0.88 ? (grainBuf[i] - 0.88) * 1.4 : 0;
+    o[0] = (base.r * l + shell) * 255;
+    o[1] = (base.g * l + shell * 0.96) * 255;
+    o[2] = (base.b * l * 0.985 + shell * 0.9) * 255;
   });
-  const roughC = grayCanvas(size, height.map ? Float32Array.from(height, (h) => lerp(0.98, 0.86, h)) : height);
+  const roughC = paint(size, (x, y, o) => {
+    const i = y * size + x;
+    o[0] = o[1] = o[2] = lerp(0.90, 0.99, crest[i]) * 255;
+  });
   const result = {
     map: makeTexture(c, { srgb: true }),
     normalMap: makeTexture(heightToNormal(height, size, 1.5)),
     roughnessMap: makeTexture(roughC),
     normalScale: 0.7,
+    meanLuma: meanLinearLuma(c),
   };
   _textureCache.set(key, result);
   return result;
 }
 
-/** Dry cracked desert dirt with pebbles. */
+/**
+ * Dry desert dirt: wind-drifted fines over cracked, pebbled hardpan.
+ *
+ * Same grading idea as the sand — the wind sorts this too — but here the
+ * coarse fraction is pebbles that the fines drift *around* rather than sit on,
+ * so the pebbles stand proud and the cracks run between them.
+ */
 export function dirt({ size = 1024, seed = 51, tint = 0xa8703f } = {}) {
   const key = `dirt_${size}_${seed}_${tint}`;
   if (_textureCache.has(key)) return _textureCache.get(key);
-  const fine = makeValueNoise2D(seed, size / 2);
-  const mid = makeValueNoise2D(seed + 9, size / 12);
-  const macro = makeValueNoise2D(seed + 88, size / 48);
-  const base = new THREE.Color(tint);
+  const grainN = tiling(seed, size, 2);
+  const pebbleN = tiling(seed + 9, size, 8);
+  const clodN = tiling(seed + 23, size, 32);
+  const crackN = tiling(seed + 88, size, 64);
+  const driftN = tiling(seed + 131, size, 16);
+  const base = paintTint(tint);
 
   const height = new Float32Array(size * size);
+  const pebbleBuf = new Float32Array(size * size);
+  const crackBuf = new Float32Array(size * size);
+  const driftBuf = new Float32Array(size * size);
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
-      const grain = fbm2D(fine, x / 2, y / 2, 4);
-      const clods = fbm2D(mid, x / 14, y / 14, 4);
-      // Ridged noise carves shallow cracks into the surface.
-      const crack = 1 - Math.abs(fbm2D(macro, x / 30, y / 30, 4) * 2 - 1);
-      height[y * size + x] = grain * 0.30 + clods * 0.50 + Math.pow(crack, 6) * -0.35 + 0.35;
+      const i = y * size + x;
+      const grain = fbm2D(grainN.n, x / grainN.k, y / grainN.k, 3);
+      const clods = fbm2D(clodN.n, x / clodN.k, y / clodN.k, 4);
+      // Pebbles: the top of the noise only, so they read as discrete stones
+      // rather than as one more octave of the same lumpy field.
+      const pebble = clamp01((fbm2D(pebbleN.n, x / pebbleN.k, y / pebbleN.k, 2) - 0.62) * 4.0);
+      // Ridged noise carves shallow shrinkage cracks between them.
+      const ridge = 1 - Math.abs(fbm2D(crackN.n, x / crackN.k, y / crackN.k, 4) * 2 - 1);
+      const crack = Math.pow(clamp01(ridge), 8) * (1 - pebble);
+      // Drifted fines, banked against whatever the wind found in its way.
+      const drift = fbm2D(driftN.n, x / driftN.k, y / driftN.k, 3);
+      pebbleBuf[i] = pebble;
+      crackBuf[i] = crack;
+      driftBuf[i] = drift;
+      height[i] = grain * 0.14 + clods * 0.34 + pebble * 0.34 - crack * 0.34 + drift * 0.18 + 0.25;
     }
   }
   const c = paint(size, (x, y, o) => {
-    const h = height[y * size + x];
-    const l = lerp(0.66, 1.20, clamp01(h));
-    const red = fbm2D(mid, x / 20, y / 20, 3);
-    o[0] = base.r * l * lerp(0.94, 1.08, red) * 255;
-    o[1] = base.g * l * lerp(0.98, 1.02, red) * 255;
-    o[2] = base.b * l * lerp(1.06, 0.92, red) * 255;
+    const i = y * size + x;
+    const l = lerp(0.70, 1.16, clamp01(height[i]));
+    // Iron-rich fines are redder than the pale stone they drift over.
+    const red = clamp01(driftBuf[i] * 1.2 - 0.1) * (1 - pebbleBuf[i] * 0.7);
+    const stone = pebbleBuf[i] * 0.22;
+    o[0] = (base.r * l * lerp(0.92, 1.10, red) + stone * 0.9) * 255;
+    o[1] = (base.g * l * lerp(0.98, 1.02, red) + stone) * 255;
+    o[2] = (base.b * l * lerp(1.10, 0.90, red) + stone * 1.15) * 255;
   });
   const roughC = paint(size, (x, y, o) => {
-    const v = lerp(0.99, 0.82, clamp01(height[y * size + x]));
-    o[0] = o[1] = o[2] = v * 255;
+    const i = y * size + x;
+    // Loose dust is the roughest thing in the scene; polished pebbles are not.
+    let rgh = lerp(0.99, 0.86, pebbleBuf[i]);
+    rgh = lerp(rgh, 1.0, crackBuf[i]);
+    o[0] = o[1] = o[2] = clamp01(rgh) * 255;
   });
   const result = {
     map: makeTexture(c, { srgb: true }),
     normalMap: makeTexture(heightToNormal(height, size, 2.2)),
     roughnessMap: makeTexture(roughC),
     normalScale: 1.0,
+    meanLuma: meanLinearLuma(c),
   };
   _textureCache.set(key, result);
   return result;
@@ -324,21 +621,26 @@ export function dirt({ size = 1024, seed = 51, tint = 0xa8703f } = {}) {
 export function grass({ size = 1024, seed = 61, tint = 0x4e8a3c } = {}) {
   const key = `grass_${size}_${seed}_${tint}`;
   if (_textureCache.has(key)) return _textureCache.get(key);
-  const blade = makeValueNoise2D(seed, size / 2);
-  const clump = makeValueNoise2D(seed + 13, size / 20);
-  const base = new THREE.Color(tint);
+  const bladeN = tiling(seed, size, 2);
+  const clumpN = tiling(seed + 13, size, 16);
+  const dryN = tiling(seed + 29, size, 64);
+  const base = paintTint(tint);
   const height = new Float32Array(size * size);
+  const clumpBuf = new Float32Array(size * size);
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
-      const b = fbm2D(blade, x / 1.5, y / 3.5, 3);
-      const c2 = fbm2D(clump, x / 18, y / 18, 4);
-      height[y * size + x] = b * 0.55 + c2 * 0.45;
+      const i = y * size + x;
+      // Blades are stretched along V so the mown direction reads at distance.
+      const b = fbm2D(bladeN.n, x / bladeN.k, y / (bladeN.k * 2), 3);
+      const c2 = fbm2D(clumpN.n, x / clumpN.k, y / clumpN.k, 4);
+      clumpBuf[i] = c2;
+      height[i] = b * 0.55 + c2 * 0.45;
     }
   }
   const c = paint(size, (x, y, o) => {
-    const h = height[y * size + x];
-    const l = lerp(0.58, 1.28, h);
-    const yellow = clamp01(fbm2D(clump, x / 26, y / 26, 3) * 1.3 - 0.35);
+    const i = y * size + x;
+    const l = lerp(0.58, 1.28, height[i]);
+    const yellow = clamp01(fbm2D(dryN.n, x / dryN.k, y / dryN.k, 3) * 1.3 - 0.35);
     o[0] = base.r * l * lerp(1, 1.55, yellow) * 255;
     o[1] = base.g * l * lerp(1, 1.15, yellow) * 255;
     o[2] = base.b * l * lerp(1, 0.55, yellow) * 255;
@@ -351,6 +653,7 @@ export function grass({ size = 1024, seed = 61, tint = 0x4e8a3c } = {}) {
     normalMap: makeTexture(heightToNormal(height, size, 1.8)),
     roughnessMap: makeTexture(roughC),
     normalScale: 0.8,
+    meanLuma: meanLinearLuma(c),
   };
   _textureCache.set(key, result);
   return result;
@@ -387,7 +690,7 @@ export function rainbow({ size = 1024 } = {}) {
     const hue = mod(Math.floor(band) / 7 + 0.02, 1);
     const nextHue = mod((Math.floor(band) + 1) / 7 + 0.02, 1);
     const f = smoothstep(clamp01((band - Math.floor(band) - 0.72) / 0.28));
-    col.setHSL(lerp(hue, nextHue < hue ? nextHue + 1 : nextHue, f) % 1, 0.92, 0.56);
+    col.setHSL(lerp(hue, nextHue < hue ? nextHue + 1 : nextHue, f) % 1, 0.92, 0.56, THREE.NoColorSpace);
     const sp = fbm2D(spark, x / 3, y / 3, 2);
     const glint = sp > 0.88 ? (sp - 0.88) * 7 : 0;
     o[0] = (col.r + glint) * 255;
@@ -417,7 +720,7 @@ export function paintedMetal({ size = 512, seed = 3, tint = 0xdddddd } = {}) {
   if (_textureCache.has(key)) return _textureCache.get(key);
   const n = makeValueNoise2D(seed, size / 8);
   const scratch = makeValueNoise2D(seed + 40, size / 2);
-  const base = new THREE.Color(tint);
+  const base = paintTint(tint);
   const height = new Float32Array(size * size);
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {

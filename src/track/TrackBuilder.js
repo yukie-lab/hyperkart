@@ -16,6 +16,20 @@ const ROAD_COLS = 10;         // subdivisions across the driving surface
 const TERRAIN_STEP = 6.4;     // terrain rings are coarser than road rings
 const TERRAIN_COLS = 22;
 const TERRAIN_REACH = 260;    // how far the surrounding land extends
+const CURB_COLS = 6;          // enough columns to shape a crown and an outer lip
+
+/**
+ * Cross-section of a rumble strip, `u` running from the tarmac edge outward.
+ *
+ * A kerb is not a flat plate: it steps up off the road over a few centimetres,
+ * crowns, then rolls over an outer lip. Modelling that is what gives it a lit
+ * top and a shadowed under-edge for free, instead of asking a normal map to
+ * imply a silhouette it cannot produce. The outer value lands exactly on the
+ * shoulder's own starting height, so the kerb→run-off join has no cliff in it.
+ */
+function curbY(u) {
+  return lerp(0.0, 0.058, smoothstep(u / 0.16)) - 0.078 * smoothstep((u - 0.68) / 0.32);
+}
 
 export class TrackMesh {
   constructor(track, opts = {}) {
@@ -63,12 +77,17 @@ export class TrackMesh {
    * @param {(s:number, half:number)=>number} latB
    * @param {(u:number, s:number, lat:number)=>[number,number]} uvFn
    * @param {(s:number, lat:number, u:number)=>number} [yOffset]
+   * @param {{name:string, size:number, fn:(u:number,s:number,lat:number,half:number,p:THREE.Vector3)=>number[]}} [extra]
+   *        Optional custom vertex attribute. Surfaces that need to know where
+   *        they sit *on the circuit* (rather than in tile space) get it here —
+   *        macro wear has to live in road space or it repeats with the tile.
    */
-  _strip(sList, latA, latB, cols, uvFn, yOffset = null) {
+  _strip(sList, latA, latB, cols, uvFn, yOffset = null, extra = null) {
     const n = sList.length;
     const m = cols + 1;
     const positions = new Float32Array(n * m * 3);
     const uvs = new Float32Array(n * m * 2);
+    const extras = extra ? new Float32Array(n * m * extra.size) : null;
     const p = new THREE.Vector3();
 
     for (let i = 0; i < n; i++) {
@@ -85,6 +104,10 @@ export class TrackMesh {
         const [uu, vv] = uvFn(u, s, lat, half);
         const t = (i * m + j) * 2;
         uvs[t] = uu; uvs[t + 1] = vv;
+        if (extras) {
+          const vals = extra.fn(u, s, lat, half, p);
+          for (let q = 0; q < extra.size; q++) extras[(i * m + j) * extra.size + q] = vals[q];
+        }
       }
     }
 
@@ -101,6 +124,7 @@ export class TrackMesh {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    if (extras) geo.setAttribute(extra.name, new THREE.BufferAttribute(extras, extra.size));
     geo.setIndex(new THREE.BufferAttribute(indices, 1));
     geo.computeVertexNormals();
     geo.computeBoundingSphere();
@@ -135,8 +159,12 @@ export class TrackMesh {
       (s, half) => -(half - curbW),
       (s, half) => (half - curbW),
       ROAD_COLS,
-      // Constant texel density: one texture tile every 4 m in both axes.
+      // Constant texel density: one texture tile every 6 m in both axes.
       (u, s, lat) => [lat / 6, s / 6],
+      null,
+      // Road space, for the wear shader: signed 0..1 across the driving
+      // surface, metres travelled, and metres from the crown.
+      { name: 'aRoad', size: 3, fn: (u, s, lat, half) => [lat / Math.max(half - curbW, 0.01), s, lat] },
     );
 
     let mat;
@@ -156,12 +184,16 @@ export class TrackMesh {
       t.map.repeat.set(1, 1);
       t.emissiveMap.repeat.set(1, 1);
     } else {
-      const t = Tex.asphalt({ size: 1024, tint: 0x424244 });
+      // Dry asphalt sits around 0.07 linear albedo — roughly a ninth of the
+      // sand beside it, which is what keeps the circuit reading as a ribbon
+      // laid across the dunes rather than as another shade of them. Biased a
+      // touch blue so a low warm sun lands it on neutral grey instead of tan.
+      const t = Tex.asphalt({ size: 1024, tint: 0x4d4d54 });
       mat = this._mat({
         map: t.map,
         normalMap: t.normalMap,
         roughnessMap: t.roughnessMap,
-        normalScale: new THREE.Vector2(t.normalScale * 0.5, t.normalScale * 0.5),
+        normalScale: new THREE.Vector2(t.normalScale, t.normalScale),
         metalness: 0.0,
         roughness: 1.0,
         // Tarmac is not a mirror: a strong sky reflection here reads as wet
@@ -169,16 +201,128 @@ export class TrackMesh {
         envMapIntensity: 0.22,
         color: 0xffffff,
       });
+      this._asphaltWear(mat, t);
     }
     this.road = this._add(geo, mat, { receive: true });
     this.road.name = 'road';
+  }
+
+  /**
+   * Everything about the road that cannot live in a 6 m tile.
+   *
+   * A tile that repeats every 6 m goes past five times a second at racing
+   * speed, so anything recognisable baked into it strobes. The features that
+   * make a circuit read as a *place* — the rubbered-in line, resurfacing
+   * patches and their tar seams, bleached aggregate and dust at the margins —
+   * are therefore evaluated in road space here, on top of the tile.
+   *
+   * The same injection carries the anti-aliasing fix: the tile is sampled at
+   * two scales and the fine one is faded out at the distance where its
+   * footprint drops below a texel, with roughness widened to stand in for the
+   * relief that was lost. That is the ocean's two-scale trick applied to a
+   * surface that was crawling for exactly the same reason.
+   */
+  _asphaltWear(mat, tex) {
+    const grime = new THREE.Color(this.theme.groundColor ?? 0x8a7a5c);
+    // three keys its program cache on material *parameters*, so two standard
+    // materials that differ only in injected source would silently share one
+    // compiled shader — and the road would come out wearing the terrain's.
+    mat.customProgramCacheKey = () => 'hk-asphalt';
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uBaseLuma = { value: Math.max(tex.meanLuma ?? 0.05, 1e-3) };
+      shader.uniforms.uGrime = { value: grime };
+
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', `#include <common>
+attribute vec3 aRoad;
+varying vec3 vRoad;`)
+        .replace('#include <begin_vertex>', `#include <begin_vertex>
+vRoad = aRoad;`);
+
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `#include <common>
+varying vec3 vRoad;
+uniform float uBaseLuma;
+uniform vec3 uGrime;
+
+float hkHash( vec2 p ) {
+  p = fract( p * vec2( 0.3183099, 0.3678794 ) );
+  p += dot( p, p + 27.71 );
+  return fract( p.x * p.y * 41.31 );
+}
+float hkNoise( vec2 p ) {
+  vec2 i = floor( p ), f = fract( p );
+  f = f * f * ( 3.0 - 2.0 * f );
+  return mix( mix( hkHash( i ), hkHash( i + vec2( 1.0, 0.0 ) ), f.x ),
+              mix( hkHash( i + vec2( 0.0, 1.0 ) ), hkHash( i + vec2( 1.0, 1.0 ) ), f.x ), f.y );
+}`)
+        .replace('#include <map_fragment>', `#include <map_fragment>
+float rDist = length( vViewPosition );
+float rLane = vRoad.x;            // -1 at the left kerb, +1 at the right
+float rArc  = vRoad.y;            // metres travelled along the lap
+float rLat  = vRoad.z;            // metres from the crown
+
+// Rubber only lays down where the cars actually drive, and that band wanders
+// across the road with the corners instead of sitting dead centre.
+float rLineC  = 0.30 * sin( rArc * 0.0295 ) + 0.16 * sin( rArc * 0.0113 + 1.9 );
+float rRacing = 1.0 - smoothstep( 0.16, 0.72, abs( rLane - rLineC ) );
+rRacing *= 0.70 + 0.30 * hkNoise( vec2( rArc * 0.05, 0.0 ) );
+
+// The last metre before the kerb never gets driven on: bleached, open
+// aggregate, with dust and marbles swept into the very edge. Kept to the
+// last metre — any wider and it reads as a concrete gutter, not as wear.
+float rEdge  = smoothstep( 0.76, 1.0, abs( rLane ) );
+float rDirt  = smoothstep( 0.86, 1.0, abs( rLane ) );
+
+// Resurfacing patches, as a warped cell grid so the repairs come out as
+// irregular quads with tarred seams rather than a checkerboard.
+vec2 rCell = vec2( rLat, rArc ) / 13.0;
+rCell += ( vec2( hkNoise( rCell * 1.7 ), hkNoise( rCell * 1.7 + 5.3 ) ) - 0.5 ) * 0.7;
+float rPatch = step( 0.70, hkHash( floor( rCell ) + 0.5 ) );
+vec2 rF = fract( rCell );
+float rSeamD = min( min( rF.x, 1.0 - rF.x ), min( rF.y, 1.0 - rF.y ) );
+// A 15 cm seam is sub-pixel well before it is out of sight, so widen it in
+// screen space rather than letting it break into a dotted line.
+float rSeam = rPatch * ( 1.0 - smoothstep( 0.0, max( 0.010, fwidth( rSeamD ) * 1.6 ), rSeamD ) );
+rPatch *= smoothstep( 0.0, 0.05, rSeamD );
+
+// Second sample of the same tile six times larger, pivoted on the tile's own
+// mean so it adds 35 m of tonal drift without moving the road's brightness.
+float rMacro = dot( texture2D( map, vMapUv * 0.17 ).rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
+diffuseColor.rgb *= mix( 1.0, rMacro / uBaseLuma, 0.34 );
+
+diffuseColor.rgb *= mix( 1.0, 0.74, rRacing );
+diffuseColor.rgb *= mix( 1.0, 1.12, rEdge );
+diffuseColor.rgb  = mix( diffuseColor.rgb, diffuseColor.rgb * 0.94 + uGrime * 0.055, rDirt );
+diffuseColor.rgb *= mix( 1.0, 0.90, rPatch );
+diffuseColor.rgb *= mix( 1.0, 0.58, rSeam );`)
+        .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+float rFine = 1.0 - smoothstep( 8.0, 44.0, rDist );
+// Relief that has fallen off the end of the mip chain still scatters light.
+// Widening the lobe to stand in for it is what stops the far road flattening
+// into plastic once the chippings stop resolving — but only part way: pushing
+// it all the way to 1.0 also kills the long sun sheen that sells dry tarmac.
+roughnessFactor = mix( roughnessFactor, 0.90, ( 1.0 - rFine ) * 0.30 );
+roughnessFactor = mix( roughnessFactor, 0.56, rRacing * 0.80 );
+roughnessFactor = mix( roughnessFactor, 0.98, rEdge * 0.35 );
+roughnessFactor = mix( roughnessFactor, 0.52, rSeam );
+roughnessFactor = clamp( roughnessFactor, 0.05, 1.0 );`)
+        .replace('#include <normal_fragment_maps>', `vec3 rMapN = texture2D( normalMap, vNormalMapUv ).xyz * 2.0 - 1.0;
+vec3 rMacN = texture2D( normalMap, vNormalMapUv * 0.17 ).xyz * 2.0 - 1.0;
+// Two scales: the 35 m sample carries settlement and rutting and can never
+// alias, the 6 m sample carries the chippings and is faded out where its
+// footprint drops below a texel. Rubber fills the voids on the racing line,
+// so the relief there is flattened too.
+vec2 rN = rMacN.xy * 0.30 + rMapN.xy * rFine * mix( 1.0, 0.45, rRacing );
+normal = normalize( tbn * vec3( rN * normalScale, 1.0 ) );`);
+    };
   }
 
   _buildCurbs() {
     if (this.theme.shoulder === 'none' && this.track.isVoid) return;
     const rings = this._roadRings();
     const curbW = TRACK_LAYOUT.curbWidth;
-    const t = Tex.curb({ size: 512 });
+    const t = Tex.curb({ size: 512, dirtTint: this.theme.groundColor ?? 0x8a7a5c });
     const mat = this._mat({
       map: t.map,
       normalMap: t.normalMap,
@@ -194,11 +338,10 @@ export class TrackMesh {
         rings,
         (s, half) => side * (half - curbW),
         (s, half) => side * half,
-        2,
+        CURB_COLS,
         // 8 stripes per texture tile, tiled every 8 m => 1 m stripes.
         (u, s) => [u, s / 8],
-        // Curbs sit a few centimetres proud of the road.
-        (s, lat, u) => 0.035 * smoothstep(u),
+        (s, lat, u) => curbY(u),
       );
       this._add(geo, mat).name = `curb_${side}`;
     }
@@ -212,9 +355,13 @@ export class TrackMesh {
     t.map.repeat.set(1, 1);
     const mat = new THREE.MeshStandardMaterial({
       map: t.map,
+      alphaMap: t.alphaMap,
+      normalMap: t.normalMap,
+      roughnessMap: t.roughnessMap,
+      normalScale: new THREE.Vector2(t.normalScale, t.normalScale),
       transparent: true,
       opacity: 0.92,
-      roughness: 0.62,
+      roughness: 1.0,
       metalness: 0.0,
       depthWrite: false,
       polygonOffset: true,
@@ -240,7 +387,7 @@ export class TrackMesh {
     const texFn = this.theme.shoulder === 'dirt' ? Tex.dirt
       : this.theme.shoulder === 'sand' ? Tex.sand
       : Tex.grass;
-    const t = texFn({ size: 1024 });
+    const t = texFn({ size: 1024, tint: this.theme.groundColor });
     const mat = this._mat({
       map: t.map,
       normalMap: t.normalMap,
@@ -250,6 +397,7 @@ export class TrackMesh {
       roughness: 1.0,
       envMapIntensity: 0.5,
     });
+    this._groundWear(mat, t, { tile: 5, cacheKey: 'shoulder' });
 
     for (const side of [-1, 1]) {
       const geo = this._strip(
@@ -260,9 +408,88 @@ export class TrackMesh {
         (u, s, lat) => [lat / 5, s / 5],
         // The apron falls away from the road edge so it reads as a run-off.
         (s, lat, u) => -0.38 * smoothstep(u) - 0.02,
+        // World height (for the waterline) and metres out from the tarmac.
+        { name: 'aGround', size: 2, fn: (u, s, lat, half, p) => [p.y, u * shoulderW] },
       );
       this._add(geo, mat).name = `shoulder_${side}`;
     }
+  }
+
+  /**
+   * Shared treatment for every off-track surface: shoulders and terrain.
+   *
+   * Three jobs, all of which need to know where a fragment is in the *world*
+   * rather than in its tile:
+   *
+   *  - Break the repeat. The terrain tiles every 14 m across half a kilometre
+   *    of dune, which the eye picks up instantly as wallpaper. A second sample
+   *    of the same map five times larger, pivoted on the map's own mean so the
+   *    ground's brightness does not move, buys 70 m of drift over the top.
+   *  - Hold still. Same fix as the road: fade the fine normal out once its
+   *    footprint drops under a texel and widen the specular lobe to stand in
+   *    for the relief that was lost.
+   *  - Meet its neighbours. Sand is compacted and rubber-stained for the first
+   *    couple of metres off the tarmac, and damp for the last couple above the
+   *    waterline, so both joins are a gradient rather than a polygon edge.
+   */
+  _groundWear(mat, tex, { tile, waterLevel = null, cacheKey }) {
+    mat.customProgramCacheKey = () => `hk-ground-${cacheKey}`;
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uBaseLuma = { value: Math.max(tex.meanLuma ?? 0.2, 1e-3) };
+      // Far below any geometry disables the damp band without a second shader.
+      shader.uniforms.uWater = { value: waterLevel ?? -1e6 };
+      shader.uniforms.uTile = { value: 1 / tile };
+
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', `#include <common>
+attribute vec2 aGround;
+varying vec2 vGround;`)
+        .replace('#include <begin_vertex>', `#include <begin_vertex>
+vGround = aGround;`);
+
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `#include <common>
+varying vec2 vGround;
+uniform float uBaseLuma;
+uniform float uWater;
+uniform float uTile;`)
+        .replace('#include <map_fragment>', `#include <map_fragment>
+float gDist = length( vViewPosition );
+float gWorldY = vGround.x;
+float gOut = vGround.y;          // metres out from the edge of the tarmac
+
+float gMacro = dot( texture2D( map, vMapUv * 0.19 ).rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
+diffuseColor.rgb *= mix( 1.0, gMacro / uBaseLuma, 0.40 );
+
+// Ground UVs are world XZ, so anything steep is drawn through a badly
+// stretched sample. Re-project the steep parts against height instead.
+vec3 gUp = normalize( mat3( viewMatrix ) * vec3( 0.0, 1.0, 0.0 ) );
+float gSlope = smoothstep( 0.30, 0.80, 1.0 - abs( dot( normalize( vNormal ), gUp ) ) );
+if ( gSlope > 0.001 ) {
+  vec2 gWallUv = vec2( vMapUv.x + vMapUv.y, gWorldY * uTile );
+  diffuseColor.rgb = mix( diffuseColor.rgb, texture2D( map, gWallUv ).rgb, gSlope );
+}
+
+// Karts leave the circuit here: the first couple of metres are packed flat
+// and stained, which is what makes the run-off look used instead of laid.
+float gEdge = 1.0 - smoothstep( 0.0, 2.4, gOut );
+diffuseColor.rgb *= mix( 1.0, 0.76, gEdge );
+
+// Damp sand above the tideline: darker, deeper, and it holds a sheen.
+float gWet = 1.0 - smoothstep( 0.0, 2.4, gWorldY - uWater );
+diffuseColor.rgb *= mix( vec3( 1.0 ), vec3( 0.60, 0.55, 0.53 ), gWet );`)
+        .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+float gFine = 1.0 - smoothstep( 24.0, 130.0, gDist );
+roughnessFactor = mix( roughnessFactor, 0.99, ( 1.0 - gFine ) * 0.35 );
+roughnessFactor = mix( roughnessFactor, 1.00, gEdge * 0.40 );
+roughnessFactor = mix( roughnessFactor, 0.30, gWet );
+roughnessFactor = clamp( roughnessFactor, 0.05, 1.0 );`)
+        .replace('#include <normal_fragment_maps>', `vec3 gN = texture2D( normalMap, vNormalMapUv ).xyz * 2.0 - 1.0;
+vec3 gM = texture2D( normalMap, vNormalMapUv * 0.19 ).xyz * 2.0 - 1.0;
+// Water fills the ripples in; packed run-off has been flattened by tyres.
+vec2 gNxy = ( gM.xy * 0.55 + gN.xy * gFine ) * mix( 1.0, 0.30, max( gWet, gEdge * 0.7 ) );
+normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
+    };
   }
 
   _buildBarriers() {
@@ -482,6 +709,7 @@ export class TrackMesh {
     const m = cols + 1;
     const positions = new Float32Array(n * m * 3);
     const uvs = new Float32Array(n * m * 2);
+    const ground = new Float32Array(n * m * 2);
     const p = new THREE.Vector3();
 
     for (let i = 0; i < n; i++) {
@@ -502,6 +730,9 @@ export class TrackMesh {
         positions[kk] = p.x; positions[kk + 1] = p.y; positions[kk + 2] = p.z;
         const t = (i * m + j) * 2;
         uvs[t] = p.x / 14; uvs[t + 1] = p.z / 14;
+        // World height drives the damp band; the terrain starts a shoulder's
+        // width out, so its "distance from the tarmac" carries that offset.
+        ground[t] = p.y; ground[t + 1] = wallOffset + d;
       }
     }
 
@@ -520,6 +751,7 @@ export class TrackMesh {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
     geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    geo.setAttribute('aGround', new THREE.BufferAttribute(ground, 2));
     geo.setIndex(new THREE.BufferAttribute(idx.slice(0, ptr), 1));
     geo.computeVertexNormals();
     geo.computeBoundingSphere();
@@ -530,6 +762,11 @@ export class TrackMesh {
       map: t.map, normalMap: t.normalMap, roughnessMap: t.roughnessMap,
       normalScale: new THREE.Vector2(t.normalScale, t.normalScale),
       metalness: 0.0, roughness: 1.0, envMapIntensity: 0.55,
+    });
+    this._groundWear(mat, t, {
+      tile: 14,
+      waterLevel: isCoast && this.theme.water?.enabled ? waterLevel : null,
+      cacheKey: 'terrain',
     });
     this._add(geo, mat, { receive: true }).name = 'terrain';
 
@@ -608,11 +845,12 @@ export class TrackMesh {
 /** Rewrite the U channel of a road strip as a 0..1 span across the road. */
 function remapU(geo, track, fn) {
   const uv = geo.attributes.uv;
-  const pos = geo.attributes.position;
-  // The strip was generated with u = lat/4; recover lat and renormalise.
+  // The strip was generated with u = lat/6, v = s/6; recover both and
+  // renormalise. (This read 4, so the seven bands used to stop short of the
+  // road edge and the whole pattern crawled forward against the geometry.)
   for (let i = 0; i < uv.count; i++) {
-    const lat = uv.getX(i) * 4;
-    const s = uv.getY(i) * 4;
+    const lat = uv.getX(i) * 6;
+    const s = uv.getY(i) * 6;
     const half = track.halfWidthAt(s);
     uv.setXY(i, fn(lat, half), s / 10);
   }
