@@ -87,6 +87,7 @@ const autoDriver = autopilot ? new AIDriver(race.player, race.track, { skill: 0.
 
 let lookBack = false;
 let shakeImpulse = 0;
+let dipImpulse = 0;
 let hitFlash = 0;
 
 // --- Loop ------------------------------------------------------------------
@@ -120,9 +121,10 @@ const loop = new Loop({
     if (race.state === RACE_STATE.FINISHED && p.finished) {
       chase.updateOrbit(dt, p.visualPos, loop.simTime);
     } else {
-      chase.update(dt, p, { lookBack, shakeImpulse });
+      chase.update(dt, p, { lookBack, shakeImpulse, dipImpulse });
     }
     shakeImpulse = 0;
+    dipImpulse = 0;
 
     sky.follow(camera.position);
     sky.update(dt, loop.simTime);
@@ -172,7 +174,12 @@ function handleEvents(events) {
         }
         break;
       case 'land':
-        if (e.kart === race.player) shakeImpulse = Math.min(0.4, e.impact * 0.4);
+        // A landing is a compression, not a rattle: the rig drops into the
+        // suspension and recovers. Shake alone reads as hitting a pothole.
+        if (e.kart === race.player) {
+          shakeImpulse = Math.min(0.22, e.impact * 0.22);
+          dipImpulse = Math.min(0.6, e.impact * 0.55);
+        }
         break;
       case 'finish':
         if (e.kart === race.player) hud.toast(`FINISH — ${e.place}${ordinalSuffix(e.place)}`, '#ffd75e');
