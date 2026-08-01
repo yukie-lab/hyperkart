@@ -112,20 +112,42 @@ export const RESPAWN = {
  * Per-character stat lines. Weight affects collisions, handling scales the
  * steer rate, and the speed/accel trade-off is the classic heavy-vs-light
  * spread. Values are multipliers on the DRIVE base.
+ *
+ * The second half of each row is pure presentation and is consumed only by
+ * KartModel. Hue alone is not identity: at 1080p, from behind, at speed, what
+ * separates one rival from another is silhouette. So every character also
+ * picks a chassis `build` (track width, ride height, bodywork depth), a `wing`
+ * (the tallest thing on the kart and therefore the first thing read), a
+ * `helmet` profile and a `livery` pattern. Builds and wings are cached by
+ * shape, so twelve karts still cost a handful of geometry buffers.
  */
 export const CHARACTERS = [
-  { id: 'nova',   name: 'Nova',   weight: 1.00, speed: 1.00, accel: 1.00, handling: 1.00, color: 0xff3b57, accent: 0xffe14d, cls: 'medium' },
-  { id: 'blitz',  name: 'Blitz',  weight: 0.82, speed: 0.95, accel: 1.14, handling: 1.12, color: 0x30d0ff, accent: 0xffffff, cls: 'light' },
-  { id: 'boulder',name: 'Boulder',weight: 1.30, speed: 1.08, accel: 0.86, handling: 0.88, color: 0x8b5a2b, accent: 0xffb020, cls: 'heavy' },
-  { id: 'iris',   name: 'Iris',   weight: 0.90, speed: 0.97, accel: 1.08, handling: 1.08, color: 0xc06bff, accent: 0x60ffd0, cls: 'light' },
-  { id: 'rook',   name: 'Rook',   weight: 1.18, speed: 1.05, accel: 0.92, handling: 0.94, color: 0x2b3f8b, accent: 0xff5a3c, cls: 'heavy' },
-  { id: 'sprig',  name: 'Sprig',  weight: 0.86, speed: 0.96, accel: 1.12, handling: 1.10, color: 0x4ad46a, accent: 0xfff0a0, cls: 'light' },
-  { id: 'ember',  name: 'Ember',  weight: 1.02, speed: 1.02, accel: 0.99, handling: 0.99, color: 0xff7a1a, accent: 0x2b1b12, cls: 'medium' },
-  { id: 'frost',  name: 'Frost',  weight: 1.06, speed: 1.03, accel: 0.96, handling: 0.97, color: 0xa8e8ff, accent: 0x2060a0, cls: 'medium' },
-  { id: 'tarmac', name: 'Tarmac', weight: 1.24, speed: 1.06, accel: 0.89, handling: 0.91, color: 0x3a3f46, accent: 0xd8ff40, cls: 'heavy' },
-  { id: 'pixel',  name: 'Pixel',  weight: 0.94, speed: 0.99, accel: 1.05, handling: 1.05, color: 0xff5fa8, accent: 0x40e0ff, cls: 'medium' },
-  { id: 'volt',   name: 'Volt',   weight: 0.88, speed: 0.98, accel: 1.10, handling: 1.09, color: 0xffe321, accent: 0x1a1a2e, cls: 'light' },
-  { id: 'onyx',   name: 'Onyx',   weight: 1.34, speed: 1.10, accel: 0.84, handling: 0.86, color: 0x1a1a22, accent: 0x9b30ff, cls: 'heavy' },
+  { id: 'nova',   name: 'Nova',   weight: 1.00, speed: 1.00, accel: 1.00, handling: 1.00, color: 0xff3b57, accent: 0xffe14d, cls: 'medium',
+    build: 'gt',      wing: 'swan',     helmet: 'aero',   livery: 'bolt',    num: 1 },
+  { id: 'blitz',  name: 'Blitz',  weight: 0.82, speed: 0.95, accel: 1.14, handling: 1.12, color: 0x30d0ff, accent: 0xffffff, cls: 'light',
+    build: 'dart',    wing: 'ducktail', helmet: 'crest',  livery: 'chevron', num: 7 },
+  { id: 'boulder',name: 'Boulder',weight: 1.30, speed: 1.08, accel: 0.86, handling: 0.88, color: 0x8b5a2b, accent: 0xffb020, cls: 'heavy',
+    build: 'bruiser', wing: 'slab',     helmet: 'bucket', livery: 'blocks',  num: 44 },
+  { id: 'iris',   name: 'Iris',   weight: 0.90, speed: 0.97, accel: 1.08, handling: 1.08, color: 0xc06bff, accent: 0x60ffd0, cls: 'light',
+    build: 'dart',    wing: 'swan',     helmet: 'aero',   livery: 'wave',    num: 12 },
+  { id: 'rook',   name: 'Rook',   weight: 1.18, speed: 1.05, accel: 0.92, handling: 0.94, color: 0x2b3f8b, accent: 0xff5a3c, cls: 'heavy',
+    build: 'bruiser', wing: 'gt',       helmet: 'horn',   livery: 'stripe',  num: 3 },
+  { id: 'sprig',  name: 'Sprig',  weight: 0.86, speed: 0.96, accel: 1.12, handling: 1.10, color: 0x4ad46a, accent: 0xfff0a0, cls: 'light',
+    build: 'dart',    wing: 'gt',       helmet: 'dome',   livery: 'leaf',    num: 9 },
+  { id: 'ember',  name: 'Ember',  weight: 1.02, speed: 1.02, accel: 0.99, handling: 0.99, color: 0xff7a1a, accent: 0x2b1b12, cls: 'medium',
+    build: 'gt',      wing: 'gt',       helmet: 'dome',   livery: 'flame',   num: 5 },
+  { id: 'frost',  name: 'Frost',  weight: 1.06, speed: 1.03, accel: 0.96, handling: 0.97, color: 0xa8e8ff, accent: 0x2060a0, cls: 'medium',
+    build: 'gt',      wing: 'swan',     helmet: 'crest',  livery: 'shard',   num: 21 },
+  { id: 'tarmac', name: 'Tarmac', weight: 1.24, speed: 1.06, accel: 0.89, handling: 0.91, color: 0x3a3f46, accent: 0xd8ff40, cls: 'heavy',
+    build: 'bruiser', wing: 'ducktail', helmet: 'bucket', livery: 'hazard',  num: 88 },
+  { id: 'pixel',  name: 'Pixel',  weight: 0.94, speed: 0.99, accel: 1.05, handling: 1.05, color: 0xff5fa8, accent: 0x40e0ff, cls: 'medium',
+    build: 'gt',      wing: 'ducktail', helmet: 'crest',  livery: 'pixel',   num: 16 },
+  { id: 'volt',   name: 'Volt',   weight: 0.88, speed: 0.98, accel: 1.10, handling: 1.09, color: 0xffe321, accent: 0x1a1a2e, cls: 'light',
+    build: 'dart',    wing: 'slab',     helmet: 'crest',  livery: 'bolt',    num: 8 },
+  { id: 'onyx',   name: 'Onyx',   weight: 1.34, speed: 1.10, accel: 0.84, handling: 0.86, color: 0x1a1a22, accent: 0x9b30ff, cls: 'heavy',
+    build: 'bruiser', wing: 'slab',     helmet: 'horn',   livery: 'carbon',  num: 13 },
+  // No two rows share build+wing+helmet. From behind at 108 km/h that triple
+  // is the whole of a rival's identity; colour is only the tiebreak.
 ];
 
 export function statsFor(characterId) {
