@@ -1,0 +1,10 @@
+node_modules/
+dist/
+
+# Capture output. These are large, regenerable, and change on every run because
+# adaptive resolution reacts to real frame timing — see tools/imgstat.mjs.
+shots/
+*.png
+
+.claude/settings.local.json
+.DS_Store

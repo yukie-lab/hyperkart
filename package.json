@@ -1,0 +1,19 @@
+{
+  "name": "hyperkart",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port 5178 --strictPort",
+    "build": "vite build",
+    "preview": "vite preview --port 5179 --strictPort",
+    "shot": "node tools/shot.mjs"
+  },
+  "dependencies": {
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1",
+    "vite": "^8.2.0"
+  }
+}
