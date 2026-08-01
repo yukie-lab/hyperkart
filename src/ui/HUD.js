@@ -1,5 +1,4 @@
-import { clamp01, lerp, mod } from '../core/MathX.js';
-import { DRIFT } from '../kart/KartTuning.js';
+import { clamp01 } from '../core/MathX.js';
 
 /**
  * HUD.
@@ -8,94 +7,519 @@ import { DRIFT } from '../kart/KartTuning.js';
  * any resolution and costs nothing in the 3D pass. The minimap is the one
  * canvas element, redrawn at a reduced rate since it only needs to convey
  * relative position.
+ *
+ * Two rules govern everything below.
+ *
+ * 1. LEGIBILITY IS NOT OPTIONAL. The HUD floats over pale sand, black
+ *    asphalt, bright water and a magenta nebula within a single race, so no
+ *    element may rely on the background being dark. Every text cluster
+ *    carries its own local scrim plus a stacked dark shadow, and every panel
+ *    has an opaque-enough plate. White-on-white is a bug, not a style.
+ *
+ * 2. THE HOT PATH IS SACRED. update() runs on every rendered frame. Anything
+ *    that reads layout (offsetWidth, getBoundingClientRect, getTotalLength),
+ *    parses markup (innerHTML) or writes an unchanged value is forbidden
+ *    there. All of that happens at construction or behind a change guard, and
+ *    state-change flourishes are one-shot Web Animations so the compositor
+ *    owns them instead of the main thread.
  */
 
+// Unique-per-instance suffix for SVG gradient ids. Two HUDs in one document
+// (menu preview + race) would otherwise collide on `url(#...)` references,
+// and the second one silently renders unfilled black shapes.
+let UID = 0;
+
 const CSS = `
-.hk-hud { position:absolute; inset:0; font-family: "Inter", system-ui, -apple-system, sans-serif;
-  color:#fff; user-select:none; -webkit-user-select:none; }
+.hk-hud {
+  /* --u is the whole type/space scale. Pure vmin looks right at 1080p but
+     goes illegible at 720p and cartoonishly large at 1440p+, so it is clamped
+     at both ends and every size below is a multiple of it. */
+  --u: clamp(6.6px, 1vmin, 12.2px);
+
+  --gold:#ffd45c; --gold-2:#ff9c22; --gold-3:#b45a00;
+  --ice:#8fe9ff;  --ice-2:#2ba6ff;
+  --hot:#ff6a3a;  --gain:#5df2a0;  --loss:#ff5c78;
+  --plate:rgba(8,14,26,.55);
+  --edge:rgba(255,255,255,.30);
+
+  /* Optical margins. Unlike the type scale these stay a pure fraction of the
+     viewport — a title-safe margin is a property of the screen, not of the
+     text, so a clamped unit would let the HUD hug the bezel at 4K. Notched
+     displays get pushed in further by the env() insets. */
+  --gx: 2.8vmin;
+  --gy: 2.4vmin;
+  --sl: calc(var(--gx) + env(safe-area-inset-left, 0px));
+  --sr: calc(var(--gx) + env(safe-area-inset-right, 0px));
+  --st: calc(var(--gy) + env(safe-area-inset-top, 0px));
+  --sb: calc(var(--gy) + env(safe-area-inset-bottom, 0px));
+
+  /* The universal dark halo. Three stacked shadows read as an outline plus a
+     cast shadow, which survives both a white sky and a black tunnel. */
+  --halo: 0 0 calc(var(--u)*.55) rgba(0,0,0,.95),
+          0 calc(var(--u)*.2) calc(var(--u)*.6) rgba(0,0,0,.85),
+          0 calc(var(--u)*.6) calc(var(--u)*1.8) rgba(0,0,0,.6);
+  --haloF: drop-shadow(0 0 calc(var(--u)*.34) rgba(0,0,0,.95))
+           drop-shadow(0 calc(var(--u)*.22) calc(var(--u)*.55) rgba(0,0,0,.8))
+           drop-shadow(0 calc(var(--u)*.7) calc(var(--u)*1.7) rgba(0,0,0,.55));
+
+  position:absolute; inset:0; color:#fff; user-select:none; -webkit-user-select:none;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* Tabular figures everywhere: without them the speed readout jitters
+     horizontally every time a 1 replaces a 0. */
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings:"tnum" 1,"lnum" 1,"ss01" 1;
+  font-synthesis: none;
+}
 .hk-hud * { box-sizing:border-box; }
 
-.hk-pos { position:absolute; left:2.2vmin; bottom:2.2vmin; display:flex; align-items:baseline;
-  text-shadow:0 0.4vmin 1.6vmin rgba(0,0,0,.75), 0 0 .4vmin rgba(0,0,0,.5); }
-.hk-pos-num { font-size:13vmin; font-weight:900; line-height:.82; letter-spacing:-.04em;
-  background:linear-gradient(180deg,#fff 25%,#ffd75e 62%,#ff9a1f 100%);
-  -webkit-background-clip:text; background-clip:text; color:transparent;
-  filter:drop-shadow(0 .3vmin .5vmin rgba(0,0,0,.55)); }
-.hk-pos-ord { font-size:4.6vmin; font-weight:800; margin-left:.4vmin; color:#ffd75e;
-  filter:drop-shadow(0 .3vmin .5vmin rgba(0,0,0,.55)); }
+/* Shared micro-label: the small tracked-out caps above each readout. */
+.hk-cap { font-size:calc(var(--u)*1.55); font-weight:800; letter-spacing:.30em;
+  line-height:1; text-transform:uppercase; opacity:.78; text-shadow:var(--halo); }
 
-.hk-lap { position:absolute; left:2.4vmin; top:2.2vmin; text-shadow:0 .3vmin 1.2vmin rgba(0,0,0,.8); }
-.hk-lap-label { font-size:1.9vmin; font-weight:800; letter-spacing:.28em; opacity:.85; }
-.hk-lap-val { font-size:5.4vmin; font-weight:900; line-height:.95; letter-spacing:-.02em; }
-.hk-lap-val small { font-size:3vmin; opacity:.7; font-weight:800; }
+/* ---- CORNER WASHES -------------------------------------------------------
+   Four soft ellipses that give every corner cluster a contrast floor over a
+   white sky or a bleached sand straight. They are their own elements rather
+   than backgrounds on the clusters because a gradient painted inside a text
+   box always reveals that box's edge, and a faint grey rectangle behind the
+   lap counter looks worse than no scrim at all. Each is deliberately sized
+   past the viewport, so the only hard edge is the screen edge. */
+.hk-wash { position:absolute; pointer-events:none; }
+.w-tl { left:0; top:0; width:calc(var(--u)*36); height:calc(var(--u)*27);
+  background:radial-gradient(ellipse 100% 100% at 0% 0%, rgba(3,7,16,.72), rgba(3,7,16,.36) 42%, rgba(3,7,16,0) 100%); }
+.w-tr { right:0; top:0; width:calc(var(--u)*33); height:calc(var(--u)*42);
+  background:radial-gradient(ellipse 100% 100% at 100% 0%, rgba(3,7,16,.66), rgba(3,7,16,.32) 44%, rgba(3,7,16,0) 100%); }
+.w-bl { left:0; bottom:0; width:calc(var(--u)*38); height:calc(var(--u)*40);
+  background:radial-gradient(ellipse 100% 100% at 0% 100%, rgba(3,7,16,.74), rgba(3,7,16,.38) 42%, rgba(3,7,16,0) 100%); }
+.w-br { right:0; bottom:0; width:calc(var(--u)*38); height:calc(var(--u)*35);
+  background:radial-gradient(ellipse 100% 100% at 100% 100%, rgba(3,7,16,.70), rgba(3,7,16,.34) 42%, rgba(3,7,16,0) 100%); }
+.w-tc { left:50%; top:0; width:calc(var(--u)*30); height:calc(var(--u)*24); transform:translateX(-50%);
+  background:radial-gradient(ellipse 60% 100% at 50% 0%, rgba(3,7,16,.52), rgba(3,7,16,0) 100%); }
 
-.hk-item { position:absolute; left:50%; top:2.2vmin; transform:translateX(-50%);
-  width:13vmin; height:13vmin; border-radius:2.4vmin;
-  background:radial-gradient(circle at 50% 30%, rgba(255,255,255,.28), rgba(255,255,255,.06) 60%, rgba(0,0,0,.28));
-  border:.36vmin solid rgba(255,255,255,.55);
-  box-shadow:0 .8vmin 2.4vmin rgba(0,0,0,.5), inset 0 0 2vmin rgba(255,255,255,.22);
-  backdrop-filter:blur(6px); display:flex; align-items:center; justify-content:center;
-  transition:transform .18s cubic-bezier(.2,1.6,.4,1); }
-.hk-item.spin { animation:hkSpin .28s linear infinite; }
-.hk-item.pop { transform:translateX(-50%) scale(1.16); }
-@keyframes hkSpin { 0%{filter:hue-rotate(0)} 100%{filter:hue-rotate(360deg)} }
-.hk-item-icon { font-size:7.4vmin; line-height:1; filter:drop-shadow(0 .4vmin .8vmin rgba(0,0,0,.55)); }
-.hk-item-count { position:absolute; right:-.6vmin; bottom:-.6vmin; min-width:4vmin; height:4vmin;
-  border-radius:2vmin; background:#ff9a1f; border:.3vmin solid #fff; color:#3a1e00;
-  font-size:2.4vmin; font-weight:900; display:flex; align-items:center; justify-content:center;
-  box-shadow:0 .4vmin 1vmin rgba(0,0,0,.5); }
+/* ---- LAP (top-left) ------------------------------------------------------
+   Lap and position are the two values a player reads mid-corner, so they get
+   the largest type and the strongest contrast treatment. */
+.hk-lap { position:absolute; left:var(--sl); top:var(--st); }
+.hk-lap-row { display:flex; align-items:baseline; gap:calc(var(--u)*.2); margin-top:calc(var(--u)*.4); }
+.hk-lap-val { font-size:calc(var(--u)*8.4); font-weight:900; line-height:.82; letter-spacing:-.04em;
+  text-shadow:var(--halo); }
+.hk-lap-sep { font-size:calc(var(--u)*4.0); font-weight:900; opacity:.4; line-height:1;
+  text-shadow:var(--halo); }
+.hk-lap-tot { font-size:calc(var(--u)*3.6); font-weight:900; opacity:.66; line-height:1;
+  text-shadow:var(--halo); }
+/* A short accent rule under the label anchors the cluster to the corner. */
+.hk-lap-rule { width:calc(var(--u)*4.4); height:calc(var(--u)*.34); margin-bottom:calc(var(--u)*.7);
+  background:linear-gradient(90deg,var(--gold),rgba(255,212,92,0));
+  box-shadow:0 0 calc(var(--u)*.8) rgba(255,180,60,.5); }
+.hk-hud.final .hk-lap-rule { background:linear-gradient(90deg,var(--hot),rgba(255,106,58,0));
+  box-shadow:0 0 calc(var(--u)*1.1) rgba(255,106,58,.75); }
+.hk-hud.final .hk-lap-val { color:#ffd9c8; }
 
-.hk-speed { position:absolute; right:2.4vmin; bottom:2.2vmin; width:26vmin; height:26vmin; }
-.hk-speed svg { position:absolute; inset:0; overflow:visible; }
-.hk-speed-num { position:absolute; left:0; right:0; top:53%; text-align:center;
-  font-size:7.2vmin; font-weight:900; letter-spacing:-.04em; line-height:1;
-  text-shadow:0 .4vmin 1.4vmin rgba(0,0,0,.8); }
-.hk-speed-unit { position:absolute; left:0; right:0; top:76%; text-align:center;
-  font-size:1.8vmin; font-weight:800; letter-spacing:.3em; opacity:.72; }
+/* ---- ITEM SLOT (top-centre) ---------------------------------------------
+   Chamfered rather than rounded: the bevel is what separates "designed frame"
+   from "div with border-radius". Built as two clipped layers so the bevel has
+   a real edge — a border on a clip-path element gets clipped away. */
+.hk-item { position:absolute; left:50%; top:var(--st); transform:translateX(-50%);
+  width:calc(var(--u)*13.4); height:calc(var(--u)*13.4);
+  --chamfer: calc(var(--u)*2.6);
+  --rim:#9fb4cc;
+  /* The zero-offset shadow is an outline in disguise: it is what stops the
+     frame dissolving into a white sky or a bleached sand straight. */
+  filter:drop-shadow(0 0 calc(var(--u)*.3) rgba(0,0,0,.9))
+         drop-shadow(0 calc(var(--u)*1) calc(var(--u)*2.4) rgba(0,0,0,.6)); }
+.hk-item-frame { position:absolute; inset:0;
+  clip-path:polygon(var(--chamfer) 0,calc(100% - var(--chamfer)) 0,100% var(--chamfer),
+    100% calc(100% - var(--chamfer)),calc(100% - var(--chamfer)) 100%,var(--chamfer) 100%,
+    0 calc(100% - var(--chamfer)),0 var(--chamfer));
+  background-image:linear-gradient(152deg,#ffffff 0%,var(--rim) 26%,rgba(255,255,255,.55) 48%,
+    var(--rim) 70%,rgba(34,48,70,.95) 100%);
+  transition:background-image .25s linear, opacity .25s linear; }
+/* Dimmed, not blank: an empty slot has to look like a state, not a bug. */
+.hk-item.empty .hk-item-frame { opacity:.62; }
+.hk-item.rolling .hk-item-frame { background-image:linear-gradient(152deg,#ffffff 0%,#8fe9ff 30%,
+  rgba(255,255,255,.7) 50%,#2ba6ff 78%,rgba(20,40,70,.95) 100%); }
+.hk-item.empty .hk-item-well { background:
+    radial-gradient(ellipse 90% 70% at 50% 8%, rgba(255,255,255,.10), rgba(255,255,255,0) 62%),
+    linear-gradient(180deg, rgba(12,20,34,.62), rgba(4,7,14,.72)); }
+.hk-item-well { position:absolute; inset:calc(var(--u)*.34);
+  clip-path:polygon(calc(var(--chamfer) - var(--u)*.34) 0,calc(100% - var(--chamfer) + var(--u)*.34) 0,
+    100% calc(var(--chamfer) - var(--u)*.34),100% calc(100% - var(--chamfer) + var(--u)*.34),
+    calc(100% - var(--chamfer) + var(--u)*.34) 100%,calc(var(--chamfer) - var(--u)*.34) 100%,
+    0 calc(100% - var(--chamfer) + var(--u)*.34),0 calc(var(--chamfer) - var(--u)*.34));
+  background:
+    radial-gradient(ellipse 90% 70% at 50% 8%, rgba(255,255,255,.20), rgba(255,255,255,0) 62%),
+    linear-gradient(180deg, rgba(16,26,44,.78), rgba(5,9,18,.86));
+  backdrop-filter:blur(calc(var(--u)*.7)) saturate(1.15);
+  overflow:hidden; }
+/* Corner brackets — four hairlines that read as machined tooling marks. */
+.hk-item-well::before, .hk-item-well::after { content:''; position:absolute;
+  width:calc(var(--u)*2.4); height:calc(var(--u)*2.4); pointer-events:none;
+  border-color:rgba(255,255,255,.34); border-style:solid; opacity:.9; }
+.hk-item-well::before { left:calc(var(--u)*.9); top:calc(var(--u)*.9); border-width:calc(var(--u)*.22) 0 0 calc(var(--u)*.22); }
+.hk-item-well::after  { right:calc(var(--u)*.9); bottom:calc(var(--u)*.9); border-width:0 calc(var(--u)*.22) calc(var(--u)*.22) 0; }
 
-.hk-map { position:absolute; right:2.4vmin; top:2.2vmin; width:22vmin; height:22vmin;
-  border-radius:2vmin; background:rgba(4,10,20,.42); border:.3vmin solid rgba(255,255,255,.32);
-  box-shadow:0 .8vmin 2.4vmin rgba(0,0,0,.45); backdrop-filter:blur(7px); overflow:hidden; }
+/* Rolling sweep. It lives inside the well so the octagon clip contains it —
+   a ring drawn outside the frame pokes past the flat edges and hides at the
+   corners, which reads as a rendering fault rather than a spin-up. */
+.hk-item-rim { position:absolute; inset:-30%; opacity:0; pointer-events:none;
+  background:conic-gradient(from 0turn, rgba(143,233,255,0) 0 38%, rgba(143,233,255,.34) 62%,
+    rgba(255,255,255,.85) 78%, rgba(143,233,255,.3) 88%, rgba(143,233,255,0) 100%);
+  -webkit-mask:radial-gradient(closest-side, #0000 22%, #000 72%);
+  mask:radial-gradient(closest-side, #0000 22%, #000 72%);
+  transition:opacity .16s linear; }
+.hk-item.rolling .hk-item-rim { opacity:1; animation:hkRim .42s linear infinite; }
+@keyframes hkRim { to { transform:rotate(1turn); } }
+
+/* Idle shimmer: proof the empty slot is deliberate rather than broken. */
+.hk-item-shine { position:absolute; inset:-20%; pointer-events:none; opacity:0;
+  background:linear-gradient(112deg, rgba(255,255,255,0) 42%, rgba(255,255,255,.16) 50%, rgba(255,255,255,0) 58%); }
+.hk-item.empty .hk-item-shine { opacity:1; animation:hkShine 3.4s cubic-bezier(.6,0,.35,1) infinite; }
+@keyframes hkShine { 0%,58% { transform:translateX(-70%); } 100% { transform:translateX(70%); } }
+
+.hk-item-icon { position:absolute; inset:calc(var(--u)*1.7); display:flex; align-items:center; justify-content:center; }
+.hk-item-icon svg { width:100%; height:100%; display:block;
+  filter:drop-shadow(0 calc(var(--u)*.3) calc(var(--u)*.6) rgba(0,0,0,.6)); }
+.hk-item.rolling .hk-item-icon { animation:hkReel .09s steps(2,end) infinite; }
+@keyframes hkReel { 0%{transform:translateY(-6%) scaleY(1.07)} 100%{transform:translateY(6%) scaleY(.94)} }
+
+/* Empty mark + label. Dim, centred, unmistakably "no item yet". */
+.hk-item-mark { position:absolute; inset:calc(var(--u)*3.2); opacity:0; transition:opacity .2s linear; }
+.hk-item.empty .hk-item-mark { opacity:.30; }
+.hk-item-mark svg { width:100%; height:100%; display:block; }
+.hk-item-tag { position:absolute; left:0; right:0; top:calc(100% + var(--u)*.7); text-align:center;
+  font-size:calc(var(--u)*1.45); font-weight:800; letter-spacing:.34em; opacity:0;
+  text-transform:uppercase; text-shadow:var(--halo); transition:opacity .22s linear; }
+.hk-item.empty .hk-item-tag { opacity:.55; }
+
+.hk-item-count { position:absolute; right:calc(var(--u)*-1.0); bottom:calc(var(--u)*-1.0);
+  min-width:calc(var(--u)*4.0); height:calc(var(--u)*4.0); padding:0 calc(var(--u)*.5);
+  border-radius:calc(var(--u)*2);
+  background:linear-gradient(180deg,#fff2c4,var(--gold-2)); border:calc(var(--u)*.26) solid #2a1400;
+  color:#3a1e00; font-size:calc(var(--u)*2.3); font-weight:900; letter-spacing:-.03em;
+  display:none; align-items:center; justify-content:center;
+  box-shadow:0 calc(var(--u)*.4) calc(var(--u)*1) rgba(0,0,0,.6); }
+.hk-item.multi .hk-item-count { display:flex; }
+
+/* ---- MINIMAP (top-right) -------------------------------------------------
+   Same chamfered-octagon frame as the item slot: two panels sharing one shape
+   language is what makes a HUD look authored rather than assembled. */
+.hk-map { position:absolute; right:var(--sr); top:var(--st);
+  width:calc(var(--u)*21.5); height:calc(var(--u)*21.5); --chamfer:calc(var(--u)*2.2);
+  filter:drop-shadow(0 calc(var(--u)*.8) calc(var(--u)*2.2) rgba(0,0,0,.55)); }
+.hk-map-frame { position:absolute; inset:0;
+  clip-path:polygon(var(--chamfer) 0,calc(100% - var(--chamfer)) 0,100% var(--chamfer),
+    100% calc(100% - var(--chamfer)),calc(100% - var(--chamfer)) 100%,var(--chamfer) 100%,
+    0 calc(100% - var(--chamfer)),0 var(--chamfer));
+  background:linear-gradient(160deg,rgba(255,255,255,.62),rgba(255,255,255,.20) 46%,rgba(120,145,175,.45)); }
+.hk-map-well { position:absolute; inset:calc(var(--u)*.32);
+  clip-path:polygon(calc(var(--chamfer) - var(--u)*.32) 0,calc(100% - var(--chamfer) + var(--u)*.32) 0,
+    100% calc(var(--chamfer) - var(--u)*.32),100% calc(100% - var(--chamfer) + var(--u)*.32),
+    calc(100% - var(--chamfer) + var(--u)*.32) 100%,calc(var(--chamfer) - var(--u)*.32) 100%,
+    0 calc(100% - var(--chamfer) + var(--u)*.32),0 calc(var(--chamfer) - var(--u)*.32));
+  background:
+    radial-gradient(ellipse 80% 80% at 50% 40%, rgba(28,44,74,.62), rgba(28,44,74,0) 70%),
+    linear-gradient(170deg, rgba(10,18,34,.74), rgba(3,6,14,.84));
+  backdrop-filter:blur(calc(var(--u)*.7)) saturate(1.1); overflow:hidden; }
 .hk-map canvas { width:100%; height:100%; display:block; }
 
-.hk-coins { position:absolute; left:2.4vmin; bottom:17vmin; display:flex; align-items:center; gap:.8vmin;
-  font-size:3.4vmin; font-weight:900; text-shadow:0 .3vmin 1vmin rgba(0,0,0,.8); }
-.hk-coins span:first-child { color:#ffd75e; font-size:3.8vmin; }
+/* ---- SPLITS (under the map) ---------------------------------------------- */
+.hk-times { position:absolute; right:var(--sr); top:calc(var(--st) + var(--u)*23.2);
+  text-align:right; line-height:1.5; }
+.hk-times:empty { display:none; }
+.hk-times-row { font-size:calc(var(--u)*1.75); font-weight:800; letter-spacing:.02em;
+  text-shadow:var(--halo); opacity:.9; white-space:nowrap; }
+.hk-times-row i { font-style:normal; opacity:.55; letter-spacing:.2em; margin-right:calc(var(--u)*.6); }
+.hk-times-row b { font-weight:900; }
+.hk-times-row.best b { color:var(--gold); }
 
+/* ---- COINS (bottom-left, above position) --------------------------------- */
+.hk-coins { position:absolute; left:var(--sl); bottom:calc(var(--sb) + var(--u)*13.6);
+  display:flex; align-items:center; gap:calc(var(--u)*.75); }
+.hk-coin-ico { width:calc(var(--u)*3.3); height:calc(var(--u)*3.3); display:block;
+  filter:drop-shadow(0 0 calc(var(--u)*.25) rgba(0,0,0,.9))
+         drop-shadow(0 calc(var(--u)*.25) calc(var(--u)*.6) rgba(0,0,0,.7)); }
+.hk-coins-val { font-size:calc(var(--u)*3.5); font-weight:900; letter-spacing:-.02em;
+  text-shadow:var(--halo); }
+
+/* ---- POSITION (bottom-left) — the hero element ---------------------------
+   Rendered twice: a dark stroked copy behind the gradient fill. A gradient
+   clipped to text cannot take a text-shadow, and drop-shadow alone smears at
+   this size, so the stroke is what keeps the numeral readable on sand. */
+/* The extra lift is an optical correction, not a gutter change: line-height
+   .78 makes the glyph overflow its own line box, so aligning the box to the
+   safe margin puts the ink itself past it. */
+.hk-pos { position:absolute; left:var(--sl); bottom:calc(var(--sb) + var(--u)*.9);
+  display:flex; align-items:flex-start; will-change:transform; }
+.hk-pos-num { position:relative; font-size:calc(var(--u)*13.2); font-weight:900; line-height:.78;
+  letter-spacing:-.05em; }
+.hk-pos-num::before { content:attr(data-v); position:absolute; inset:0; z-index:0;
+  -webkit-text-stroke:calc(var(--u)*.62) rgba(2,5,12,.88); color:transparent;
+  filter:drop-shadow(0 calc(var(--u)*.5) calc(var(--u)*1.6) rgba(0,0,0,.65)); }
+/* NOTE: background-image, never the background shorthand. The shorthand resets
+   background-clip to border-box, and the gain/loss overrides below would then
+   silently turn the numeral into a solid coloured rectangle. */
+.hk-pos-fill { position:relative; z-index:1;
+  background-image:linear-gradient(178deg,#ffffff 12%,var(--gold) 48%,var(--gold-2) 76%,var(--gold-3) 100%);
+  -webkit-background-clip:text; background-clip:text; color:transparent; }
+.hk-pos-ord { position:relative; font-size:calc(var(--u)*4.4); font-weight:900; line-height:1;
+  margin-left:calc(var(--u)*.3); margin-top:calc(var(--u)*1.3); letter-spacing:-.02em; }
+.hk-pos-ord::before { content:attr(data-v); position:absolute; inset:0;
+  -webkit-text-stroke:calc(var(--u)*.5) rgba(2,5,12,.88); color:transparent; }
+.hk-pos-ord span { position:relative; color:var(--gold); }
+/* Tint sweeps back to gold on its own, so a gain/loss reads even if two
+   changes land inside a second. */
+.hk-pos.gain .hk-pos-fill { background-image:linear-gradient(178deg,#ffffff 10%,var(--gain) 55%,#0fae66 100%); }
+.hk-pos.gain .hk-pos-ord span { color:var(--gain); }
+.hk-pos.loss .hk-pos-fill { background-image:linear-gradient(178deg,#ffffff 10%,var(--loss) 55%,#9c0d2c 100%); }
+.hk-pos.loss .hk-pos-ord span { color:var(--loss); }
+.hk-pos-arrow { position:absolute; left:calc(100% + var(--u)*.4); top:calc(var(--u)*.6);
+  font-size:calc(var(--u)*3.2); font-weight:900; opacity:0; pointer-events:none;
+  text-shadow:var(--halo); }
+
+/* ---- SPEED (bottom-right) ------------------------------------------------ */
+.hk-speed { position:absolute; right:calc(var(--sr) - var(--u)*1.2); bottom:calc(var(--sb) - var(--u)*1.2);
+  width:calc(var(--u)*25); height:calc(var(--u)*25); }
+.hk-speed svg { position:absolute; inset:0; overflow:visible;
+  filter:drop-shadow(0 calc(var(--u)*.4) calc(var(--u)*1.2) rgba(0,0,0,.7)); }
+.hk-speed-num { position:absolute; left:0; right:0; top:54%; transform:translateY(-50%);
+  text-align:center; font-size:calc(var(--u)*7.0); font-weight:900; letter-spacing:-.055em;
+  line-height:1; text-shadow:var(--halo); transition:color .18s linear; }
+.hk-speed.boost .hk-speed-num { color:#e8fbff; text-shadow:var(--halo),0 0 calc(var(--u)*2.4) rgba(90,220,255,.85); }
+.hk-speed-unit { position:absolute; left:0; right:0; top:70%; text-align:center;
+  font-size:calc(var(--u)*1.5); font-weight:800; letter-spacing:.34em; opacity:.7;
+  text-transform:uppercase; text-shadow:var(--halo); }
+.hk-arc-glow { opacity:0; transition:opacity .12s linear; }
+.hk-speed.boost .hk-arc-glow { opacity:.85; }
+.hk-needle { transform-box:view-box; transform-origin:50px 54px; }
+
+/* ---- CENTRE STAGE: countdown, banners, finish ---------------------------- */
+/* Lifted off centre: the numeral and its lamps otherwise land squarely on the
+   player's own kart, which is the one thing they must not cover. */
 .hk-center { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
-  pointer-events:none; }
-.hk-count { font-size:26vmin; font-weight:900; letter-spacing:-.05em;
-  background:linear-gradient(180deg,#fff 20%,#ffd75e 55%,#ff6a1f 100%);
-  -webkit-background-clip:text; background-clip:text; color:transparent;
-  filter:drop-shadow(0 1vmin 3vmin rgba(0,0,0,.7)); animation:hkCount .95s ease-out; }
-@keyframes hkCount { 0%{transform:scale(2.4);opacity:0} 22%{transform:scale(1);opacity:1} 100%{transform:scale(.92);opacity:.9} }
-.hk-go { font-size:30vmin; font-weight:900; letter-spacing:-.06em;
-  background:linear-gradient(180deg,#eaffff 10%,#4de1ff 45%,#0a7bd8 100%);
-  -webkit-background-clip:text; background-clip:text; color:transparent;
-  filter:drop-shadow(0 1vmin 4vmin rgba(0,120,255,.6)); animation:hkGo .6s cubic-bezier(.15,1.8,.4,1); }
-@keyframes hkGo { 0%{transform:scale(.2);opacity:0} 40%{transform:scale(1.14)} 100%{transform:scale(1);opacity:1} }
+  flex-direction:column; pointer-events:none; padding-bottom:calc(var(--u)*11); }
+.hk-count { font-size:calc(var(--u)*30); font-weight:900; letter-spacing:-.06em; line-height:1;
+  position:relative;
+  filter:drop-shadow(0 calc(var(--u)*.8) calc(var(--u)*2.2) rgba(0,0,0,.6)); }
+.hk-count::before { content:attr(data-v); position:absolute; inset:0;
+  -webkit-text-stroke:calc(var(--u)*1.25) rgba(2,5,12,.88); color:transparent; }
+.hk-count span { position:relative; -webkit-background-clip:text; background-clip:text; color:transparent; }
+.hk-count-ring { position:absolute; left:50%; top:50%; width:calc(var(--u)*34); height:calc(var(--u)*34);
+  margin:calc(var(--u)*-17) 0 0 calc(var(--u)*-17); border-radius:50%;
+  border:calc(var(--u)*.5) solid currentColor; opacity:0; }
+.hk-lamps { display:flex; gap:calc(var(--u)*1.5); margin-top:calc(var(--u)*3.4); }
+.hk-lamp { width:calc(var(--u)*2.2); height:calc(var(--u)*2.2); border-radius:50%;
+  background:rgba(255,255,255,.10); border:calc(var(--u)*.26) solid rgba(255,255,255,.32);
+  box-shadow:inset 0 calc(var(--u)*.2) calc(var(--u)*.4) rgba(0,0,0,.6); }
+.hk-lamp.on { background:radial-gradient(circle at 40% 34%,#fff,var(--lamp,#ff5030) 62%);
+  border-color:rgba(255,255,255,.7);
+  box-shadow:0 0 calc(var(--u)*1.6) var(--lamp,#ff5030),0 0 calc(var(--u)*4) rgba(255,80,48,.45); }
 
-.hk-toast { position:absolute; left:50%; top:22vmin; transform:translateX(-50%);
-  font-size:4.4vmin; font-weight:900; letter-spacing:-.02em; white-space:nowrap;
-  text-shadow:0 .4vmin 1.6vmin rgba(0,0,0,.8); animation:hkToast 1.5s ease-out forwards; }
-@keyframes hkToast { 0%{opacity:0;transform:translateX(-50%) translateY(2vmin) scale(.9)}
-  16%{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}
-  74%{opacity:1} 100%{opacity:0;transform:translateX(-50%) translateY(-2vmin)} }
+/* Banner: a skewed bar that sweeps across, used for laps and callouts. */
+.hk-band { position:absolute; left:0; right:0; top:26%; height:calc(var(--u)*11);
+  display:flex; align-items:center; justify-content:center; pointer-events:none; overflow:hidden; }
+.hk-band-bg { position:absolute; left:-4%; right:-4%; top:0; bottom:0; transform:skewY(-1.4deg);
+  background:linear-gradient(90deg, rgba(4,8,16,0) 0%, rgba(4,8,16,.72) 18%, rgba(4,8,16,.82) 50%,
+    rgba(4,8,16,.72) 82%, rgba(4,8,16,0) 100%); }
+.hk-band-bg::before, .hk-band-bg::after { content:''; position:absolute; left:8%; right:8%; height:calc(var(--u)*.3);
+  background:linear-gradient(90deg,transparent,var(--bc,#ffd45c) 22%,var(--bc,#ffd45c) 78%,transparent); }
+.hk-band-bg::before { top:0; } .hk-band-bg::after { bottom:0; }
+.hk-band-streak { position:absolute; top:0; bottom:0; width:26%; transform:skewX(-18deg);
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.20),transparent); }
+.hk-band-txt { position:relative; font-size:calc(var(--u)*5.6); font-weight:900; letter-spacing:.02em;
+  white-space:nowrap; text-shadow:var(--halo); }
 
-.hk-times { position:absolute; right:2.4vmin; top:26vmin; text-align:right;
-  font-size:2.0vmin; font-weight:700; opacity:.9; line-height:1.6;
-  text-shadow:0 .2vmin .8vmin rgba(0,0,0,.8); font-variant-numeric:tabular-nums; }
-.hk-times b { font-weight:900; color:#ffd75e; }
+/* Finish card. */
+.hk-finish { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+  width:min(calc(var(--u)*54), 84vw); padding:calc(var(--u)*3.2) calc(var(--u)*3.4) calc(var(--u)*2.8);
+  --chamfer:calc(var(--u)*3.4); pointer-events:none; text-align:center;
+  clip-path:polygon(var(--chamfer) 0,calc(100% - var(--chamfer)) 0,100% var(--chamfer),
+    100% calc(100% - var(--chamfer)),calc(100% - var(--chamfer)) 100%,var(--chamfer) 100%,
+    0 calc(100% - var(--chamfer)),0 var(--chamfer));
+  background-image:linear-gradient(180deg, var(--gold) 0, var(--gold) calc(var(--u)*.4), rgba(0,0,0,0) calc(var(--u)*.4)),
+    linear-gradient(165deg, rgba(14,23,42,.93), rgba(4,7,16,.96));
+  filter:drop-shadow(0 calc(var(--u)*2) calc(var(--u)*5) rgba(0,0,0,.75)); }
+.hk-finish-hdr { font-size:calc(var(--u)*2.2); font-weight:900; letter-spacing:.42em; opacity:.8;
+  text-transform:uppercase; }
+.hk-finish-place { display:flex; align-items:flex-start; justify-content:center; margin:calc(var(--u)*.6) 0 calc(var(--u)*1.6); }
+.hk-finish-num { font-size:calc(var(--u)*14); font-weight:900; line-height:.8; letter-spacing:-.05em;
+  background-image:linear-gradient(178deg,#fff 12%,var(--gold) 50%,var(--gold-2) 78%,var(--gold-3) 100%);
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+  filter:drop-shadow(0 calc(var(--u)*.5) calc(var(--u)*1.4) rgba(0,0,0,.6)); }
+.hk-finish-ord { font-size:calc(var(--u)*4.6); font-weight:900; color:var(--gold);
+  margin:calc(var(--u)*1.4) 0 0 calc(var(--u)*.4); }
+.hk-finish-rows { display:flex; flex-direction:column; gap:calc(var(--u)*.55); }
+.hk-frow { display:flex; justify-content:space-between; align-items:baseline;
+  font-size:calc(var(--u)*2.0); font-weight:800;
+  padding:calc(var(--u)*.55) calc(var(--u)*1.0); background:rgba(255,255,255,.055); }
+.hk-frow i { font-style:normal; opacity:.6; letter-spacing:.22em; font-size:calc(var(--u)*1.55);
+  text-transform:uppercase; }
+.hk-frow b { font-weight:900; font-size:calc(var(--u)*2.3); }
+.hk-frow.hi b { color:var(--gold); }
+.hk-finish-rule { height:calc(var(--u)*.3); margin:calc(var(--u)*1.4) 0 calc(var(--u)*1.6);
+  background:linear-gradient(90deg,transparent,var(--gold),transparent); opacity:.8; }
 `;
 
-const ITEM_ICONS = {
-  banana: '🍌', tripleBanana: '🍌', greenShell: '🟢', tripleGreen: '🟢',
-  redShell: '🔴', tripleRed: '🔴', mushroom: '🍄', tripleMushroom: '🍄',
-  star: '⭐', thunder: '⚡', bulletBill: '🚀',
+// Triples reuse their single's art, so icon nodes are keyed by art kind and a
+// held Triple Banana and a Banana share one pre-built DOM node.
+const ART_KIND = {
+  banana: 'banana', tripleBanana: 'banana',
+  greenShell: 'greenShell', tripleGreen: 'greenShell',
+  redShell: 'redShell', tripleRed: 'redShell',
+  mushroom: 'mushroom', tripleMushroom: 'mushroom',
+  star: 'star', thunder: 'thunder', bulletBill: 'bulletBill',
 };
+
+// Item accent colours. The slot rim takes these so a held item is identifiable
+// from peripheral vision, before the icon itself has been read.
+const ITEM_TINT = {
+  banana: '#ffd83d', tripleBanana: '#ffd83d',
+  greenShell: '#4be06a', tripleGreen: '#4be06a',
+  redShell: '#ff5346', tripleRed: '#ff5346',
+  mushroom: '#ff6a6a', tripleMushroom: '#ff6a6a',
+  star: '#ffe14d', thunder: '#7fd8ff', bulletBill: '#c9d6e4',
+};
+
+/**
+ * Inline SVG item art.
+ *
+ * Hand-built rather than emoji: emoji shells render as flat coloured circles
+ * that are indistinguishable at slot size, and their look drifts between
+ * platforms. These are self-contained (no external assets) and read correctly
+ * at every size the slot can take.
+ */
+function itemArt(id, uid) {
+  const g = `hk${uid}_${id}`;
+  switch (id) {
+    // A true crescent (two arcs of different radius sharing their tips), not a
+    // thick stroked arc — a stroked arc has parallel sides and reads as a
+    // magnet or a wrench rather than fruit.
+    case 'banana': case 'tripleBanana':
+      return `<svg viewBox="0 0 64 64"><defs>
+        <linearGradient id="${g}" x1=".1" y1="0" x2=".8" y2="1">
+          <stop offset="0" stop-color="#fff7bd"/><stop offset=".42" stop-color="#ffd52e"/>
+          <stop offset="1" stop-color="#c98d04"/></linearGradient></defs>
+        <path d="M11 52 A25.5 25.5 0 0 1 50 13 A62 62 0 0 0 11 52 Z" fill="url(#${g})"
+          stroke="#3a2703" stroke-opacity=".7" stroke-width="3.2" stroke-linejoin="round"/>
+        <path d="M17 46 A26 26 0 0 1 43 20" fill="none" stroke="#fffbe0" stroke-opacity=".72"
+          stroke-width="3.4" stroke-linecap="round"/>
+        <path d="M49 15 l6 -6" stroke="#6b4a12" stroke-width="6" stroke-linecap="round"/>
+        <circle cx="10.5" cy="53.5" r="3.6" fill="#6b4a12"/></svg>`;
+
+    case 'greenShell': case 'tripleGreen':
+    case 'redShell': case 'tripleRed': {
+      // The belly is kept low and the scutes are outlined in light, or the
+      // whole thing collapses into a two-tone circle that reads as a ball.
+      // Scutes are drawn LIGHTER than the dome with a dark outline. Darker
+      // plates on a dark dome vanish at slot size and the icon collapses into
+      // a two-tone circle that reads as a ball, not a shell.
+      const red = id[0] === 'r';
+      const c1 = red ? '#ffb0a2' : '#7fea9a', c2 = red ? '#e0281c' : '#1a9c3c', c3 = red ? '#6d0a05' : '#053a14';
+      return `<svg viewBox="0 0 64 64"><defs>
+        <radialGradient id="${g}" cx=".34" cy=".24" r=".9">
+          <stop offset="0" stop-color="${c2}"/><stop offset=".62" stop-color="${c2}"/><stop offset="1" stop-color="${c3}"/></radialGradient></defs>
+        <circle cx="32" cy="32" r="23" fill="url(#${g})"/>
+        <g fill="${c1}" stroke="${c3}" stroke-width="2.2" stroke-linejoin="round">
+          <path d="M32 11 L44 20 L40 35 L24 35 L20 20 Z"/>
+          <path d="M12.5 24 L20 20 L24 35 L13.5 37 Z"/>
+          <path d="M51.5 24 L44 20 L40 35 L50.5 37 Z"/></g>
+        <path d="M10.4 40 A23 23 0 0 0 53.6 40 Z" fill="#f8efd8"/>
+        <path d="M10.4 40 h43.2" stroke="#05101c" stroke-opacity=".6" stroke-width="2.6"/>
+        <ellipse cx="21" cy="17" rx="8" ry="4.6" fill="#fff" fill-opacity=".55" transform="rotate(-28 21 17)"/>
+        <circle cx="32" cy="32" r="23" fill="none" stroke="#030a14" stroke-opacity=".75" stroke-width="3.2"/></svg>`;
+    }
+
+    case 'mushroom': case 'tripleMushroom':
+      return `<svg viewBox="0 0 64 64"><defs>
+        <linearGradient id="${g}" x1="0" y1="0" x2=".3" y2="1">
+          <stop offset="0" stop-color="#ff9a8e"/><stop offset=".45" stop-color="#f0362f"/><stop offset="1" stop-color="#9c0d0a"/></linearGradient></defs>
+        <path d="M24 34 h16 v11 a8 7.5 0 0 1 -16 0 z" fill="#0a0f18" fill-opacity=".55" transform="translate(0,2)"/>
+        <path d="M24 34 h16 v11 a8 7.5 0 0 1 -16 0 z" fill="#fff3d6" stroke="#3a2a10" stroke-opacity=".5" stroke-width="2"/>
+        <path d="M5 38 A27 24 0 0 1 59 38 Z" fill="url(#${g})" stroke="#2a0605" stroke-opacity=".55" stroke-width="2.6" stroke-linejoin="round"/>
+        <g fill="#fff6e2"><ellipse cx="19" cy="27" rx="7" ry="5.4"/><ellipse cx="43" cy="25" rx="6" ry="4.8"/><ellipse cx="31" cy="16" rx="5" ry="3.8"/></g>
+        <ellipse cx="17" cy="34" rx="8" ry="3" fill="#fff" fill-opacity=".22"/></svg>`;
+
+    case 'star':
+      return `<svg viewBox="0 0 64 64"><defs>
+        <linearGradient id="${g}" x1=".2" y1="0" x2=".8" y2="1">
+          <stop offset="0" stop-color="#fffce0"/><stop offset=".45" stop-color="#ffdf3d"/><stop offset="1" stop-color="#e8890a"/></linearGradient></defs>
+        <polygon points="32,6 38.5,23.1 56.7,24 42.5,35.4 47.3,53 32,43 16.7,53 21.5,35.4 7.3,24 25.5,23.1"
+          fill="url(#${g})" stroke="#4a2600" stroke-opacity=".6" stroke-width="3" stroke-linejoin="round"/>
+        <polygon points="32,14 36,24.5 47,25 38.5,32 41.5,43 32,36.5 22.5,43 25.5,32 17,25 28,24.5"
+          fill="#fff" fill-opacity=".35"/></svg>`;
+
+    case 'thunder':
+      return `<svg viewBox="0 0 64 64"><defs>
+        <linearGradient id="${g}" x1=".2" y1="0" x2=".7" y2="1">
+          <stop offset="0" stop-color="#ffffff"/><stop offset=".4" stop-color="#8fe9ff"/><stop offset="1" stop-color="#1a7fe0"/></linearGradient></defs>
+        <path d="M39 4 L15 35 L29 35 L25 60 L50 26 L35 26 L43 4 Z" fill="url(#${g})"
+          stroke="#06203a" stroke-opacity=".6" stroke-width="3" stroke-linejoin="round"/>
+        <path d="M38 10 L21 32 L31 32 L28 50" fill="none" stroke="#fff" stroke-opacity=".55" stroke-width="2.6" stroke-linecap="round"/></svg>`;
+
+    case 'bulletBill':
+      return `<svg viewBox="0 0 64 64"><defs>
+        <linearGradient id="${g}" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stop-color="#dfe9f6"/><stop offset=".36" stop-color="#8395ad"/>
+          <stop offset=".72" stop-color="#4a5872"/><stop offset="1" stop-color="#232c3c"/></linearGradient>
+        <linearGradient id="${g}b" x1="1" y1="0" x2="0" y2="0">
+          <stop offset="0" stop-color="#ffffff"/><stop offset=".35" stop-color="#8fe9ff"/>
+          <stop offset="1" stop-color="#2b6dff" stop-opacity="0"/></linearGradient></defs>
+        <path d="M20 23 L1 32 L20 41 Z" fill="url(#${g}b)"/>
+        <g stroke="#05101c" stroke-opacity=".7" stroke-width="2.8" stroke-linejoin="round">
+          <path d="M17 11 L27 19 V45 L17 53 Z" fill="#3a4760"/>
+          <path d="M23 19 H37 A13 13 0 0 1 37 45 H23 Z" fill="url(#${g})"/></g>
+        <rect x="27" y="23" width="19" height="4.6" rx="2.3" fill="#ffffff" fill-opacity=".55"/>
+        <circle cx="46" cy="32" r="3.6" fill="#ffd45c" stroke="#4a2600" stroke-opacity=".6" stroke-width="1.8"/></svg>`;
+
+    default:
+      return '';
+  }
+}
+
+// The deliberate-empty mark: a hollow chamfered lozenge, not a "?" glyph.
+const EMPTY_MARK = `<svg viewBox="0 0 64 64"><path d="M32 6 L54 20 V44 L32 58 L10 44 V20 Z"
+  fill="none" stroke="#fff" stroke-width="3.2" stroke-linejoin="round" stroke-dasharray="7 5"/>
+  <circle cx="32" cy="32" r="5" fill="#fff"/></svg>`;
+
+const COIN_ICON = `<svg class="hk-coin-ico" viewBox="0 0 32 32"><defs>
+  <linearGradient id="hkcoin" x1=".2" y1="0" x2=".8" y2="1">
+    <stop offset="0" stop-color="#fff5c0"/><stop offset=".5" stop-color="#ffcf3d"/><stop offset="1" stop-color="#c47a04"/></linearGradient></defs>
+  <circle cx="16" cy="16" r="14" fill="url(#hkcoin)" stroke="#5a3600" stroke-opacity=".7" stroke-width="2.4"/>
+  <circle cx="16" cy="16" r="9" fill="none" stroke="#8a5400" stroke-opacity=".5" stroke-width="2"/>
+  <path d="M13 11 h6 v3 h-4 v2 h4 v3 h-4 v2 h4 v3 h-6 z" fill="#7a4a00" fill-opacity=".65"/></svg>`;
+
+// Gauge geometry, shared by the arc, the ticks and the needle. 270° of sweep
+// starting at the lower-left, which is the shape every car dash uses because
+// the eye reads "full" as "pointing right".
+const G = { cx: 50, cy: 54, r: 38, a0: 135, span: 270 };
+const gp = (deg, rad) => [
+  G.cx + Math.cos(deg * Math.PI / 180) * rad,
+  G.cy + Math.sin(deg * Math.PI / 180) * rad,
+];
 
 const ORDINALS = ['', 'st', 'nd', 'rd'];
 const ordinal = (n) => (n % 100 >= 11 && n % 100 <= 13) ? 'th' : (ORDINALS[n % 10] || 'th');
+
+const EASE_OUT = 'cubic-bezier(.16,1,.3,1)';
+const EASE_BACK = 'cubic-bezier(.2,1.7,.4,1)';
+
+const REDUCE = typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : null;
+
+/**
+ * Run a multi-step keyframe sequence with LINEAR iteration timing.
+ *
+ * This exists because of a trap: the `easing` in an animation's options is the
+ * timing function for the whole iteration, applied *before* keyframe offsets
+ * are resolved. Passing a strong ease-out there squeezes a four-step sequence
+ * into the first third of its duration, so a 940ms countdown numeral is
+ * already fading at 300ms. Per-keyframe easing is what shapes each segment;
+ * the iteration must stay linear.
+ */
+function seq(el, frames, duration, opts = {}) {
+  // The CSS reduced-motion override in index.html cannot reach these: script
+  // animations are outside the cascade. Collapsing to 1ms keeps every
+  // `.finished` handler (which is what removes the transient nodes) intact.
+  const d = REDUCE && REDUCE.matches ? 1 : duration;
+  return el.animate(frames, { duration: d, easing: 'linear', ...opts });
+}
 
 export class HUD {
   constructor(root) {
@@ -105,62 +529,178 @@ export class HUD {
       style.textContent = CSS;
       document.head.appendChild(style);
     }
+    this.uid = ++UID;
 
     this.el = document.createElement('div');
     this.el.className = 'hk-hud';
-    this.el.innerHTML = `
-      <div class="hk-lap">
-        <div class="hk-lap-label">LAP</div>
-        <div class="hk-lap-val"><span data-lap>1</span><small>/<span data-laps>3</span></small></div>
-      </div>
-      <div class="hk-item"><div class="hk-item-icon" data-item></div><div class="hk-item-count" data-count style="display:none"></div></div>
-      <div class="hk-map"><canvas data-map width="256" height="256"></canvas></div>
-      <div class="hk-times" data-times></div>
-      <div class="hk-coins"><span>◉</span><span data-coins>0</span></div>
-      <div class="hk-pos"><span class="hk-pos-num" data-pos>1</span><span class="hk-pos-ord" data-ord>st</span></div>
-      <div class="hk-speed">
-        <svg viewBox="0 0 100 100">
-          <path d="M 12 84 A 44 44 0 1 1 88 84" fill="none" stroke="rgba(255,255,255,.16)" stroke-width="7" stroke-linecap="round"/>
-          <path data-arc d="M 12 84 A 44 44 0 1 1 88 84" fill="none" stroke="url(#hkgrad)" stroke-width="7" stroke-linecap="round"/>
-          <defs><linearGradient id="hkgrad" x1="0" y1="1" x2="1" y2="0">
-            <stop offset="0%" stop-color="#4de1ff"/><stop offset="55%" stop-color="#ffd75e"/><stop offset="100%" stop-color="#ff4d4d"/>
-          </linearGradient></defs>
-        </svg>
-        <div class="hk-speed-num" data-speed>0</div>
-        <div class="hk-speed-unit">KM/H</div>
-      </div>
-      <div class="hk-center" data-center></div>
-    `;
+    this.el.innerHTML = this._markup();
     root.appendChild(this.el);
 
     const q = (s) => this.el.querySelector(s);
     this.dom = {
+      root: this.el,
       lap: q('[data-lap]'), laps: q('[data-laps]'),
       item: q('.hk-item'), itemIcon: q('[data-item]'), itemCount: q('[data-count]'),
-      pos: q('[data-pos]'), ord: q('[data-ord]'),
-      speed: q('[data-speed]'), arc: q('[data-arc]'),
+      itemFrame: q('.hk-item-frame'),
+      pos: q('.hk-pos'), posNum: q('[data-pos]'), posFill: q('[data-posfill]'),
+      ord: q('[data-ord]'), ordSpan: q('[data-ordspan]'), arrow: q('[data-arrow]'),
+      speed: q('.hk-speed'), speedNum: q('[data-speed]'),
+      arc: q('[data-arc]'), arcGlow: q('[data-arcglow]'), needle: q('[data-needle]'),
       coins: q('[data-coins]'), center: q('[data-center]'),
-      times: q('[data-times]'),
-      map: q('[data-map]'),
+      times: q('[data-times]'), map: q('[data-map]'),
     };
 
+    // Every icon is built once and then only toggled. The roulette swaps the
+    // visible item ~22 times a second; re-parsing SVG markup at that rate is
+    // exactly the kind of hot-path work the class must not do.
+    this._icons = {};
+    for (const kind of new Set(Object.values(ART_KIND))) {
+      const n = document.createElement('div');
+      n.style.cssText = 'position:absolute;inset:0;display:none';
+      n.innerHTML = itemArt(kind, this.uid);
+      this.dom.itemIcon.appendChild(n);
+      this._icons[kind] = n;
+    }
+    this._shownIcon = null;
+
     this.mapCtx = this.dom.map.getContext('2d');
-    // The arc path length, needed for the stroke-dash speedometer sweep.
+    // Path length is a layout-ish query, so it is taken once here and never
+    // again — the dash offset in update() is pure arithmetic from it.
     this.arcLen = this.dom.arc.getTotalLength();
-    this.dom.arc.style.strokeDasharray = `${this.arcLen}`;
-    this.dom.arc.style.strokeDashoffset = `${this.arcLen}`;
+    for (const a of [this.dom.arc, this.dom.arcGlow]) {
+      a.style.strokeDasharray = `${this.arcLen}`;
+      a.style.strokeDashoffset = `${this.arcLen}`;
+    }
 
     this._mapAccum = 0;
     this._mapPath = null;
-    this._lastItem = undefined;
-    this._lastPos = -1;
-    this._lastLap = -1;
+    this._mapPx = 256;
     this._displaySpeed = 0;
+    this._needleVel = 0;      // needle has mass, so a boost makes it overshoot
+    this._needleAngle = 0;
+    this._surge = 0;
+    this._finishShown = false;
+    this._goShown = false;
+    this._tint = 0;           // seconds left on the position gain/loss tint
+
+    // Every value the HUD writes is mirrored here so update() can skip the
+    // write when nothing changed. This is the difference between ~30 DOM
+    // mutations per frame and ~0.
+    this._c = {
+      pos: -1, ord: '', lap: -1, laps: -1, speed: -1, coins: -1,
+      item: undefined, multi: null, rolling: null, empty: null, uses: 0,
+      times: -1, boost: null, arcOff: -1, needle: -999, final: false,
+    };
+
+    this._onResize = () => { this._sizeMap(); };
+    window.addEventListener('resize', this._onResize);
+    this._sizeMap();
+  }
+
+  _markup() {
+    // Gauge ticks: 4 major + 24 minor, generated rather than hand-written so
+    // the geometry constant above stays the single source of truth.
+    let ticks = '';
+    for (let i = 0; i <= 28; i++) {
+      const major = i % 7 === 0;
+      const a = G.a0 + (G.span * i) / 28;
+      const [x1, y1] = gp(a, G.r + (major ? 7.5 : 5.5));
+      const [x2, y2] = gp(a, G.r + 10.5);
+      ticks += `<line x1="${x1.toFixed(2)}" y1="${y1.toFixed(2)}" x2="${x2.toFixed(2)}" y2="${y2.toFixed(2)}"
+        stroke="${major ? 'rgba(255,255,255,.62)' : 'rgba(255,255,255,.26)'}" stroke-width="${major ? 2.2 : 1.2}" stroke-linecap="round"/>`;
+    }
+    const [ax, ay] = gp(G.a0, G.r);
+    const [bx, by] = gp(G.a0 + G.span, G.r);
+    const arcD = `M ${ax.toFixed(2)} ${ay.toFixed(2)} A ${G.r} ${G.r} 0 1 1 ${bx.toFixed(2)} ${by.toFixed(2)}`;
+    const u = this.uid;
+
+    return `
+      <div class="hk-wash w-tl"></div><div class="hk-wash w-tc"></div>
+      <div class="hk-wash w-tr"></div><div class="hk-wash w-bl"></div>
+      <div class="hk-wash w-br"></div>
+
+      <div class="hk-lap">
+        <div class="hk-cap">Lap</div>
+        <div class="hk-lap-rule"></div>
+        <div class="hk-lap-row">
+          <span class="hk-lap-val" data-lap>1</span>
+          <span class="hk-lap-sep">/</span>
+          <span class="hk-lap-tot" data-laps>3</span>
+        </div>
+      </div>
+
+      <div class="hk-item empty">
+        <div class="hk-item-frame"></div>
+        <div class="hk-item-well">
+          <div class="hk-item-rim"></div>
+          <div class="hk-item-shine"></div>
+          <div class="hk-item-mark">${EMPTY_MARK}</div>
+          <div class="hk-item-icon" data-item></div>
+        </div>
+        <div class="hk-item-count" data-count></div>
+        <div class="hk-item-tag">Item</div>
+      </div>
+
+      <div class="hk-map">
+        <div class="hk-map-frame"></div>
+        <div class="hk-map-well"><canvas data-map width="256" height="256"></canvas></div>
+      </div>
+      <div class="hk-times" data-times></div>
+
+      <div class="hk-coins">${COIN_ICON}<span class="hk-coins-val" data-coins>0</span></div>
+
+      <div class="hk-pos">
+        <span class="hk-pos-num" data-pos data-v="1"><span class="hk-pos-fill" data-posfill>1</span></span>
+        <span class="hk-pos-ord" data-ord data-v="st"><span data-ordspan>st</span></span>
+        <span class="hk-pos-arrow" data-arrow></span>
+      </div>
+
+      <div class="hk-speed">
+        <svg viewBox="0 0 100 100">
+          <defs>
+            <linearGradient id="hkg${u}" x1="0" y1="1" x2="1" y2="0">
+              <stop offset="0%" stop-color="#4de1ff"/><stop offset="52%" stop-color="#ffd75e"/><stop offset="100%" stop-color="#ff4d4d"/>
+            </linearGradient>
+          </defs>
+          <g>${ticks}</g>
+          <path d="${arcD}" fill="none" stroke="rgba(4,10,20,.55)" stroke-width="10.5" stroke-linecap="round"/>
+          <path d="${arcD}" fill="none" stroke="rgba(255,255,255,.15)" stroke-width="6.5" stroke-linecap="round"/>
+          <path class="hk-arc-glow" data-arcglow d="${arcD}" fill="none" stroke="#8fe9ff" stroke-width="14" stroke-linecap="round" opacity="0"/>
+          <path data-arc d="${arcD}" fill="none" stroke="url(#hkg${u})" stroke-width="6.5" stroke-linecap="round"/>
+          <g class="hk-needle" data-needle>
+            <path d="M 50 8.5 L 50 23" fill="none" stroke="rgba(2,6,14,.8)" stroke-width="7.4" stroke-linecap="round"/>
+            <path d="M 50 9.5 L 50 22" fill="none" stroke="#ffffff" stroke-width="3.4" stroke-linecap="round"/>
+          </g>
+        </svg>
+        <div class="hk-speed-num" data-speed>0</div>
+        <div class="hk-speed-unit">km/h</div>
+      </div>
+
+      <div class="hk-center" data-center></div>
+    `;
+  }
+
+  /**
+   * Match the canvas backing store to real device pixels. At 1440p the map is
+   * ~310 CSS px wide; drawing it into a 256px buffer is a visibly soft map,
+   * which is the fastest way to make a HUD look cheap.
+   */
+  _sizeMap() {
+    const r = this.dom.map.getBoundingClientRect();
+    const px = Math.max(192, Math.min(640, Math.round(r.width * (window.devicePixelRatio || 1))));
+    if (px === this._mapPx && this.dom.map.width === px) return;
+    this._mapPx = px;
+    this.dom.map.width = px;
+    this.dom.map.height = px;
+    // All draw code stays in a fixed 256-unit space; only this transform moves.
+    this.mapCtx.setTransform(px / 256, 0, 0, px / 256, 0, 0);
   }
 
   setTrack(track) {
     this.track = track;
     this.dom.laps.textContent = track.laps;
+    this._c.laps = track.laps;
+
     // Pre-project the centreline into minimap space once.
     const sp = track.spline;
     let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
@@ -169,7 +709,7 @@ export class HUD {
       if (x < minX) minX = x; if (x > maxX) maxX = x;
       if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
     }
-    const pad = 26;
+    const pad = 30;
     const w = maxX - minX + pad * 2, h = maxZ - minZ + pad * 2;
     const scale = Math.min(256 / w, 256 / h);
     this._map = {
@@ -195,55 +735,243 @@ export class HUD {
   update(dt, race) {
     const p = race.player;
     if (!p) return;
+    const c = this._c;
 
-    // Position -----------------------------------------------------------
-    if (p.rank !== this._lastPos) {
-      this._lastPos = p.rank;
-      this.dom.pos.textContent = p.rank;
-      this.dom.ord.textContent = ordinal(p.rank);
+    // Position -------------------------------------------------------------
+    // The single most-glanced value, so it gets the loudest feedback: a punch
+    // on any change, tinted by direction, plus a chevron that carries the
+    // meaning even for a colour-blind player.
+    if (p.rank !== c.pos) {
+      const gained = c.pos > 0 && p.rank < c.pos;
+      const lost = c.pos > 0 && p.rank > c.pos;
+      c.pos = p.rank;
+      const ord = ordinal(p.rank);
+      this.dom.posFill.textContent = p.rank;
+      this.dom.posNum.dataset.v = p.rank;
+      if (ord !== c.ord) {
+        c.ord = ord;
+        this.dom.ordSpan.textContent = ord;
+        this.dom.ord.dataset.v = ord;
+      }
+      if (gained || lost) this._punchPosition(gained);
+    }
+    if (this._tint > 0) {
+      this._tint -= dt;
+      if (this._tint <= 0) this.dom.pos.classList.remove('gain', 'loss');
     }
 
-    // Lap ------------------------------------------------------------------
+    // Lap --------------------------------------------------------------------
     const lap = Math.min(Math.max(p.lap, 1), this.track.laps);
-    if (lap !== this._lastLap) {
-      this._lastLap = lap;
+    if (lap !== c.lap) {
+      const first = c.lap < 0;
+      c.lap = lap;
       this.dom.lap.textContent = lap;
-      if (lap > 1) this.toast(lap === this.track.laps ? 'FINAL LAP!' : `LAP ${lap}`,
-        lap === this.track.laps ? '#ff6a3d' : '#ffd75e');
+      const final = lap === this.track.laps && this.track.laps > 1;
+      if (final !== c.final) { c.final = final; this.el.classList.toggle('final', final); }
+      if (!first && lap > 1) {
+        this.banner(final ? 'FINAL LAP' : `LAP ${lap}`, final ? '#ff6a3a' : '#ffd45c');
+      }
     }
 
-    // Speed ----------------------------------------------------------------
-    // Smooth the readout so it doesn't strobe between adjacent integers.
+    // Speed ------------------------------------------------------------------
+    // The readout is smoothed so it does not strobe between adjacent integers;
+    // the needle is a damped spring on top of that so a boost visibly slams it
+    // past the true value and settles back, which is what sells the surge.
     this._displaySpeed += (p.speedKmh - this._displaySpeed) * Math.min(1, dt * 14);
-    this.dom.speed.textContent = Math.round(this._displaySpeed);
-    const frac = clamp01(this._displaySpeed / (p.stats.topSpeed * 3.6 * 1.65));
-    this.dom.arc.style.strokeDashoffset = `${this.arcLen * (1 - frac)}`;
+    const kmh = Math.round(this._displaySpeed);
+    if (kmh !== c.speed) { c.speed = kmh; this.dom.speedNum.textContent = kmh; }
 
-    // Item -----------------------------------------------------------------
-    const shown = p.itemRoulette ? p.itemRoulette.display : p.item;
-    if (shown !== this._lastItem) {
-      this._lastItem = shown;
-      this.dom.itemIcon.textContent = shown ? (ITEM_ICONS[shown] || '?') : '';
-      this.dom.item.classList.toggle('pop', !!shown && !p.itemRoulette);
-      setTimeout(() => this.dom.item.classList.remove('pop'), 200);
+    const boosting = !!p.boostActive;
+    if (boosting !== c.boost) {
+      c.boost = boosting;
+      this.dom.speed.classList.toggle('boost', boosting);
+      if (boosting) this._surgeSpeed();
     }
-    this.dom.item.classList.toggle('spin', !!p.itemRoulette);
+    this._surge *= Math.exp(-dt * 3.4);
+
+    const top = p.stats.topSpeed * 3.6 * 1.65;
+    const frac = clamp01((this._displaySpeed + this._surge * 26) / top);
+    const off = Math.round(this.arcLen * (1 - frac) * 100) / 100;
+    if (off !== c.arcOff) {
+      c.arcOff = off;
+      this.dom.arc.style.strokeDashoffset = `${off}`;
+      this.dom.arcGlow.style.strokeDashoffset = `${off}`;
+    }
+
+    // Needle spring. Stiff enough to track normal acceleration exactly, loose
+    // enough that a mushroom throws it past the mark for a beat.
+    const targetAngle = G.span * frac - G.span / 2;
+    const k = 240, damping = 19;
+    this._needleVel += ((targetAngle - this._needleAngle) * k - this._needleVel * damping) * Math.min(dt, 1 / 45);
+    this._needleAngle += this._needleVel * Math.min(dt, 1 / 45);
+    const na = Math.round(this._needleAngle * 5) / 5;
+    if (na !== c.needle) {
+      c.needle = na;
+      this.dom.needle.style.transform = `rotate(${na}deg)`;
+    }
+
+    // Item -------------------------------------------------------------------
+    // Three distinct beats, each with its own tell: rolling (rim sweeps, reel
+    // jitters), locking in (slot overshoots and settles), spending (icon is
+    // thrown out of the slot). Spending is keyed off the use count rather than
+    // the item id, or a triple's second and third shots would be silent.
+    const rolling = !!p.itemRoulette;
+    const shown = rolling ? p.itemRoulette.display : p.item;
     const uses = p.itemUses || 0;
-    this.dom.itemCount.style.display = uses > 1 ? 'flex' : 'none';
-    if (uses > 1) this.dom.itemCount.textContent = uses;
+    const usesChanged = uses !== c.uses;
 
-    this.dom.coins.textContent = p.coins;
+    if (uses < c.uses && c.item) this._spendItem(c.item);
+    c.uses = uses;
 
-    // Lap times ------------------------------------------------------------
-    if (p.lapTimes.length) {
-      this.dom.times.innerHTML = p.lapTimes
-        .map((t, i) => `L${i + 1} <b>${fmtTime(t)}</b>`).join('<br>');
+    if (shown !== c.item) {
+      c.item = shown;
+      this._setIcon(shown ? ART_KIND[shown] : null);
+      this.dom.itemFrame.style.setProperty('--rim', shown ? (ITEM_TINT[shown] || '#9fb4cc') : '#9fb4cc');
+    }
+    if (rolling !== c.rolling) {
+      // Lock on the roulette *ending*, not on the icon changing: the last
+      // cycled face is sometimes already the result, and that frame would
+      // otherwise pass without the payoff animation.
+      if (!rolling && c.rolling && p.item) this._lockItem();
+      c.rolling = rolling;
+      this.dom.item.classList.toggle('rolling', rolling);
+    }
+    const empty = !shown;
+    if (empty !== c.empty) { c.empty = empty; this.dom.item.classList.toggle('empty', empty); }
+    const multi = uses > 1;
+    if (multi !== c.multi) { c.multi = multi; this.dom.item.classList.toggle('multi', multi); }
+    if (multi && usesChanged) this.dom.itemCount.textContent = `×${uses}`;
+
+    // Coins ------------------------------------------------------------------
+    if (p.coins !== c.coins) {
+      const up = p.coins > c.coins && c.coins >= 0;
+      c.coins = p.coins;
+      this.dom.coins.textContent = p.coins;
+      if (up) this._pop(this.dom.coins.parentElement, 1.22, 260);
     }
 
-    // Minimap --------------------------------------------------------------
+    // Splits -----------------------------------------------------------------
+    // Rebuilt only when a lap actually lands. The old code re-parsed this
+    // markup on every single frame.
+    if (p.lapTimes.length !== c.times) {
+      c.times = p.lapTimes.length;
+      const best = Math.min(...p.lapTimes);
+      this.dom.times.innerHTML = p.lapTimes.map((t, i) =>
+        `<div class="hk-times-row${t === best && p.lapTimes.length > 1 ? ' best' : ''}"><i>L${i + 1}</i><b>${fmtTime(t)}</b></div>`
+      ).join('');
+    }
+
+    // Finish -----------------------------------------------------------------
+    if (p.finished && !this._finishShown) { this._finishShown = true; this._showFinish(p, race); }
+
+    // Minimap ----------------------------------------------------------------
     this._mapAccum += dt;
     if (this._mapAccum > 1 / 30) { this._mapAccum = 0; this._drawMap(race); }
   }
+
+  // -- juice -----------------------------------------------------------------
+  // All one-shot flourishes go through Web Animations rather than CSS classes:
+  // no forced reflow to restart them, and transform/opacity keyframes stay on
+  // the compositor while the game is rendering.
+
+  _punchPosition(gained) {
+    const el = this.dom.pos;
+    el.classList.remove('gain', 'loss');
+    el.classList.add(gained ? 'gain' : 'loss');
+    // Short on purpose. In a twelve-kart pack places change constantly, and a
+    // long tint would mean the ordinal is almost never its identity gold.
+    this._tint = 0.75;
+    seq(el, gained
+      ? [{ transform: 'scale(1)', easing: EASE_OUT },
+         { transform: 'scale(1.30) translateY(-7%)', offset: .3, easing: 'ease-in-out' },
+         { transform: 'scale(1)' }]
+      : [{ transform: 'scale(1)', easing: 'ease-out' },
+         { transform: 'scale(.84) translateX(-4%)', offset: .22, easing: 'ease-in-out' },
+         { transform: 'scale(1.04) translateX(3%)', offset: .58, easing: EASE_OUT },
+         { transform: 'scale(1)' }],
+      gained ? 560 : 520);
+
+    const a = this.dom.arrow;
+    a.textContent = gained ? '▲' : '▼';
+    a.style.color = gained ? 'var(--gain)' : 'var(--loss)';
+    seq(a, [
+      { opacity: 0, transform: `translateY(${gained ? 70 : -70}%)`, easing: EASE_OUT },
+      { opacity: 1, transform: 'translateY(0)', offset: .22 },
+      { opacity: 1, transform: 'translateY(0)', offset: .68, easing: 'ease-in' },
+      { opacity: 0, transform: `translateY(${gained ? -80 : 80}%)` },
+    ], 1050);
+  }
+
+  /** The slot snaps shut on the rolled item: overshoot, spin settle, ring flash. */
+  _lockItem() {
+    seq(this.dom.item, [
+      { transform: 'translateX(-50%) scale(1.36) rotate(-10deg)', easing: 'ease-in-out' },
+      { transform: 'translateX(-50%) scale(.92) rotate(5deg)', offset: .42, easing: 'ease-in-out' },
+      { transform: 'translateX(-50%) scale(1.07) rotate(-2deg)', offset: .72, easing: EASE_OUT },
+      { transform: 'translateX(-50%) scale(1) rotate(0deg)' },
+    ], 520);
+    seq(this.dom.itemIcon,
+      [{ opacity: 0, transform: 'scale(.35) rotate(-45deg)' }, { opacity: 1, transform: 'scale(1) rotate(0)' }],
+      380, { easing: EASE_BACK });
+    this._ring(this.dom.item, '#ffffff');
+  }
+
+  _setIcon(kind) {
+    if (this._shownIcon) this._shownIcon.style.display = 'none';
+    this._shownIcon = kind ? this._icons[kind] : null;
+    if (this._shownIcon) this._shownIcon.style.display = 'block';
+  }
+
+  /** Spending an item throws the icon out of the slot rather than blanking it. */
+  _spendItem(id) {
+    const src = this._icons[ART_KIND[id]];
+    if (!src) return;
+    const ghost = document.createElement('div');
+    ghost.className = 'hk-item-icon';
+    ghost.style.cssText = 'pointer-events:none';
+    ghost.appendChild(src.firstElementChild.cloneNode(true));
+    this.dom.item.appendChild(ghost);
+    seq(ghost, [{ opacity: 1, transform: 'scale(1)' }, { opacity: 0, transform: 'scale(1.75) translateY(-46%)' }],
+      380, { easing: 'cubic-bezier(.3,0,.6,1)' })
+      .finished.then(() => ghost.remove(), () => ghost.remove());
+    seq(this.dom.item, [
+      { transform: 'translateX(-50%) scale(1)', easing: 'ease-out' },
+      { transform: 'translateX(-50%) scale(.86)', offset: .28, easing: EASE_OUT },
+      { transform: 'translateX(-50%) scale(1)' },
+    ], 360);
+    this._ring(this.dom.item, ITEM_TINT[id] || '#8fe9ff');
+  }
+
+  _surgeSpeed() {
+    this._surge = 1;
+    this._needleVel += 900;   // kick the spring so the needle overshoots first
+    this._pop(this.dom.speed, 1.07, 340);
+  }
+
+  /**
+   * Expanding soft halo. A hard bordered rectangle was the first attempt and
+   * it fought the octagonal frame; a radial ring has no shape of its own.
+   */
+  _ring(host, color) {
+    const r = document.createElement('div');
+    r.style.cssText = 'position:absolute;inset:-14%;pointer-events:none;border-radius:50%;' +
+      `background:radial-gradient(closest-side, transparent 56%, ${color} 76%, transparent 100%);`;
+    host.appendChild(r);
+    seq(r, [{ opacity: .95, transform: 'scale(.82)' }, { opacity: 0, transform: 'scale(1.6)' }],
+      500, { easing: 'ease-out' })
+      .finished.then(() => r.remove(), () => r.remove());
+  }
+
+  _pop(el, scale, ms) {
+    if (!el) return;
+    seq(el, [
+      { transform: 'scale(1)', easing: EASE_OUT },
+      { transform: `scale(${scale})`, offset: .34, easing: 'ease-in-out' },
+      { transform: 'scale(1)' },
+    ], ms);
+  }
+
+  // -- minimap ---------------------------------------------------------------
 
   _drawMap(race) {
     const ctx = this.mapCtx;
@@ -251,58 +979,194 @@ export class HUD {
     if (!m) return;
     ctx.clearRect(0, 0, 256, 256);
 
+    // Road drawn as three passes — dark casing, light surface, thin centre
+    // highlight. A single grey stroke reads as a wire diagram; this reads as a
+    // road at a glance, which is the whole point of a minimap.
     ctx.lineCap = 'round';
-    ctx.strokeStyle = 'rgba(0,0,0,.45)';
-    ctx.lineWidth = 13;
-    ctx.stroke(this._mapPath);
-    ctx.strokeStyle = 'rgba(255,255,255,.30)';
-    ctx.lineWidth = 9;
-    ctx.stroke(this._mapPath);
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = 'rgba(0,0,0,.6)'; ctx.lineWidth = 15.5; ctx.stroke(this._mapPath);
+    ctx.strokeStyle = 'rgba(178,200,232,.55)'; ctx.lineWidth = 11; ctx.stroke(this._mapPath);
+    ctx.strokeStyle = 'rgba(255,255,255,.30)'; ctx.lineWidth = 3.2; ctx.stroke(this._mapPath);
 
-    // Start line tick.
+    // Start/finish: an actual checker bar, oriented to the track heading.
     const sp = this.track.spline;
     const si = sp.indexAt(this.track.startS);
     ctx.save();
     ctx.translate(sp.pos[si * 3] * m.scale + m.ox, sp.pos[si * 3 + 2] * m.scale + m.oy);
-    ctx.rotate(-sp.heading[si]);
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(-7, -1.6, 14, 3.2);
+    ctx.rotate(Math.PI - sp.heading[si]);
+    ctx.fillStyle = 'rgba(0,0,0,.65)';
+    ctx.fillRect(-9.5, -3.5, 19, 7);
+    for (let i = 0; i < 6; i++) {
+      ctx.fillStyle = (i % 2) ? '#ffffff' : '#12161e';
+      ctx.fillRect(-9 + i * 3, -3, 3, 3);
+      ctx.fillStyle = (i % 2) ? '#12161e' : '#ffffff';
+      ctx.fillRect(-9 + i * 3, 0, 3, 3);
+    }
     ctx.restore();
 
+    // Rivals fade and shrink with distance so the two or three karts actually
+    // in play stand out from the eight that are a straight away.
+    const p = race.player;
     for (const k of race.karts) {
+      if (k.isPlayer) continue;
+      const d = Math.hypot(k.pos.x - p.pos.x, k.pos.z - p.pos.z);
+      const near = clamp01(1 - d / 190);
+      const alpha = 0.42 + near * 0.58;
+      const rad = 3.8 + near * 2.6;
       const x = k.pos.x * m.scale + m.ox;
       const y = k.pos.z * m.scale + m.oy;
-      ctx.beginPath();
-      ctx.arc(x, y, k.isPlayer ? 7.5 : 5.5, 0, Math.PI * 2);
-      ctx.fillStyle = k.isPlayer ? '#fff' : `#${k.stats.color.toString(16).padStart(6, '0')}`;
-      ctx.fill();
-      if (k.isPlayer) {
-        ctx.lineWidth = 3;
-        ctx.strokeStyle = '#ff9a1f';
-        ctx.stroke();
-      }
+      ctx.globalAlpha = alpha;
+      ctx.beginPath(); ctx.arc(x, y, rad + 1.6, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(0,0,0,.7)'; ctx.fill();
+      ctx.beginPath(); ctx.arc(x, y, rad, 0, Math.PI * 2);
+      ctx.fillStyle = `#${k.stats.color.toString(16).padStart(6, '0')}`; ctx.fill();
+      ctx.globalAlpha = 1;
     }
+
+    // Player: an arrow, not a dot. Direction of travel is the one thing a dot
+    // cannot express, and it is what tells you which way the next corner goes.
+    const px = p.pos.x * m.scale + m.ox;
+    const py = p.pos.z * m.scale + m.oy;
+    const pulse = 0.5 + 0.5 * Math.sin(race.time * 4.2);
+    ctx.save();
+    ctx.translate(px, py);
+    const halo = ctx.createRadialGradient(0, 0, 0, 0, 0, 17);
+    halo.addColorStop(0, `rgba(255,214,90,${0.32 + pulse * 0.16})`);
+    halo.addColorStop(1, 'rgba(255,214,90,0)');
+    ctx.fillStyle = halo;
+    ctx.beginPath(); ctx.arc(0, 0, 17, 0, Math.PI * 2); ctx.fill();
+    ctx.rotate(Math.PI - p.yaw);
+    ctx.beginPath();
+    ctx.moveTo(0, -10.5); ctx.lineTo(7.2, 8); ctx.lineTo(0, 4.2); ctx.lineTo(-7.2, 8);
+    ctx.closePath();
+    ctx.fillStyle = '#ffffff';
+    ctx.strokeStyle = 'rgba(8,12,22,.85)';
+    ctx.lineWidth = 2.8; ctx.lineJoin = 'round';
+    ctx.stroke(); ctx.fill();
+    ctx.restore();
   }
 
-  toast(text, color = '#fff') {
+  // -- centre stage ----------------------------------------------------------
+
+  /** Sweeping banner. Also the public `toast` target, kept for callers. */
+  banner(text, color = '#ffd45c') {
+    if (this._finishShown) return;   // the results card owns the screen
     const d = document.createElement('div');
-    d.className = 'hk-toast';
-    d.textContent = text;
-    d.style.color = color;
+    d.className = 'hk-band';
+    d.innerHTML = `<div class="hk-band-bg" style="--bc:${color}"></div>
+      <div class="hk-band-streak"></div>
+      <div class="hk-band-txt" style="color:${color}">${text}</div>`;
     this.el.appendChild(d);
-    setTimeout(() => d.remove(), 1600);
+
+    const bg = d.firstElementChild;
+    const streak = d.children[1];
+    const txt = d.children[2];
+    // Bar wipes open from the centre, text lands late, streak crosses, all out.
+    seq(bg, [{ transform: 'skewY(-1.4deg) scaleX(0)' }, { transform: 'skewY(-1.4deg) scaleX(1)' }],
+      260, { easing: EASE_OUT, fill: 'backwards' });
+    seq(txt, [{ opacity: 0, transform: 'translateX(-14%) skewX(-14deg)' },
+      { opacity: 1, transform: 'translateX(0) skewX(0)' }],
+      300, { delay: 150, easing: EASE_OUT, fill: 'backwards' });
+    seq(streak, [{ transform: 'translateX(-180%) skewX(-18deg)' }, { transform: 'translateX(420%) skewX(-18deg)' }],
+      900, { delay: 200, easing: 'cubic-bezier(.4,0,.3,1)' });
+    const out = d.animate([{ opacity: 1 }, { opacity: 0, transform: 'translateY(-14%)' }],
+      { duration: 340, delay: 1250, easing: 'ease-in', fill: 'forwards' });
+    out.finished.then(() => d.remove(), () => d.remove());
   }
 
+  toast(text, color = '#fff') { this.banner(text, color); }
+
+  /**
+   * 3-2-1-GO. Three grid lamps fill as the count runs down, so the start reads
+   * even in the half-second the numeral is mid-transition.
+   */
   countdown(n) {
-    this.dom.center.innerHTML = n > 0
-      ? `<div class="hk-count">${n}</div>`
-      : `<div class="hk-go">GO!</div>`;
-    setTimeout(() => { if (this.dom.center.firstChild) this.dom.center.innerHTML = ''; }, n > 0 ? 950 : 900);
+    if (n <= 0 && this._goShown) return;   // Race can emit tick 0 and 'go'
+    if (n <= 0) this._goShown = true;
+
+    const go = n <= 0;
+    const tone = go ? { a: '#d6fff0', b: '#3cf0a0', c: '#079c62', lamp: '#3cf0a0' }
+      : n === 1 ? { a: '#fff0d8', b: '#ff8a2a', c: '#c03a00', lamp: '#ff8a2a' }
+        : n === 2 ? { a: '#fff6d0', b: '#ffc32a', c: '#c07800', lamp: '#ffc32a' }
+          : { a: '#ffe9e4', b: '#ff5a44', c: '#a01000', lamp: '#ff5a44' };
+    const lit = go ? 3 : 4 - n;
+
+    this.dom.center.innerHTML = `
+      <div class="hk-count" data-v="${go ? 'GO!' : n}">
+        <div class="hk-count-ring" style="color:${tone.b}"></div>
+        <span style="background-image:linear-gradient(178deg,${tone.a} 14%,${tone.b} 56%,${tone.c} 100%)">${go ? 'GO!' : n}</span>
+      </div>
+      <div class="hk-lamps">${[0, 1, 2].map((i) =>
+        `<div class="hk-lamp${i < lit ? ' on' : ''}" style="--lamp:${tone.lamp}"></div>`).join('')}</div>`;
+
+    const num = this.dom.center.firstElementChild;
+    const ring = num.firstElementChild;
+    const anim = seq(num, go
+      ? [{ transform: 'scale(.25)', opacity: 0, easing: EASE_BACK },
+         { transform: 'scale(1.22)', opacity: 1, offset: .18, easing: 'ease-out' },
+         { transform: 'scale(1)', opacity: 1, offset: .34 },
+         { transform: 'scale(1.05)', opacity: 1, offset: .78, easing: 'ease-in' },
+         { transform: 'scale(1.55)', opacity: 0 }]
+      : [{ transform: 'scale(2.6)', opacity: 0, easing: EASE_OUT },
+         { transform: 'scale(1)', opacity: 1, offset: .2 },
+         { transform: 'scale(.97)', opacity: 1, offset: .74, easing: 'ease-in' },
+         { transform: 'scale(.86)', opacity: 0 }],
+      go ? 1050 : 900, { fill: 'forwards' });
+    // Shockwave: reads as impact without touching the 3D layer.
+    seq(ring, [{ opacity: .85, transform: 'scale(.35)' }, { opacity: 0, transform: 'scale(1.5)' }],
+      go ? 700 : 520, { easing: 'ease-out' });
+    for (let i = 0; i < lit; i++) {
+      const lamp = this.dom.center.lastElementChild.children[i];
+      if (i === lit - 1 || go) this._pop(lamp, 1.5, 420);
+    }
+
+    anim.finished.then(
+      () => { if (this.dom.center.firstElementChild === num) this.dom.center.innerHTML = ''; },
+      () => {},   // superseded by the next tick, which already replaced the DOM
+    );
+  }
+
+  _showFinish(p, race) {
+    const place = p.finishPlace || p.rank;
+    const best = p.lapTimes.length ? Math.min(...p.lapTimes) : null;
+    const card = document.createElement('div');
+    card.className = 'hk-finish';
+    card.innerHTML = `
+      <div class="hk-finish-hdr">Finish</div>
+      <div class="hk-finish-place">
+        <span class="hk-finish-num">${place}</span><span class="hk-finish-ord">${ordinal(place)}</span>
+      </div>
+      <div class="hk-finish-rule"></div>
+      <div class="hk-finish-rows">
+        <div class="hk-frow"><i>Total</i><b>${fmtTime(p.finishTime)}</b></div>
+        <div class="hk-frow hi"><i>Best lap</i><b>${best != null ? fmtTime(best) : '--:--.---'}</b></div>
+        <div class="hk-frow"><i>Coins</i><b>${p.coins}</b></div>
+        <div class="hk-frow"><i>Field</i><b>${race.karts.length} karts</b></div>
+      </div>`;
+    this.el.appendChild(card);
+    this._finishCard = card;
+
+    seq(card, [{ opacity: 0, transform: 'translate(-50%,-50%) scale(.82)' },
+      { opacity: 1, transform: 'translate(-50%,-50%) scale(1)' }],
+      520, { easing: EASE_BACK });
+    // Staggered rows: the eye is led down the card instead of being handed a
+    // wall of numbers at once.
+    const rows = card.querySelectorAll('.hk-frow');
+    rows.forEach((r, i) => seq(r,
+      [{ opacity: 0, transform: 'translateX(-10%)' }, { opacity: 1, transform: 'translateX(0)' }],
+      400, { delay: 380 + i * 110, easing: EASE_OUT, fill: 'backwards' },
+    ));
+    seq(card.querySelector('.hk-finish-num'),
+      [{ transform: 'scale(2.1)', opacity: 0 }, { transform: 'scale(1)', opacity: 1 }],
+      640, { delay: 120, easing: EASE_BACK, fill: 'backwards' });
   }
 
   setVisible(v) { this.el.style.display = v ? '' : 'none'; }
 
-  dispose() { this.el.remove(); }
+  dispose() {
+    window.removeEventListener('resize', this._onResize);
+    this.el.remove();
+  }
 }
 
 export function fmtTime(t) {
