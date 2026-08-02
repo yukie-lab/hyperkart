@@ -4,7 +4,7 @@ import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
-import { clamp01, damp } from '../core/MathX.js';
+import { clamp, clamp01, damp } from '../core/MathX.js';
 
 /**
  * Post-processing chain.
@@ -192,6 +192,8 @@ export class PostFX {
     this.u = this.cinematic.uniforms;
     this._speed = 0;
     this._boost = 0;
+    this._cx = 0.5;
+    this._cy = 0.5;
     this._hit = 0;
   }
 
@@ -246,6 +248,18 @@ export class PostFX {
     // speed, then it ramps hard, so boosts feel like a step change.
     const target = Math.pow(clamp01((state.speed01 - 0.55) / 0.45), 1.6);
     this._speed = damp(this._speed, target, 6, dt);
+
+    // The radial blur's origin. `uCenter` was set to (0.5, 0.5) at construction
+    // and never written again, so the frame always smeared away from the
+    // crosshair no matter where the road went — most obviously on a fast
+    // sweeper, where the world streaks symmetrically while the kart is clearly
+    // travelling to one side. Damped, and clamped well inside the frame so a
+    // corner exit cannot throw the origin off-screen and invert the streaks.
+    if (state.center) {
+      this._cx = damp(this._cx, clamp(state.center[0], 0.22, 0.78), 5, dt);
+      this._cy = damp(this._cy, clamp(state.center[1], 0.25, 0.75), 5, dt);
+      this.u.uCenter.value.set(this._cx, this._cy);
+    }
 
     this._boost = damp(this._boost, state.boosting ? 0.10 : 0, state.boosting ? 12 : 4, dt);
     // Both flashes are added straight onto every pixel, so they are clamped to

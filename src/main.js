@@ -114,42 +114,69 @@ const loop = new Loop({
     lookBack = input.state.look;
   },
   render: (alpha, dt) => {
-    const p = race.player;
-
-    race.render(alpha, dt, camera.position);
-
-    if (race.state === RACE_STATE.FINISHED && p.finished) {
-      chase.updateOrbit(dt, p.visualPos, loop.simTime);
-    } else {
-      chase.update(dt, p, { lookBack, shakeImpulse, dipImpulse });
-    }
-    shakeImpulse = 0;
-    dipImpulse = 0;
-
-    sky.follow(camera.position);
-    sky.update(dt, loop.simTime);
-    lighting.update(dt, p.visualPos, _fwd.set(Math.sin(p.yaw), 0, Math.cos(p.yaw)));
-
-    race.fx.setPixelScale(rs.height * rs.currentPixelRatio, camera.fov);
-
-    post.update(dt, {
-      speed01: clamp01(Math.abs(p.speed) / Math.max(p.stats.topSpeed, 1)),
-      boosting: p.boostActive,
-      hit: hitFlash,
-      time: loop.simTime,
-    });
-    hitFlash = 0;
-
-    hud.update(dt, race);
+    presentFrame(alpha, dt);
     audio.update(dt, race, { pos: camera.position, quat: camera.quaternion });
-
-    rs.beginFrame();
-    post.render(dt);
     rs.adaptResolution(dt, loop.smoothedFrameMs);
   },
 });
 
+/**
+ * Everything between "the simulation has a new state" and "a frame is on the
+ * screen", in one place.
+ *
+ * The harness used to carry its own abbreviated copy of this, and the copy had
+ * quietly diverged: it passed `hit: 0` literally, dropped `shakeImpulse` and
+ * `dipImpulse` on the floor, and never called `sky.update`. So no capture this
+ * project has ever taken could show a hit flash, an impact shake, a landing
+ * compression, or a cloud that had moved — `uTime` sat at zero, which means
+ * every sky in every review frame was the t=0 sky. Three rubric criteria were
+ * being scored against evidence that structurally could not contain them.
+ */
+function presentFrame(alpha, dt) {
+  const p = race.player;
+
+  race.render(alpha, dt, camera.position);
+
+  if (race.state === RACE_STATE.FINISHED && p.finished) {
+    chase.updateOrbit(dt, p.visualPos, loop.simTime);
+  } else {
+    chase.update(dt, p, { lookBack, shakeImpulse, dipImpulse });
+  }
+  shakeImpulse = 0;
+  dipImpulse = 0;
+
+  sky.follow(camera.position);
+  sky.update(dt, loop.simTime);
+  lighting.update(dt, p.visualPos, _fwd.set(Math.sin(p.yaw), 0, Math.cos(p.yaw)));
+
+  race.fx.setPixelScale(rs.height * rs.currentPixelRatio, camera.fov);
+
+  // Where the kart is actually heading, in screen space, so the speed blur
+  // radiates from the vanishing point of travel rather than from the middle of
+  // the monitor.
+  _focus.set(
+    p.visualPos.x + Math.sin(p.yaw) * 26,
+    p.visualPos.y + 1.2,
+    p.visualPos.z + Math.cos(p.yaw) * 26,
+  ).project(camera);
+
+  post.update(dt, {
+    speed01: clamp01(Math.abs(p.speed) / Math.max(p.stats.topSpeed, 1)),
+    boosting: p.boostActive,
+    hit: hitFlash,
+    time: loop.simTime,
+    center: [_focus.x * 0.5 + 0.5, _focus.y * 0.5 + 0.5],
+  });
+  hitFlash = 0;
+
+  hud.update(dt, race);
+
+  rs.beginFrame();
+  post.render(dt);
+}
+
 const _fwd = new THREE.Vector3();
+const _focus = new THREE.Vector3();
 
 function handleEvents(events) {
   for (const e of events) {
@@ -292,18 +319,7 @@ const harness = {
         else a.finish();
       } catch { /* an animation that cannot be settled is not worth failing a capture over */ }
     }
-    race.render(1, dt, camera.position);
-    chase.update(dt, race.player, { lookBack: false });
-    sky.follow(camera.position);
-    lighting.update(dt, race.player.visualPos, _fwd.set(Math.sin(race.player.yaw), 0, Math.cos(race.player.yaw)));
-    race.fx.setPixelScale(rs.height * rs.currentPixelRatio, camera.fov);
-    post.update(dt, {
-      speed01: clamp01(Math.abs(race.player.speed) / race.player.stats.topSpeed),
-      boosting: race.player.boostActive, hit: 0, time: loop.simTime,
-    });
-    hud.update(dt, race);
-    rs.beginFrame();
-    post.render(dt);
+    presentFrame(1, dt);
     await new Promise((r) => requestAnimationFrame(r));
   },
 
@@ -311,8 +327,11 @@ const harness = {
     const p = race.player;
     return {
       time: loop.simTime,
-      frameMs: loop.smoothedFrameMs,
-      fps: 1000 / loop.smoothedFrameMs,
+      // Null in capture mode: the loop is not running, so `smoothedFrameMs`
+      // is still its constructor value and any rate derived from it is
+      // invented. Measure frame rate with the loop running instead.
+      frameMs: loop.frameCount ? loop.smoothedFrameMs : null,
+      fps: loop.frameCount ? 1000 / loop.smoothedFrameMs : null,
       pixelRatio: rs.currentPixelRatio,
       drawCalls: rs.renderer.info.render.calls,
       triangles: rs.renderer.info.render.triangles,

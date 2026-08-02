@@ -108,14 +108,59 @@ async function main() {
   if (!CFG.hud) await page.evaluate(() => window.__hk.setHud(false));
 
   if (CFG.hide) {
+    // Hidden by layer, not by `.visible`.
+    //
+    // Setting `.visible = false` does not survive a frame: the presentation
+    // update paths write it back. `KartModel._updateContact` writes
+    // `contact.visible` on its first edge and `KartFX._shadowBlob` writes
+    // `b.visible = true` unconditionally, so `--hide contactAO` reported
+    // twelve objects hidden and produced a bit-identical frame. Every
+    // attribution made with this flag against a kart, an FX pool, a contact
+    // patch or a shadow blob was therefore unsound. Nothing writes to
+    // `layers`, and layer 31 is rendered by no camera in this project --
+    // including the shadow camera, so a hidden caster stops casting too.
     const hidden = await page.evaluate((pats) => {
       const names = [];
       window.__hk.scene.traverse((o) => {
-        if (o.name && pats.some((p) => o.name.includes(p))) { o.visible = false; names.push(o.name); }
+        if (o.name && pats.some((p) => o.name.includes(p))) { o.layers.set(31); names.push(o.name); }
       });
       return names;
     }, CFG.hide.split(',').map((s) => s.trim()).filter(Boolean));
     process.stdout.write(`hidden (${hidden.length}): ${hidden.join(', ') || 'nothing matched'}\n`);
+
+    // Self-check. A hide that matched objects but does not change the draw
+    // count is a hide that did nothing, and a silent no-op here produces a
+    // confident false conclusion downstream -- which is exactly what happened
+    // for the whole life of this flag.
+    //
+    // It counts by rendering the scene straight to the canvas rather than
+    // through `__hk.frame()`, because `frame()` advances particles and
+    // animation: an earlier version of this check burned two frames and moved
+    // 83% of the pixels it was meant to be validating.
+    if (hidden.length) {
+      const drop = await page.evaluate(() => {
+        const { rs, scene, camera } = window.__hk;
+        const count = () => {
+          rs.beginFrame();
+          rs.renderer.setRenderTarget(null);
+          rs.renderer.render(scene, camera);
+          return rs.renderer.info.render.calls;
+        };
+        const withHide = count();
+        const restored = [];
+        scene.traverse((o) => { if (!o.layers.test(camera.layers)) { restored.push(o); o.layers.enable(0); } });
+        const without = count();
+        for (const o of restored) o.layers.set(31);
+        return { withHide, without };
+      });
+      if (drop.withHide >= drop.without) {
+        process.stdout.write(
+          `  ! WARNING: hiding those objects did not reduce draw calls ` +
+          `(${drop.without} -> ${drop.withHide}). Treat this A/B as invalid.\n`);
+      } else {
+        process.stdout.write(`  hide removes ${drop.without - drop.withHide} draw calls\n`);
+      }
+    }
   }
 
   const times = CFG.series
