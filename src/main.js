@@ -137,6 +137,14 @@ function presentFrame(alpha, dt) {
 
   race.render(alpha, dt, camera.position);
 
+  // The bumper camera sits 1.35 m ahead of the kart's origin and the nose tip
+  // is at 1.45, so it is *inside* the bodywork: the player's own front wheel
+  // and nose filled the bottom corner of every bumper frame, seen from within.
+  // Hide the player's own model for that camera, which is what a bumper view is
+  // for. Set here rather than on the model because `model.update` writes
+  // `.visible` straight back every frame.
+  p.model.group.visible = chase.mode !== 'bumper';
+
   if (race.state === RACE_STATE.FINISHED && p.finished) {
     chase.updateOrbit(dt, p.visualPos, loop.simTime);
   } else {
