@@ -232,7 +232,7 @@ function fmt(report, opts = {}) {
     'P  ' + 'name'.padEnd(8) + 'cls'.padEnd(7) + 'skl'.padEnd(6) +
     'total'.padStart(7) + 'best'.padStart(7) + '  laps'.padEnd(26) +
     'drift%'.padStart(7) + 'mt%'.padStart(6) + 'off%'.padStart(6) +
-    'B/O/P'.padStart(9) + 'wall'.padStart(6) + 'rsp'.padStart(5) +
+    'B/O/P'.padStart(9) + 'wall'.padStart(10) + 'rsp'.padStart(5) +
     'hit'.padStart(5) + 'top'.padStart(7) + 'avg'.padStart(7),
   );
   for (const r of report.rows) {
@@ -246,7 +246,10 @@ function fmt(report, opts = {}) {
       String(r.driftPct).padStart(7) + String(r.mtBoostPct).padStart(6) +
       String(r.offPct).padStart(6) +
       `${r.stages[0]}/${r.stages[1]}/${r.stages[2]}`.padStart(9) +
-      `${r.walls}(${r.hardWalls})`.padStart(6) +
+      // Now that this column reports every head-on engagement rather than only
+      // the nine-in-three-races that cleared 0.4, it needs room for four digits
+      // and a bracket -- at 6 it ran into B/O/P and read as one token.
+      `${r.walls}(${r.hardWalls})`.padStart(10) +
       String(r.respawns).padStart(5) + String(r.hits).padStart(5) +
       String(r.top).padStart(7) + String(r.avg).padStart(7),
     );

@@ -577,7 +577,13 @@ export class Kart {
       this.lateralVel = -this.lateralVel * COLLISION.wallBounce;
       this._cancelDrift();
       this.lastImpact = Math.max(this.lastImpact, headOn);
-      if (headOn > 0.4) this.onWallHit?.(headOn);
+      // Report every head-on engagement and let the listener decide what is
+      // loud enough to react to. Gating at 0.4 here meant the barrier bled
+      // speed, cancelled drifts and steered karts straight 2,940 times across
+      // three races while reporting 9 — so the telemetry column read 0(0) on
+      // every track and every seed, and no one could tell a working barrier
+      // from an absent one.
+      this.onWallHit?.(headOn);
     } else {
       // Scrape: bleed a little speed and steer parallel to the barrier.
       this.speed *= 0.995;

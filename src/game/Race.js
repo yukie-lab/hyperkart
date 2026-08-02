@@ -117,7 +117,13 @@ export class Race {
       this.fx.landing(kart.pos, impact);
     };
     kart.onTrick = (kind) => this.events.push({ type: 'trick', kart, kind });
-    kart.onWallHit = (force) => this.events.push({ type: 'wallHit', kart, force });
+    // The kart reports every head-on engagement; only a real bang is an event.
+    // This threshold used to live inside Kart, where it also silenced the
+    // telemetry. Same 0.4, same camera shake, same audio — but the model now
+    // says what happened and the game decides what to do about it.
+    kart.onWallHit = (force) => {
+      if (force > 0.4) this.events.push({ type: 'wallHit', kart, force });
+    };
     kart.onLap = (lap) => this.events.push({ type: 'lap', kart, lap });
     kart.onRespawn = () => this.events.push({ type: 'respawn', kart });
     kart.onFinish = () => {
