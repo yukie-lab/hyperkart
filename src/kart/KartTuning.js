@@ -55,10 +55,29 @@ export const DRIFT = {
   bodyAngleRate: 9.0,
   // Drift bleeds a little speed, so drifting everywhere is not free.
   speedPenalty: 0.965,
-  // Charge accumulation.
-  chargeBase: 0.72,
-  chargeSteerBonus: 0.34,
-  // Charge thresholds for each mini-turbo tier.
+  // Charge accumulation. `chargeSteerBonus` used to add up to 0.34/s for
+  // holding the stick *into* the slide, and it was never once earned: earning
+  // it needs the corner to demand more yaw than the drift's own base arc
+  // already delivers, which at 24-30 m/s means a radius under ~39 m, and these
+  // circuits sit at 50/67/74 m at the 90th percentile. Measured over 245k
+  // drifting frames across the three tracks, the mean earned rate was
+  // 0.721/0.728/0.736 against an advertised 1.06 — on canyonRush the term
+  // cleared zero on 1.25% of frames and never once reached half. So the
+  // headline rate had never been delivered: purple nominally cost 3.58 s of
+  // slide and actually cost 5.28 s, against a longest hold of ~5.7 s on the
+  // one circuit that has a sweeper long enough, and 4.4 s on canyonRush. Purple
+  // fired in 0 of 36 kart-races there and on rainbowSkyway.
+  //
+  // Folded into the base rather than made earnable: the input it pays for is
+  // one no good driver gives. The drift arc is already tighter than every
+  // corner here, so steering further into it drives you off the inside — the
+  // parameter rewarded the mistake. Making it fire would mean loosening
+  // DRIFT.baseRate, which is the signature pose, not an economy knob.
+  // The thresholds below are untouched; they were never what was broken.
+  chargeBase: 1.06,
+  chargeSteerBonus: 0,
+  // Charge thresholds for each mini-turbo tier. In seconds of committed slide
+  // at the rate above: blue 0.94, orange 2.08, purple 3.58.
   stages: [
     { charge: 1.00, boost: 0.85, strength: 0.30, color: 0x53c4ff, name: 'blue' },
     { charge: 2.20, boost: 1.30, strength: 0.40, color: 0xffa524, name: 'orange' },

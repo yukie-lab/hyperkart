@@ -102,10 +102,28 @@ function steerAuthority(v, top = DRIVE.topSpeed) {
  */
 const DRIFT_MOD_FLOOR = -0.95;
 const DRIFT_MOD_CEIL = 0.98;
-/** Metres of lateral offset from the racing line a drift is allowed to spend. */
+/**
+ * Metres of lateral offset from the racing line a drift is allowed to spend.
+ * Making this road-relative — the actual edge, measured from wherever the line
+ * sits, rather than one number for a 20 m boulevard and a 12 m ledge — was
+ * tried and reverted: 4.6 m is already tighter than the narrowest of the three
+ * circuits allows, so the honest version was inert to three decimal places on
+ * every metric over thirty races.
+ */
 const DRIFT_LINE_BUDGET = 4.6;
 /** Hop-to-landing time; a drift only engages when the kart comes back down. */
 const DRIFT_HOP_TIME = 2 * DRIFT.hopVelocity / PHYS.gravity;
+/**
+ * Metres inside the nominal road edge a slide is judged against — negative
+ * where it may overhang. Two circuits have a shoulder and a barrier past that
+ * edge, so the kart centre can sit outside it and be shoved back; rainbow's is
+ * a sixty-metre drop, and the drifting this pass unlocked has to be paid for
+ * there. Ten seeds, twelve karts, three laps: rainbow respawned 970 times
+ * before the pass and 1074 with the extra drifting at the old 1.0 m margin.
+ * 1.3 brings that back to 980 for 0.04 of a purple per kart-race; by 2.6 the
+ * circuit cannot bank purple at all.
+ */
+const DRIFT_EDGE_MARGIN = { void: 1.3, barrier: -0.7 };
 
 function stageForCharge(c) {
   for (let i = DRIFT.stages.length - 1; i >= 0; i--) if (c >= DRIFT.stages[i].charge) return i;
@@ -303,6 +321,14 @@ export class AIDriver {
       this.ctrl.accel = 0;
     } else {
       this.ctrl.brake = 0;
+      // The throttle stays pinned through a slide even when the corner limit
+      // says otherwise, and that is not an oversight. A drifting kart does
+      // arrive at rainbow's hairpin — 21 m of radius on a 12 m ledge — at 1.42x
+      // the line limit against 1.13x for the same corner taken on grip, so
+      // lifting to 0.35 there was tried. It was worse on every count: canyonRush
+      // 4.6% slower field-wide and rainbow's respawns up 17%, because authority
+      // *rises* as speed falls, so a slower drift draws a tighter arc and puts
+      // the nose further inside the corner it was trying to survive.
       this.ctrl.accel = k.speed > desired && !k.drift.active ? 0.35 : 1;
     }
 
@@ -481,10 +507,50 @@ export class AIDriver {
     this.ctrl.drift = true;
     this.driftSteer = this._turnIn(this.seg.dir);
     this.hopWait -= dt;
-    if (this.hopWait <= 0 && k.grounded) {
+    // ...but not while the release guard would bin the slide on the frame it
+    // lands. Turn-in catches the kart still crossing to the outside of the
+    // corner, and the guard is absolute, so pressing here spends a hop and a
+    // cooldown to bank nothing: 265 of rainbow's 661 slides and 240 of
+    // canyonRush's 654 ended at stage -1, most of them right there. Turn-in
+    // steering is already pulling the kart back, so waiting a few frames costs
+    // nothing and the re-press timer picks it up.
+    if (this.hopWait <= 0 && k.grounded && !this._pastEdge()) {
       this.ctrl.driftPressed = true;
       this.hopWait = 0.2;
     }
+  }
+
+  /**
+   * Whether the road runs out under the kart within `lead` seconds. Shared by
+   * turn-in and the release guard so that the two cannot disagree about what
+   * "off" means.
+   *
+   * The projection integrates the *arc*, not the tangent. A sliding kart is
+   * rotating at a rate the drift model states outright, so freezing the current
+   * heading reads a slide that has already begun coming back as one that is
+   * still leaving — and it is wrong in exactly the window it is asked about,
+   * because turn-in is where the heading points furthest out and the rotation
+   * has had least time to work. Straight-line projection was binning 179 of
+   * rainbow's 653 slides while they were still at stage -1.
+   */
+  _pastEdge(lead = 0.4) {
+    const k = this.kart;
+    const half = this.track.halfWidthAt(k.s);
+    const edge = half - (this.track.isVoid ? DRIFT_EDGE_MARGIN.void : DRIFT_EDGE_MARGIN.barrier);
+    const psi = wrapAngle(k.yaw - k.ground.heading);
+    let latAhead = k.lateral + k.lateralVel * lead;
+    // Yaw rate relative to the road: the road is turning under us too, and only
+    // the difference moves the kart across it.
+    let w = -(k.ground.curvature || 0) * k.speed;
+    if (k.drift.active) {
+      const m = clamp(this.ctrl.steer * k.drift.dir, -1, 1);
+      w += k.drift.dir * (DRIFT.baseRate + DRIFT.steerRange * m)
+        * steerAuthority(k.speed, k.stats.topSpeed) * (k.surface ? k.surface.grip : 1);
+    }
+    latAhead += Math.abs(w) > 1e-3
+      ? k.speed * (Math.cos(psi) - Math.cos(psi + w * lead)) / w
+      : k.speed * Math.sin(psi) * lead;
+    return Math.abs(latAhead) > edge && Math.abs(latAhead) > Math.abs(k.lateral);
   }
 
   /** Next planned drift worth taking, or null. */
@@ -586,24 +652,19 @@ export class AIDriver {
     const len = this.track.length;
     const v = Math.max(k.speed, 1);
 
-    // Where the slide is taking us, four tenths of a second out. A drift draws
-    // a fixed arc, so projecting it is the only way to know it still fits.
-    const half = this.track.halfWidthAt(k.s);
-    const latRate = k.speed * Math.sin(wrapAngle(k.yaw - k.ground.heading)) + k.lateralVel;
-    const latAhead = k.lateral + latRate * 0.4;
-    // Leaving the road is a barrier on two tracks and a sixty-metre drop on the
-    // third, so this guard is absolute — bank the tier rather than test it.
-    // It is measured against the road edge and not against the racing line:
-    // turn-in *is* the point where the line runs widest and is still going
-    // wider, and a guard pitched any tighter than this kills every drift on
-    // the frame it starts.
-    const edge = this.track.isVoid ? half - 1.0 : half + 0.7;
+    // Where the slide is taking us, four tenths of a second out. Leaving the
+    // road is a barrier on two tracks and a sixty-metre drop on the third, so
+    // this guard is absolute — bank the tier rather than test it. It is
+    // measured against the road edge and not against the racing line: turn-in
+    // *is* the point where the line runs widest and is still going wider, and a
+    // guard pitched any tighter than this kills every drift on the frame it
+    // starts.
+    //
     // Turn-in is the worst frame for every one of these tests — the hop has
     // just landed, lateral velocity is still the hop's, and the line is at its
     // widest — so give the slide a moment to settle before judging it.
     const settled = this.driftTime > 0.25;
-    if ((settled || this.track.isVoid)
-      && Math.abs(latAhead) > edge && Math.abs(latAhead) > Math.abs(k.lateral)) return true;
+    if ((settled || this.track.isVoid) && this._pastEdge()) return true;
     if (k.grounded && !k.ground.onRoad) return true;
 
     // The line-error account `rollDrift` budgets for, now measured for real —
