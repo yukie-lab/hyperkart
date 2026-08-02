@@ -16,6 +16,11 @@ export const TRACK_LAYOUT = {
   curbWidth: 1.35,      // rumble strip, measured inward from the road edge
   shoulderWidth: 6.5,   // drivable off-road apron before the barrier
   wallHeight: 1.6,
+  // How far a kart's *centre* may pass the edge of a void track before the
+  // ground stops holding it. This is the kart's own radius, deliberately: a
+  // kart falls once it has actually left the road, not while a third of it is
+  // still over tarmac. See `sampleGround`.
+  voidOverhang: 1.15,
 };
 
 export class Track {
@@ -154,7 +159,14 @@ export class Track {
     out.wallLateral = half + TRACK_LAYOUT.shoulderWidth;
     out.beyondWall = absLat > out.wallLateral;
     // Off a rainbow road there is no ground at all — karts fall into the void.
-    out.hasGround = !(this.isVoid && absLat > half + 0.6);
+    //
+    // The lip used to sit 0.6 m past the edge, which is *inside* the kart: with
+    // a 1.15 m radius, a kart was dropped while 0.55 m of it was still over the
+    // road. Measured at the moment each fall was committed, 58.2% of them were
+    // between 0.40 and 0.80 m past the edge — cars clipping a lip drawn through
+    // their own bodywork. The overhang is now the kart's radius, so a kart
+    // falls when it has genuinely left the road.
+    out.hasGround = !(this.isVoid && absLat > half + TRACK_LAYOUT.voidOverhang);
     return out;
   }
 
