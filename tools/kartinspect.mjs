@@ -116,6 +116,12 @@ async function main() {
         // are mid-edit on exposure, haze and bloom.
         const fog = hk.scene.fog;
         if (opt.nofog) hk.scene.fog = null;
+        // `renderer.info.autoReset` is off (the composer issues several passes
+        // per frame), so without an explicit reset these counts accumulate
+        // across every frame this tool draws. That is where the "~1000 draw
+        // calls" figure quoted around this project came from: four orbit
+        // frames of one scene reported 309, 421, 675, 1035.
+        hk.rs.beginFrame();
         hk.rs.renderer.setRenderTarget(null);
         hk.rs.renderer.render(hk.scene, hk.camera);
         hk.scene.fog = fog;

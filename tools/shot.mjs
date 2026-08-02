@@ -152,7 +152,12 @@ async function main() {
       `   rank=${stats.player.rank} lap=${stats.player.lap} ${stats.player.speedKmh}km/h ` +
       `drift=${stats.player.drift}${stats.player.driftStage >= 0 ? `(${stats.player.driftStage})` : ''} ` +
       `boost=${stats.player.boosting} onRoad=${stats.player.onRoad}\n` +
-      `   draws=${stats.drawCalls} tris=${stats.triangles} fps=${stats.fps.toFixed(0)}\n`,
+      // No fps here. In capture mode the live loop never starts, so
+      // `Loop.smoothedFrameMs` sits at its constructor value forever and this
+      // field printed a constant 60 on every capture ever taken. A fabricated
+      // number is worse than no number; measure frame rate with the loop
+      // running (shot=0) instead.
+      `   draws=${stats.drawCalls} tris=${stats.triangles}\n`,
     );
   }
 

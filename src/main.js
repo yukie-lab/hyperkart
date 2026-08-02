@@ -156,10 +156,10 @@ function handleEvents(events) {
     audio.handleEvent(e);
     switch (e.type) {
       case 'countdown':
-        hud.countdown(e.n);
+        hud.countdown(e.n, race.time);
         break;
       case 'go':
-        hud.countdown(0);
+        hud.countdown(0, race.time);
         break;
       case 'hit':
         if (e.kart === race.player) { shakeImpulse = 0.55; hitFlash = 1; }

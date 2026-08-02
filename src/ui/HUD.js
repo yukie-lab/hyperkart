@@ -919,6 +919,7 @@ export class HUD {
   update(dt, race) {
     const p = race.player;
     if (!p) return;
+    this._retireCountdown(race);
     const c = this._c;
 
     // Position -------------------------------------------------------------
@@ -1401,9 +1402,24 @@ export class HUD {
    * 3-2-1-GO. Three grid lamps fill as the count runs down, so the start reads
    * even in the half-second the numeral is mid-transition.
    */
-  countdown(n) {
+  /**
+   * @param {number} n       ticks remaining; <= 0 is GO
+   * @param {number} raceTime the race clock at which this tick was issued
+   *
+   * The banner used to clear itself from `anim.finished` — the Web Animations
+   * API's wall clock, which has nothing to do with the simulation. The capture
+   * harness sits idle for a variable number of real seconds before it shoots,
+   * so whether GO! was still on screen was a coin flip: six of fifteen
+   * verification frames came back with a green banner over 24-43% of the
+   * centre, and two HUD-on captures of the same code and the same sim time
+   * differed on 10.7% of their pixels. Clearing off the race clock instead
+   * makes a HUD-on capture as deterministic as the 3D one.
+   */
+  countdown(n, raceTime = 0) {
     if (n <= 0 && this._goShown) return;   // Race can emit tick 0 and 'go'
     if (n <= 0) this._goShown = true;
+    this._countAt = raceTime;
+    this._countLife = n <= 0 ? 1.05 : 0.90;
 
     const go = n <= 0;
     const tone = go ? { a: '#d6fff0', b: '#3cf0a0', c: '#079c62', lamp: '#3cf0a0' }
@@ -1441,10 +1457,16 @@ export class HUD {
       if (i === lit - 1 || go) this._pop(lamp, 1.5, 420);
     }
 
-    anim.finished.then(
-      () => { if (this.dom.center.firstElementChild === num) this.dom.center.innerHTML = ''; },
-      () => {},   // superseded by the next tick, which already replaced the DOM
-    );
+    // Deliberately no `anim.finished` cleanup: see the note on this method.
+    // `update()` retires the banner off the race clock.
+  }
+
+  /** Retire the countdown banner on sim time rather than on the wall clock. */
+  _retireCountdown(race) {
+    if (this._countAt === undefined || !this.dom.center.firstElementChild) return;
+    if ((race?.time ?? 0) - this._countAt <= this._countLife) return;
+    this.dom.center.innerHTML = '';
+    this._countAt = undefined;
   }
 
   _showFinish(p, race) {
