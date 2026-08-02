@@ -164,6 +164,24 @@ const FRAG = /* glsl */`
     return col;
   }
 
+  /**
+   * Seam-free noise over a view direction.
+   *
+   * Equirectangular coordinates put a hard discontinuity down the sky wherever
+   * atan2 wraps from +pi to -pi, and an fBm sampled across that wrap draws it
+   * as a straight vertical line from zenith to horizon — which is exactly what
+   * the nebula was doing. Triplanar blending of three planar projections has
+   * no wrap and no pole to pinch, at the cost of two extra noise stacks on a
+   * dome that only the void track ever renders.
+   */
+  float domeFbm(vec3 d, float k, float off, int oct) {
+    vec3 w = abs(d);
+    w /= max(w.x + w.y + w.z, 1e-4);
+    return fbm(d.yz * k + off, oct) * w.x
+         + fbm(d.zx * k + off + 17.1, oct) * w.y
+         + fbm(d.xy * k + off + 41.3, oct) * w.z;
+  }
+
   vec3 space(vec3 dir, vec2 sunAz, float az) {
     float h = dir.y;
     float hs = clamp(h, 0.0, 1.0);
@@ -172,14 +190,12 @@ const FRAG = /* glsl */`
     col = mix(col, uZenith, smoothstep(uGradHighA, uGradHighB, hs));
     col = mix(col, uGroundHaze, smoothstep(0.0, -0.15, h));
 
-    // Equirectangular coordinates so the nebula wraps the dome without a seam
-    // at the pole.
-    vec2 sp = vec2(atan(dir.z, dir.x), asin(clamp(dir.y, -1.0, 1.0))) * (2.4 / max(uNebScale, 1e-3));
+    float k = 7.2 / max(uNebScale, 1e-3);
 
     // Same expansion as the cloud layers: without it the nebula is a uniform
     // curtain over the whole dome and the sky stops reading as space at all.
-    float n = clamp((fbm(sp, 5) - 0.5) * 2.4 + 0.5, 0.0, 1.0);
-    float m = fbm(sp * 1.7 + 11.3, 4);
+    float n = clamp((domeFbm(dir, k, 0.0, 5) - 0.5) * 2.4 + 0.5, 0.0, 1.0);
+    float m = domeFbm(dir, k * 1.7, 11.3, 4);
     float cloud = smoothstep(1.0 - uNebCoverage - 0.10, 1.0 - uNebCoverage + 0.18, n);
 
     vec3 neb = mix(uNebCool, uNebWarm, smoothstep(0.35, 0.75, m));
@@ -188,7 +204,7 @@ const FRAG = /* glsl */`
 
     // Galactic band: a bright lane across one great circle of the sphere.
     float band = 1.0 - smoothstep(0.0, 0.26, abs(dot(dir, normalize(vec3(0.36, 0.56, -0.75)))));
-    col += uNebBand * band * (0.25 + 0.75 * fbm(sp * 0.8 + 4.0, 3)) * uNebStrength;
+    col += uNebBand * band * (0.25 + 0.75 * domeFbm(dir, k * 0.8, 4.0, 3)) * uNebStrength;
 
     float ang = acos(clamp(dot(dir, uSunDir), -1.0, 1.0));
     col += uSunGlow * (exp(-ang * 20.0) * uGlowTight + exp(-ang * 3.2) * uGlowBroad);

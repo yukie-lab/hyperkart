@@ -537,7 +537,7 @@ export function rockGeometry(rng, { detail = 1, rough = 0.34, squash = 0.68 } = 
  * `points` is `[{ p: Vector3, r: number }]`. Used for trunks, cactus arms,
  * rock arches and pylon spars.
  */
-export function sweepStack(points, sides = 8, { capStart = true, capEnd = true, vScale = 0.25 } = {}) {
+export function sweepStack(points, sides = 8, { capStart = true, capEnd = true, vScale = 0.25, radial = null } = {}) {
   const n = points.length;
   const positions = [], uvs = [], idx = [];
   const tan = new THREE.Vector3(), right = new THREE.Vector3(), up = new THREE.Vector3();
@@ -556,9 +556,12 @@ export function sweepStack(points, sides = 8, { capStart = true, capEnd = true, 
     up.crossVectors(right, tan).normalize();
     ref.copy(up);
     if (i > 0) vAcc += cur.distanceTo(prev) * vScale;
-    const r = points[i].r;
+    const r0 = points[i].r;
     for (let j = 0; j <= sides; j++) {
       const th = (j / sides) * TAU;
+      // `radial` must be periodic in `th` over TAU or the seam splits open,
+      // which is why it is handed the angle rather than the vertex index.
+      const r = radial ? r0 * radial(th, i / Math.max(n - 1, 1)) : r0;
       const cx = Math.cos(th), sy = Math.sin(th);
       positions.push(
         cur.x + (right.x * cx + up.x * sy) * r,
@@ -596,14 +599,26 @@ export function sweepStack(points, sides = 8, { capStart = true, capEnd = true, 
 }
 
 /** Convenience: a tapered, optionally curved column from (0,0,0) upward. */
-export function columnGeometry(height, r0, r1, { segs = 6, sides = 7, bendX = 0, bendZ = 0, curve = 2 } = {}) {
+export function columnGeometry(height, r0, r1, {
+  segs = 6, sides = 7, bendX = 0, bendZ = 0, curve = 2,
+  flute = 0, ribs = 7, capStart = false,
+} = {}) {
   const pts = [];
   for (let i = 0; i <= segs; i++) {
     const t = i / segs;
     const k = Math.pow(t, curve);
     pts.push({ p: new THREE.Vector3(bendX * k, height * t, bendZ * k), r: lerp(r0, r1, t) });
   }
-  return sweepStack(pts, sides, { capStart: false, capEnd: true });
+  // Fluting in the *geometry*, not just in the vertex colour. A saguaro is
+  // read almost entirely as a silhouette against sand, and a smooth cylinder
+  // painted with stripes still has the outline of a bollard. `ribs` must stay
+  // integral so the ring closes, and `sides` should be an exact multiple of it
+  // so each ridge and each valley lands on a vertex instead of somewhere
+  // between two.
+  return sweepStack(pts, sides, {
+    capStart, capEnd: true,
+    radial: flute > 0 ? (th) => 1 - flute * (0.5 - 0.5 * Math.cos(th * ribs)) : null,
+  });
 }
 
 /**

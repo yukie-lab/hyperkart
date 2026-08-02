@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { clamp01, lerp, makeRng, mod, TAU } from '../core/MathX.js';
+import { clamp01, lerp, makeRng, mod, smoothstep, TAU } from '../core/MathX.js';
 import {
   TerrainSampler, WALL_OFFSET, TERRAIN_INNER, TERRAIN_REACH,
   scatterAlong, terrainNormal, poseMatrix, gauss, loopField,
@@ -430,10 +430,30 @@ export class Scenery {
     // water — the most obvious "placed object" tell in the whole scene. A
     // recessed dark wall behind a row of piers reads as a building instead,
     // and still hides the ground it is standing on.
-    parts.push({ geo: new THREE.BoxGeometry(width - 1.6, 7.0, rows * rowD + 1.4), color: 0x232a31, m: T([0, -3.4, 2.4 + rows * rowD * 0.5]) });
+    parts.push({ geo: new THREE.BoxGeometry(width - 1.6, 7.0, rows * rowD + 1.4), color: 0x3d454e, m: T([0, -3.4, 2.4 + rows * rowD * 0.5]) });
+    // The piers only ran across the *front*. Seen from the end — which is how
+    // the stand at the start line is seen on every track — there was nothing
+    // in front of the recessed wall at all, and seven metres of unbroken
+    // 0x232a31 turned away from the sun is a black rectangle with hard edges.
+    // The wall is a step lighter now and the piers wrap the corners, so the
+    // plane is always broken by something standing in front of it.
     for (let i = -6; i <= 6; i++) {
-      parts.push({ geo: new THREE.BoxGeometry(1.5, 7.0, 1.1), color: 0x515a64, m: T([i * (width / 13), -3.4, 1.75]) });
+      parts.push({ geo: new THREE.BoxGeometry(1.5, 7.0, 1.1), color: 0x6b757f, m: T([i * (width / 13), -3.4, 1.75]) });
     }
+    for (const sx of [-1, 1]) {
+      for (let k = 0; k < 5; k++) {
+        parts.push({
+          geo: new THREE.BoxGeometry(1.1, 7.0, 1.4), color: 0x6b757f,
+          m: T([sx * (width * 0.5 - 1.1), -3.4, 2.6 + k * (rows * rowD - 1.2) / 4]),
+        });
+      }
+    }
+    // A stringer at mid-height and a paler plinth at the foot. Two horizontal
+    // lines are all it takes for the substructure to have a *scale*: without
+    // them the eye has nothing to measure seven metres of wall against, which
+    // is the other half of why it read as a hole rather than as concrete.
+    parts.push({ geo: new THREE.BoxGeometry(width + 0.5, 0.34, rows * rowD + 1.9), color: 0x828c96, m: T([0, -3.1, 2.4 + rows * rowD * 0.5]) });
+    parts.push({ geo: new THREE.BoxGeometry(width + 0.5, 0.9, rows * rowD + 2.0), color: 0x767f88, m: T([0, -6.6, 2.4 + rows * rowD * 0.5]) });
     parts.push({ geo: new THREE.BoxGeometry(width + 0.9, 0.5, rows * rowD + 3.0), color: 0x596270, m: T([0, -0.25, 2.2 + rows * rowD * 0.5]) });
     // Front fascia, in the circuit's accent red — the band that identifies the
     // structure as a grandstand from 200 m away.
@@ -451,8 +471,16 @@ export class Scenery {
     parts.push({ geo: new THREE.BoxGeometry(width + 1.4, rows * rowH + 3.0, 0.35), color: 0x6e7680, m: T([0, (rows * rowH + 3.0) * 0.5 - 1, 2.4 + rows * rowD + 0.9]) });
 
     const geo = mergeParts(parts);
-    darkenBase(geo, { height: 2.4, amount: 0.34, y0: -2.0 });
-    const mat = this._mat(propMaterial({ roughness: 0.78, metalness: 0.12, envMapIntensity: 0.5 }));
+    // The substructure's foot is at y = -6.9, not -2.0. Aimed two metres above
+    // the seating deck's underside, this was multiplying the *whole* seven-metre
+    // plinth by 0.66 instead of shading its last couple of metres — a flat
+    // darkening of a surface that is already turned away from the sun, which is
+    // most of how it arrived at black.
+    darkenBase(geo, { height: 2.4, amount: 0.34, y0: -6.9 });
+    // A concrete wall under an open sky is filled almost entirely by skylight
+    // on the face the sun does not reach, and at 0.5 this material was getting
+    // half of it. This is the stand's own reflectance, not the scene's exposure.
+    const mat = this._mat(propMaterial({ roughness: 0.82, metalness: 0.06, envMapIntensity: 1.15 }));
 
     const L = this.track.length;
     const d = NEAR_D + 1.6;
@@ -1376,7 +1404,15 @@ export class Scenery {
     // silhouette is read against sky at short range.
     const hoodooGeo = mergeParts([
       { geo: mesaGeometry(makeRng(771), { rings: 9, sides: 9, wobble: 0.26, flute: 0.13, rim: 0.10, gullies: 0.5 }), color: 0xffffff },
-      { geo: rockGeometry(makeRng(772), { detail: 0, rough: 0.3, squash: 0.5 }), color: 0xffffff, m: T([0, 1.02, 0], [0, 0.5, 0], [1.35, 0.3, 1.35]) },
+      // Cap rock: a third of a hoodoo's height and twice its width is a
+      // toadstool, and a row of them on a ridge reads as tabletops on poles —
+      // which is what was standing on the canyon rim. A real cap is a *lid*:
+      // it overhangs by about a third and is a seventh of the total height.
+      { geo: rockGeometry(makeRng(772), { detail: 0, rough: 0.3, squash: 0.5 }), color: 0xffffff, m: T([0, 0.99, 0], [0, 0.5, 0], [1.02, 0.15, 1.02]) },
+      // A second, smaller block wedged under one edge of the lid. The join
+      // between column and cap is the shape the eye goes to, and one hard
+      // horizontal line across it is what made these read as furniture.
+      { geo: rockGeometry(makeRng(775), { detail: 0, rough: 0.5, squash: 0.62 }), color: 0xffffff, m: T([0.34, 0.88, -0.16], [0.2, 1.4, 0.35], [0.52, 0.22, 0.46]) },
       // Fallen cap rock at the foot. A hoodoo that stands alone on clean
       // ground looks placed; the debris it shed is what says it eroded there.
       { geo: rockGeometry(makeRng(773), { detail: 0, rough: 0.42, squash: 0.7 }), color: 0xffffff, m: T([1.15, 0.06, 0.35], [0.3, 0.9, 0.2], [0.55, 0.30, 0.45]) },
@@ -1461,7 +1497,16 @@ export class Scenery {
     const geos = [0, 1, 2].map((i) => {
       const rng = makeRng(820 + i);
       const H = [7.4, 5.2, 3.0][i];
-      const parts = [{ geo: columnGeometry(H, 0.42, 0.30, { segs: 4, sides: 9, curve: 1 }), color: 0x4c7040 }];
+      // Fourteen sides carrying seven flutes, and a closed base. The old trunk
+      // was a nine-sided tube with a nine-cycle stripe painted on it: sampled
+      // at nine vertices, `sin(theta * 9)` returns the same number every time,
+      // so the ribbing evaluated to one flat value and every cactus came out a
+      // plain green bollard. It also had no start cap, so on any slope steep
+      // enough to leave the base proud you looked straight into a hollow tube.
+      const parts = [{
+        geo: columnGeometry(H, 0.42, 0.30, { segs: 4, sides: 14, curve: 1, flute: 0.17, ribs: 7, capStart: true }),
+        color: 0x4c7040,
+      }];
       const arms = [2, 1, 0][i];
       for (let a = 0; a < arms; a++) {
         const side = a % 2 ? 1 : -1;
@@ -1476,15 +1521,35 @@ export class Scenery {
             r: lerp(0.26, 0.19, t),
           });
         }
-        parts.push({ geo: sweepStack(pts, 7, { capStart: false }), color: 0x4c7040, m: T([0, 0, 0], [0, rng() * TAU, 0]) });
+        parts.push({
+          // Ten sides and five flutes on an arm a quarter-metre thick: the
+          // trunk's fourteen would double the geometry of the whole cactus to
+          // resolve ridges that are two centimetres apart.
+          geo: sweepStack(pts, 10, {
+            capStart: false,
+            radial: (th) => 1 - 0.13 * (0.5 - 0.5 * Math.cos(th * 5)),
+          }),
+          color: 0x4c7040,
+          m: T([0, 0, 0], [0, rng() * TAU, 0]),
+        });
       }
       const g = mergeParts(parts);
       paintGeometry(g, (v, col) => {
-        // Ribbing from the azimuth around the trunk axis; a smooth green
-        // cylinder reads as a bollard.
-        const rib = Math.sin(Math.atan2(v.z, v.x) * 9) * 0.5 + 0.5;
+        // Shade *with* the flutes rather than across them: the same seven-cycle
+        // cosine that cut the channels darkens them, so the paint and the
+        // silhouette agree instead of fighting. A quarter-cycle of drift up the
+        // trunk stops the ribs reading as a machined extrusion.
+        const th = Math.atan2(v.z, v.x);
+        const rib = 0.5 - 0.5 * Math.cos(th * 7 + v.y * 0.11);
         const t = clamp01(v.y / 8);
-        col.setRGB(lerp(0.11, 0.19, rib) * lerp(0.85, 1.1, t), lerp(0.19, 0.30, rib), lerp(0.09, 0.15, rib));
+        // Two greens rather than a value ramp on one: new growth at the top of
+        // a saguaro is markedly yellower than the old wood at its foot, and
+        // that hue shift is most of what says "plant" at fifty metres.
+        col.setRGB(
+          lerp(0.20, 0.10, rib) * lerp(0.80, 1.18, t),
+          lerp(0.31, 0.17, rib) * lerp(0.86, 1.10, t),
+          lerp(0.13, 0.08, rib) * lerp(1.05, 0.86, t),
+        );
       });
       darkenBase(g, { height: 1.0, amount: 0.42 });
       return g;
@@ -1501,7 +1566,10 @@ export class Scenery {
       const vi = it.w < 0.34 ? 0 : it.w < 0.7 ? 1 : 2;
       terrainNormal(this.terrain, it.s, it.lateral, n, 4);
       const sc = lerp(0.65, 1.35, it.u);
-      it.pos.y -= 0.3;
+      // Planted on the low corner of its own footprint, like the mesas. A
+      // fixed 30 cm sink is enough on flat sand and nowhere near enough on the
+      // canyon's slopes, which is where the cacti were standing on tiptoe.
+      it.pos.y = this.terrain.groundMin(it.s, it.lateral, sc * 0.6) - 0.22;
       buckets[vi].push({
         s: it.s,
         m: poseMatrix(it.pos, {
@@ -1825,14 +1893,28 @@ export class Scenery {
       opacity: 1.0, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false, fog: true,
     }), { env: false });
     mat.onBeforeCompile = (shader) => {
+      // `<logdepthbuf_vertex>` is the first chunk in the *points* program that
+      // is guaranteed to sit after both `<project_vertex>` (which declares
+      // `mvPosition`) and the size-attenuation block (which is the last write
+      // to `gl_PointSize`). Anchoring on `<uv_vertex>` instead — the obvious
+      // guess, and what was here — silently does nothing: that chunk exists in
+      // the mesh programs but not in points.glsl, so `String.replace` finds no
+      // match, `vHkFade` is declared and never written, and the fragment
+      // multiplies alpha by an undefined varying. The whole field went
+      // invisible without a shader error to say so. Any anchor added here must
+      // be checked against three/src/renderers/shaders/ShaderLib/points.glsl.js.
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', '#include <common>\nattribute float aSize;\nvarying float vHkFade;')
         .replace('gl_PointSize = size;', 'gl_PointSize = size * aSize;')
-        // After the size-attenuation block, so the clamp is the last word.
-        .replace('#include <uv_vertex>', `#include <uv_vertex>
+        .replace('#include <logdepthbuf_vertex>', `
 // A mote larger than this stops being a mote and becomes dirt on the lens.
-gl_PointSize = min( gl_PointSize, 7.0 );
-vHkFade = smoothstep( 60.0, 150.0, - mvPosition.z );`);
+gl_PointSize = min( gl_PointSize, 6.0 );
+// The placement rule rejects motes inside a tube around the roadway, but a
+// circuit folds back on itself and the far side of the loop can end up in
+// front of the camera. This is the view-dependent guarantee that nothing is
+// ever drawn over the near foreground, and it is the one that matters.
+vHkFade = smoothstep( 110.0, 260.0, - mvPosition.z );
+#include <logdepthbuf_vertex>`);
       shader.fragmentShader = shader.fragmentShader
         .replace('#include <common>', '#include <common>\nvarying float vHkFade;')
         .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.a *= vHkFade;');
@@ -1881,13 +1963,68 @@ vHkFade = smoothstep( 60.0, 150.0, - mvPosition.z );`);
     for (let i = 0; i < 2; i++) this._spread(`shard${i}`, geos[i], mat, buckets[i], { per: 30, maxChunks: 6, inflate: 8 });
   }
 
-  /** Neon pylons flanking the roadway, pulsing out of phase with each other. */
+  /**
+   * Neon pylons flanking the roadway, pulsing out of phase with each other.
+   *
+   * These are the void track's edge markers — with no ground plane and no
+   * horizon, the line of beacons is the *only* thing that tells a driver where
+   * the road stops. That job failed because `neonMaterial` is unlit: a solid
+   * `0xff5fd0` on every vertex of an octahedron gives one magenta silhouette
+   * with hard edges, eight facets that are all the same number, and no way for
+   * the eye to tell a beacon from the nebula behind it. Nothing here is lighting
+   * these, so the shading has to be painted in by hand.
+   */
   _pylons() {
+    // Shade off the vertical component of the face normal, never the
+    // horizontal one: every pylon carries a random yaw, so a baked side-key
+    // would point somewhere different on each copy and the row would light
+    // itself inconsistently. `n.y` survives yaw untouched.
+    const beacon = new THREE.OctahedronGeometry(1.5, 0);
+    beacon.scale(1, 1.8, 1);
+    beacon.computeVertexNormals();
+    const bn = beacon.attributes.normal;
+    paintGeometry(beacon, (v, col, i) => {
+      const up = clamp01(bn.getY(i) * 0.5 + 0.5);
+      // Hot at the waist and cooling to the tips: a glass beacon is brightest
+      // where it is thickest, and that gradient is what separates the two
+      // halves of the crystal from each other rather than from the sky.
+      const core = 1 - clamp01(Math.abs(v.y) / 2.7);
+      // The two facets either side of the leading edge share a vertical
+      // component and would otherwise come out identical — which is precisely
+      // the flat magenta kite. Their azimuths are ninety degrees apart, so one
+      // cosine of the azimuth is enough to split them. Yaw rotates which facet
+      // gets which value, and on an emitter that reads as the crystal's own
+      // internal structure rather than as a light in the wrong place.
+      const facet = Math.cos(Math.atan2(bn.getZ(i), bn.getX(i))) * 0.5 + 0.5;
+      col.setHSL(
+        lerp(0.90, 0.83, core),
+        lerp(0.82, 0.60, core * 0.7 + facet * 0.3),
+        lerp(0.22, 0.80, smoothstep(up * 0.34 + core * 0.42 + facet * 0.30)),
+        THREE.SRGBColorSpace,
+      );
+    });
+    // The rings are tubes, and a tube painted one flat cyan is a wire circle.
+    const ring = (R, r, hue) => {
+      const g = new THREE.TorusGeometry(R, r, 6, 16);
+      const gn = g.attributes.normal;
+      return paintGeometry(g, (v, col, i) => {
+        const up = clamp01(gn.getZ(i) * 0.5 + 0.5);
+        col.setHSL(hue, 0.85, lerp(0.26, 0.72, up), THREE.SRGBColorSpace);
+      });
+    };
+    const mastGeo = columnGeometry(16, 0.55, 0.22, { segs: 4, sides: 6, curve: 1 });
+    paintGeometry(mastGeo, (v, col) => {
+      // The mast falls away into the void; only its top few metres belong to
+      // the beacon. A single dark violet bar the full sixteen metres reads as
+      // a strut holding the road up, which is the opposite of the intent.
+      const t = clamp01(v.y / 16);
+      col.setHSL(0.72, lerp(0.45, 0.72, t), lerp(0.06, 0.34, Math.pow(t, 1.6)), THREE.SRGBColorSpace);
+    });
     const parts = [
-      { geo: columnGeometry(16, 0.55, 0.22, { segs: 3, sides: 6, curve: 1 }), color: 0x2a1a5e, m: T([0, -16, 0]) },
-      { geo: new THREE.OctahedronGeometry(1.5, 0), color: 0xff5fd0, m: T([0, 0.6, 0], [0, 0, 0], [1, 1.8, 1]) },
-      { geo: new THREE.TorusGeometry(1.9, 0.16, 6, 16), color: 0x66e8ff, m: T([0, -1.6, 0], [Math.PI * 0.5, 0, 0]) },
-      { geo: new THREE.TorusGeometry(2.4, 0.14, 6, 16), color: 0x9a7bff, m: T([0, -4.4, 0], [Math.PI * 0.5, 0, 0]) },
+      { geo: mastGeo, m: T([0, -16, 0]) },
+      { geo: beacon, m: T([0, 0.6, 0]) },
+      { geo: ring(1.9, 0.16, 0.52), m: T([0, -1.6, 0], [Math.PI * 0.5, 0, 0]) },
+      { geo: ring(2.4, 0.14, 0.70), m: T([0, -4.4, 0], [Math.PI * 0.5, 0, 0]) },
     ];
     const geo = mergeParts(parts);
     const mat = this._mat(applyPulse(neonMaterial({ side: THREE.DoubleSide }), { freq: 2.0, depth: 0.35 }), { env: false });
@@ -1986,26 +2123,68 @@ vHkFade = smoothstep( 60.0, 150.0, - mvPosition.z );`);
     this._spread('skyPlatform', geo, mat, items, { per: 4, maxChunks: 6, inflate: 4 });
   }
 
-  /** Neon pennants on the platforms' masts — the only wind on a void track. */
+  /**
+   * Neon pennants on the platforms' masts — the only wind on a void track.
+   *
+   * `neonMaterial` is unlit and untone-mapped, so whatever colour a vertex
+   * carries is the pixel: there is no shading to rescue a flag painted one
+   * flat hex. Thirty-four identical die-cut magenta rhombi in a row beside the
+   * roadway is what the critic photographed, and the fix is entirely in the
+   * paint — a hot hoist burning down toward a deeper, more saturated fly, plus
+   * three hues so no two neighbours match.
+   */
   _skyBanners() {
-    const geo = mergeParts([
-      { geo: columnGeometry(9, 0.10, 0.06, { segs: 1, sides: 4, curve: 1 }), color: 0x8fa0ff, m: T([0, -9, 0]) },
-      { geo: pennantGeometry(3.0, 1.5, { segs: 7, taper: 0.3 }), color: 0xff62c8, m: T([0.05, 0, 0]) },
-      { geo: pennantGeometry(2.2, 1.1, { segs: 6, taper: 0.3 }), color: 0x62e8ff, m: T([0.05, -2.0, 0]) },
-    ]);
+    // Hoist-to-fly gradient. Neon tubing is brightest where it is fed and
+    // falls off along its run; a flag lit that way has a light direction even
+    // though nothing is lighting it.
+    const pennant = (span, drop, segs, hue, hot) => paintGeometry(
+      pennantGeometry(span, drop, { segs, taper: 0.3 }),
+      (v, col) => {
+        const t = clamp01(v.x / span);
+        const e = clamp01(-v.y / drop);
+        col.setHSL(
+          mod(hue + t * 0.05, 1),
+          lerp(0.62, 0.98, t),
+          lerp(hot, hot * 0.34, smoothstep(t * 0.72 + e * 0.42)),
+          THREE.SRGBColorSpace,
+        );
+      },
+    );
+    const mast = columnGeometry(9, 0.10, 0.06, { segs: 1, sides: 4, curve: 1 });
+    // Three builds rather than one. A mast is cheap; a row of clones is not.
+    const geos = [
+      mergeParts([
+        { geo: mast, color: 0x8fa0ff, m: T([0, -9, 0]) },
+        { geo: pennant(3.0, 1.5, 7, 0.90, 0.74), m: T([0.05, 0, 0]) },
+        { geo: pennant(2.2, 1.1, 6, 0.52, 0.66), m: T([0.05, -2.0, 0]) },
+      ]),
+      mergeParts([
+        { geo: mast, color: 0x8fa0ff, m: T([0, -9, 0]) },
+        { geo: pennant(2.4, 1.9, 6, 0.55, 0.70), m: T([0.05, -0.4, 0]) },
+        { geo: pennant(1.6, 0.9, 5, 0.13, 0.72), m: T([0.05, -2.8, 0]) },
+      ]),
+      mergeParts([
+        { geo: mast, color: 0x8fa0ff, m: T([0, -9, 0]) },
+        { geo: pennant(3.4, 1.1, 8, 0.72, 0.62), m: T([0.05, -0.2, 0]) },
+      ]),
+    ];
     const mat = this._mat(applyFlag(neonMaterial({ side: THREE.DoubleSide }), { amp: 0.5, freq: 2.4, span: 3.0 }), { env: false });
     const L = this.track.length;
-    const items = [];
+    const buckets = [[], [], []];
     const p = new THREE.Vector3();
     for (let i = 0; i < this._n(34); i++) {
       const s = this.rng() * L;
       const side = this.rng() < 0.5 ? -1 : 1;
-      const d = lerp(4, 14, this.rng());
+      // Held off the roadway rather than hung over it. At four metres a
+      // four-metre flag is furniture on the racing line's outside edge, and
+      // on a track with no ground plane the edge of the road is the only
+      // thing the driver has to read.
+      const d = lerp(9, 26, this.rng());
       this.track.placeOnRoad(s, side * (this.track.halfWidthAt(s) + d), p);
       p.y += 9.5;
-      items.push({ s, m: poseMatrix(p.clone(), { yaw: this.rng() * TAU, scale: lerp(0.8, 1.5, this.rng()) }, new THREE.Matrix4()) });
+      buckets[i % 3].push({ s, m: poseMatrix(p.clone(), { yaw: this.rng() * TAU, scale: lerp(0.8, 1.5, this.rng()) }, new THREE.Matrix4()) });
     }
-    this._spread('skyBanner', geo, mat, items, { per: 8, maxChunks: 6, inflate: 3 });
+    for (let i = 0; i < 3; i++) this._spread(`skyBanner${i}`, geos[i], mat, buckets[i], { per: 6, maxChunks: 4, inflate: 3 });
   }
 
   // -- runtime --------------------------------------------------------------

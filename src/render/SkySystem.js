@@ -100,7 +100,9 @@ export class SkySystem {
       const t = rng();
       c.setHSL(t < 0.72 ? 0.58 : t < 0.88 ? 0.08 : 0.55, t < 0.72 ? 0.18 : 0.5, lerp(0.6, 1.0, rng()));
       col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
-      size[i] = Math.pow(rng(), 3) * 46 + 6;
+      // 1.5-13 px. This was 6-52, which at 1080p is not a star, it is a
+      // snowflake — and at that size the field covered 6.4% of every frame.
+      size[i] = Math.pow(rng(), 3) * 11.5 + 1.5;
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
@@ -110,7 +112,15 @@ export class SkySystem {
     const mat = new THREE.ShaderMaterial({
       transparent: true,
       depthWrite: false,
-      depthTest: false,
+      // Depth-tested, unlike the dome. `transparent: true` puts these in the
+      // transparent pass, which runs *after* all opaque geometry — so
+      // `renderOrder` only sorts them against other transparents and does
+      // nothing to hold them behind the world. With the test off they were
+      // drawn on top of the road and the karts, which is why the track read as
+      // having dirt on the lens. The dome writes no depth, so a star at
+      // r = 8000 still passes against empty sky and fails against anything
+      // real in front of it.
+      depthTest: true,
       blending: THREE.AdditiveBlending,
       uniforms: { uTime: { value: 0 } },
       vertexShader: `
