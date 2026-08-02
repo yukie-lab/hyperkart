@@ -99,6 +99,12 @@ async function main() {
     return d ? gl.getParameter(d.UNMASKED_RENDERER_WEBGL) : 'unknown';
   });
 
+  // Take the frame clock before anything is measured. Until this call the live
+  // loop keeps stepping the simulation between harness frames, so a requested
+  // time came back roughly 0.1 s late and the pixel ratio could move mid-series.
+  const pinned = await page.evaluate(() => window.__hk.stopForCapture());
+  process.stdout.write(`clock pinned at t=${pinned.simTime.toFixed(3)}s, pixelRatio ${pinned.pixelRatio.toFixed(2)}\n`);
+
   if (!CFG.hud) await page.evaluate(() => window.__hk.setHud(false));
 
   if (CFG.hide) {

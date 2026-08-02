@@ -195,7 +195,14 @@ function ordinalSuffix(n) {
   return ['th', 'st', 'nd', 'rd'][n % 10] || 'th';
 }
 
-loop.start();
+// In capture mode the harness owns the clock from the very first frame. Even
+// starting the loop and stopping it at `ready` is not enough: waiting for that
+// flag costs a variable number of real frames, so the simulation was already
+// 0.11-0.13 s in — a different amount every run — before any capture began.
+// That, plus the adaptive-resolution controller reacting to real frame time,
+// is why two runs of identical code differed on most of their pixels and why
+// no small visual regression could be measured.
+if (!shotMode) loop.start();
 
 // --- Harness ---------------------------------------------------------------
 // Lets the screenshot tool fast-forward the deterministic simulation to an
@@ -231,7 +238,30 @@ const harness = {
   setHud(v) { hud.setVisible(v); },
   setQuality(q) { rs.setQuality(q); },
 
-  /** Render exactly one frame, awaiting GPU completion. */
+  /**
+   * Hand the frame clock to the harness.
+   *
+   * Stops the live loop so that nothing advances between an explicit `seek`
+   * and an explicit `frame`, and pins the pixel ratio so the adaptive
+   * controller cannot resize the target mid-series. Both were sources of
+   * capture nondeterminism that made small visual regressions unmeasurable.
+   */
+  stopForCapture() {
+    loop.stop();
+    rs.minPixelRatio = rs.maxPixelRatio = rs.currentPixelRatio;
+    return { pixelRatio: rs.currentPixelRatio, simTime: loop.simTime };
+  },
+
+  /**
+   * Render exactly one frame, awaiting GPU completion.
+   *
+   * The await yields to the browser, and the live `Loop` is driven by its own
+   * requestAnimationFrame — so every settle frame the harness took was also
+   * letting the simulation advance behind it, and letting `adaptResolution`
+   * change the pixel ratio mid-capture. A capture asked for t=91.90 came back
+   * holding state from t≈92.0, and two runs of identical code differed on most
+   * of their pixels. `stopForCapture()` closes both holes.
+   */
   async frame(dt = 1 / 60) {
     race.render(1, dt, camera.position);
     chase.update(dt, race.player, { lookBack: false });

@@ -21,7 +21,10 @@ import { CHARACTERS, COLLISION, PHYS, DRIFT } from '../src/kart/KartTuning.js';
 import { TRACKS } from '../src/track/Tracks.js';
 import { clamp01, makeRng } from '../src/core/MathX.js';
 
-const StubScene = { add() {}, remove() {} };
+// `userData` is not decoration: ItemSystem reads `scene.userData.kartFX` through
+// a lazy getter to reach the effects system, because Race builds items before
+// FX exists. Without it this harness throws the moment items are enabled.
+const StubScene = { add() {}, remove() {}, userData: {} };
 
 /**
  * A renderer-free mirror of `Race.step()`. Kept deliberately in the same order
