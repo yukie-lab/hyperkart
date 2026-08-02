@@ -169,7 +169,7 @@ async function main() {
       // does not advance particles -- but it does leave the canvas holding an
       // uncomposed image, so the composed frame has to be put back before the
       // screenshot. Forgetting that produced a run of pure black captures.
-      const drop = await page.evaluate(async () => {
+      const drop = await page.evaluate(() => {
         const { rs, scene, camera } = window.__hk;
         const count = () => {
           rs.beginFrame();
@@ -182,7 +182,14 @@ async function main() {
         scene.traverse((o) => { if (!o.layers.test(camera.layers)) { restored.push(o); o.layers.enable(0); } });
         const without = count();
         for (const o of restored) o.layers.set(31);
-        await window.__hk.frame(1 / 60);          // restore the composed frame
+        // Restore the composed frame *without* advancing anything. Calling
+        // `frame()` here re-ran `post.update`, which moves `uTime`, which the
+        // grain hashes -- so a `--hide` capture differed from a plain one on
+        // 96% of its pixels even when the hidden object was off screen and
+        // removed no draw calls. The self-check invalidated the very A/B it
+        // exists to protect.
+        rs.beginFrame();
+        window.__hk.post.render(1 / 60);
         return { withHide, without };
       });
       if (target === times[0]) {
@@ -206,8 +213,8 @@ async function main() {
       for (let i = 0; i < d.length; i += 4) sum += d[i] + d[i + 1] + d[i + 2];
       return sum / (d.length / 4 * 3);
     });
-    if (lit < 2) {
-      process.stdout.write(`  ! BLACK FRAME at t=${target} (mean channel ${lit.toFixed(2)}) — capture discarded\n`);
+    if (lit < 12) {
+      process.stdout.write(`  ! BLACK FRAME at t=${target} (mean channel ${lit.toFixed(2)}, threshold 12) — capture discarded\n`);
       blackFrames++;
     }
 

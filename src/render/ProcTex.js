@@ -17,9 +17,10 @@ import { clamp, clamp01, lerp, makeRng, makeValueNoise2D, fbm2D, mod, smoothstep
 
 const _textureCache = new Map();
 
-function canvas(size) {
+function canvas(size, height = size) {
   const c = document.createElement('canvas');
-  c.width = c.height = size;
+  c.width = size;
+  c.height = height;
   return c;
 }
 
@@ -40,13 +41,21 @@ function makeTexture(canvasEl, { srgb = false, repeat = 1, aniso = 16 } = {}) {
   return tex;
 }
 
-/** Sobel-differentiate a height buffer into a tangent-space normal map. */
-export function heightToNormal(height, size, strength = 2.0) {
-  const c = canvas(size);
+/**
+ * Sobel-differentiate a height buffer into a tangent-space normal map.
+ *
+ * `rows` exists for atlases, which are the one thing here that is not square:
+ * a strip of twelve grid boxes is 12:1, and squaring it would either quantise
+ * every cell to a twelfth of the resolution or waste eleven twelfths of the
+ * memory. Wrapping still happens on both axes, which is correct for an atlas
+ * laid out in one row — the cell to the left of the first is the last.
+ */
+export function heightToNormal(height, size, strength = 2.0, rows = size) {
+  const c = canvas(size, rows);
   const ctx = c.getContext('2d');
-  const img = ctx.createImageData(size, size);
-  const at = (x, y) => height[mod(y, size) * size + mod(x, size)];
-  for (let y = 0; y < size; y++) {
+  const img = ctx.createImageData(size, rows);
+  const at = (x, y) => height[mod(y, rows) * size + mod(x, size)];
+  for (let y = 0; y < rows; y++) {
     for (let x = 0; x < size; x++) {
       const tl = at(x - 1, y - 1), t = at(x, y - 1), tr = at(x + 1, y - 1);
       const l = at(x - 1, y), r = at(x + 1, y);
@@ -68,12 +77,12 @@ export function heightToNormal(height, size, strength = 2.0) {
 }
 
 /** Write an RGB(A) buffer produced by `fn(x,y)` into a canvas. */
-function paint(size, fn) {
-  const c = canvas(size);
+function paint(size, fn, rows = size) {
+  const c = canvas(size, rows);
   const ctx = c.getContext('2d');
-  const img = ctx.createImageData(size, size);
+  const img = ctx.createImageData(size, rows);
   const out = [0, 0, 0, 255];
-  for (let y = 0; y < size; y++) {
+  for (let y = 0; y < rows; y++) {
     for (let x = 0; x < size; x++) {
       fn(x, y, out);
       const i = (y * size + x) * 4;
@@ -88,11 +97,11 @@ function paint(size, fn) {
   return c;
 }
 
-function grayCanvas(size, buf, scale = 255) {
+function grayCanvas(size, buf, scale = 255, rows = size) {
   return paint(size, (x, y, o) => {
     const v = buf[y * size + x] * scale;
     o[0] = o[1] = o[2] = v;
-  });
+  }, rows);
 }
 
 /**
@@ -766,6 +775,153 @@ export function dirt({ size = 1024, seed = 51, tint = 0xa8703f } = {}) {
   return result;
 }
 
+/**
+ * The last two centimetres of the ground: grit, and the stones in it.
+ *
+ * `sand` and `dirt` cover fourteen metres in a thousand texels, so the finest
+ * thing they can hold is about 14 cm — and the previous pass proved, at length,
+ * that anything finer than that in a 14 m tile is not detail but moire. Which
+ * left the run-off with nothing at all between the tile's 16 cm grain and the
+ * pixel, and that gap is exactly the band a 4K frame resolves and a 1080p one
+ * does not. A 700x500 crop of run-off at 3840x2160 came back holding one
+ * gradient and a shadow.
+ *
+ * So the centimetre scales get their own tile, ~1.2 m of world to 512 texels —
+ * 2.3 mm each, three orders of magnitude finer than the sand's — and their own
+ * retirement schedule in the shader, which is by *screen footprint* rather than
+ * by distance. That distinction is the whole point: a distance threshold is a
+ * statement about 1080p, and it is why every surface here previously looked
+ * identical at 4K. A footprint threshold retires a feature when it stops being
+ * resolvable, so the same code puts twice as much of this on a 4K screen as on
+ * a 1080p one, and no more aliasing on either.
+ *
+ * One tile serves both the general grain and the gravel band beside the kerb,
+ * sampled at two world scales, because gravel *is* the coarse fraction of the
+ * same material — grading it separately would be authoring two lies where one
+ * truth tiles.
+ *
+ * Everything is returned as a *modulation*, not as a colour: this layer has to
+ * ride on whatever ground it lands on, and it has to leave that ground's mean
+ * brightness — and therefore the frame's exposure, which is not ours to move —
+ * exactly where it found it. The albedo channel is normalised to a mean of
+ * precisely 1.0 for that reason, rather than being authored near it and hoped
+ * about.
+ */
+export function groundDetail({ size = 512, seed = 137 } = {}) {
+  const key = `grounddetail_${size}_${seed}`;
+  if (_textureCache.has(key)) return _textureCache.get(key);
+  const gritN = tiling(seed, size, 5);        // ~1.2 cm on the 1.2 m tile
+  const packN = tiling(seed + 61, size, 56);  // ~13 cm: where the surface is crusted
+  const rng = makeRng(seed + 17);
+
+  // Jittered-grid stones at ~2.7 cm centres, diameters 1.6-5.2 cm. That band is
+  // chosen against the pixel, not against geology: at 4K a 3 cm stone five
+  // metres away is several pixels across, which is the smallest thing on this
+  // surface it is honest to draw at all.
+  const cells = 44;
+  const cellSize = size / cells;
+  const sites = new Float32Array(cells * cells * 4);
+  for (let i = 0; i < cells * cells; i++) {
+    sites[i * 4] = rng();
+    sites[i * 4 + 1] = rng();
+    // Wide spread, and biased small: a run-off is mostly fines with stones in
+    // it. An even spread reads as gravel laid by hand, which is a different and
+    // much less convincing surface.
+    sites[i * 4 + 2] = 0.30 + Math.pow(rng(), 1.9) * 0.65;
+    sites[i * 4 + 3] = rng();
+  }
+
+  const cov = new Float32Array(size * size);
+  const who = new Float32Array(size * size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const cx = Math.floor(x / cellSize), cy = Math.floor(y / cellSize);
+      let best = 0, bestId = 0.5;
+      for (let oy = -1; oy <= 1; oy++) {
+        for (let ox = -1; ox <= 1; ox++) {
+          const gx = mod(cx + ox, cells), gy = mod(cy + oy, cells);
+          const k = (gy * cells + gx) * 4;
+          const sx = (cx + ox + sites[k]) * cellSize;
+          const sy = (cy + oy + sites[k + 1]) * cellSize;
+          const r = sites[k + 2] * cellSize;
+          const d = Math.hypot(x - sx, y - sy);
+          if (d < r) {
+            // Half-buried, not resting on top: a stone in a run-off has fines
+            // drifted up around it, so the profile flattens at the rim.
+            const c = Math.pow(1 - smoothstep(d / r), 0.55);
+            if (c > best) { best = c; bestId = sites[k + 3]; }
+          }
+        }
+      }
+      cov[y * size + x] = best;
+      who[y * size + x] = bestId;
+    }
+  }
+
+  const height = new Float32Array(size * size);
+  const albedo = new Float32Array(size * size);
+  const rough = new Float32Array(size * size);
+  const stoneM = new Float32Array(size * size);
+  let albedoSum = 0;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = y * size + x;
+      const grit = fbm2D(gritN.n, x / gritN.k, y / gritN.k, 2);
+      const pack = fbm2D(packN.n, x / packN.k, y / packN.k, 3);
+      const c = cov[i];
+      const s = smoothstep(c);
+      height[i] = c * 0.52 + grit * 0.13 + pack * 0.35;
+      // Stones are a different mineral from the fines around them, so they
+      // differ in colour and not only in shading — a purely shaded stone
+      // disappears the moment the sun goes behind anything, which on a circuit
+      // lit at 16 degrees is most of the outside of every corner.
+      const stone = lerp(0.88, 1.26, Math.pow(who[i], 1.3));
+      // The contact shadow packed grains cast into each other is folded in here
+      // rather than kept as its own channel, so the normalisation below covers
+      // it too — a separate multiply with a mean under 1.0 would have quietly
+      // darkened 40% of every frame.
+      const cavity = 1 - (1 - smoothstep(c * 1.7)) * 0.30 * (1 - grit * 0.5);
+      const a = lerp(lerp(0.955, 1.045, grit) * lerp(0.94, 1.06, pack), stone, s) * cavity;
+      albedo[i] = a;
+      albedoSum += a;
+      // Exposed stone is polished by weather; the fines packed between them are
+      // the roughest thing on the circuit.
+      rough[i] = lerp(lerp(1.0, 0.94, pack), 0.86, smoothstep(c * 1.2));
+      stoneM[i] = s;
+    }
+  }
+  // Normalised rather than centred by eye: this multiplies every off-track
+  // surface in the game, and a mean of 1.02 would be a 2% exposure change on
+  // 40% of the frame.
+  const albedoMean = albedoSum / (size * size);
+
+  // One texture, three jobs. Three samplers for three scalars would cost more
+  // than the layer is worth, and the ground already spends four texture units
+  // before this one arrives.
+  const grainC = paint(size, (x, y, o) => {
+    const i = y * size + x;
+    // R and G are stored as half the multiplier, so 128 is exactly 1.0 and the
+    // shader's decode is one multiply with no bias to get wrong. B is the stone
+    // mask, which the gravel band uses to tint only the stones.
+    o[0] = clamp01(albedo[i] / albedoMean * 0.5) * 255;
+    o[1] = clamp01(rough[i] * 0.5) * 255;
+    o[2] = stoneM[i] * 255;
+  });
+
+  const result = {
+    grainMap: makeTexture(grainC),
+    // Gentle, and gentler than the tile it rides on. This is the only relief in
+    // the game evaluated within a couple of metres of the camera, where a
+    // normal map is at its most convincing and also at its most able to turn a
+    // flat plane into a field of crawling specular. The strength that reads
+    // correctly here is well under half of what looks right in a texture viewer.
+    normalMap: makeTexture(heightToNormal(height, size, 1.15)),
+    normalScale: 0.42,
+  };
+  _textureCache.set(key, result);
+  return result;
+}
+
 /** Grass, viewed from a distance — clumped blades rather than a green blur. */
 export function grass({ size = 1024, seed = 61, tint = 0x4e8a3c } = {}) {
   const key = `grass_${size}_${seed}_${tint}`;
@@ -1153,57 +1309,162 @@ export function checker({ size = 512, squares = 8, edgeLine = 0 } = {}) {
 }
 
 /**
- * A painted starting box: two side lines, a thick staging bar across the front,
- * and the rubber a standing start lays down behind it.
+ * A numbered starting box: a heavy painted outline round a sealed panel, a
+ * staging bar across the front, the grid position painted large behind it, and
+ * the rubber a standing start lays down over the lot.
  *
  * The opening frame of a kart racer is the one the whole game is judged by, and
- * a grid of karts sitting on bare tarmac says nobody was expecting them. A box
- * is also the only mark on a circuit that says *this is your slot* — it is what
- * turns twelve karts in a staggered line into a starting grid.
+ * a start grid is normally the most graphic thing on the circuit. The previous
+ * version was numerically present and visually absent: 1.41% of the t=0 frame,
+ * 29,283 pixels, a maximum channel delta of 111 and only 5,058 pixels past
+ * 64/255. A reviewer could not find it by eye and had to hide it and re-shoot
+ * to prove it was there. The reason is in the shape of those numbers rather
+ * than in their size — it was thin white strokes, in the same white, at the
+ * same weight and in the same material as the lane markings running through it,
+ * so there was nothing for the eye to separate. Three things fix that, and all
+ * three are needed:
  *
- * `barW` and `lineW` are fractions of the tile, and the tile is mapped once to
- * one box, so they are set by the caller from real metres. The lines are wide
- * for painted lines on purpose: 12 cm of paint is under a pixel by the time the
- * box is thirty metres away, and paint that thin does not read at all — every
- * circuit paints its grid twice as heavy as its lane markings for exactly that
- * reason.
+ *  - *Value.* Every white stroke is backed on its inner side by a dark keyline.
+ *    A 12 cm line on tarmac is a 60-luma step; the same line with rubber packed
+ *    against it is a 200-luma one, and local contrast is what the eye finds, not
+ *    absolute brightness.
+ *  - *Weight.* The strokes are twice what they were and the bar is nearly two
+ *    thirds of a metre. A grid is painted heavier than a lane marking on every
+ *    circuit on earth, for the same reason it is painted at all.
+ *  - *Material.* A box is a filled, sealed panel with a number on it, not four
+ *    strokes. The interior carries its own coverage, so the mark reads as an
+ *    object at any distance where the strokes themselves have gone.
+ *
+ * The number is what makes it unmistakable rather than merely visible, and it
+ * is the reason this returns an *atlas* — one row of `slots` cells, one per grid
+ * position, so twelve boxes are still one texture, one material and one draw
+ * call. A row rather than a grid because every cell's left and right edges are
+ * the same white side line: the one layout in which mip bleeding between
+ * neighbours is guaranteed to be invisible.
+ *
+ * `barW` and `lineW` are fractions of a cell and the caller sets them from real
+ * metres; `aspect` is the box's length over its width, and it is what keeps a
+ * numeral square in the world on a cell that is not.
  */
-export function gridBox({ size = 256, lineW = 0.05, barW = 0.10 } = {}) {
-  const key = `gridbox_${size}_${lineW}_${barW}`;
+export function gridBox({
+  size = 256, slots = 12, lineW = 0.05, barW = 0.10, keyW = 0.030, aspect = 1.586, numH = 0.34,
+} = {}) {
+  const key = `gridbox_${size}_${slots}_${lineW}_${barW}_${keyW}_${aspect}_${numH}`;
   if (_textureCache.has(key)) return _textureCache.get(key);
+  const W = size * slots, H = size;
   const chipN = tiling(29, size, 6);
   const rubN = tiling(47, size, 24);
   const gritN = tiling(83, size, 3);
-  const WHITE = paintTint(0xdedac9), ROAD = paintTint(0x4a4a52);
+  const WHITE = paintTint(0xe8e3d2), ROAD = paintTint(0x4a4a52);
+  const KEY = paintTint(0x1a1a1e);
   const SOFT = 2.0 / size;
 
-  const alpha = new Float32Array(size * size);
-  const paintBuf = new Float32Array(size * size);
-  const rubBuf = new Float32Array(size * size);
-  const height = new Float32Array(size * size);
+  // The numerals, rendered once into their own canvas and read back as two
+  // coverage fields: the glyph, and the glyph dilated by the keyline width.
+  // Stroking and filling in separate channels is the cheapest exact dilation
+  // there is, and an exact one matters — a halo computed from a blur would
+  // thin at the corners of a 1 and pool inside an 8.
+  const numC = canvas(W, H);
+  const g = numC.getContext('2d');
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.lineJoin = 'round';
+  g.lineCap = 'round';
+  // Usable width between the two side lines, less a margin, in cell fractions.
+  const inner = (1 - 2 * (lineW + keyW)) * 0.90;
+  for (let i = 0; i < slots; i++) {
+    const txt = String(i + 1);
+    let px = numH * size;
+    g.font = `bold ${Math.round(px)}px Helvetica, Arial, sans-serif`;
+    // A two-digit number is nearly twice as wide as a one-digit number and the
+    // box does not get wider, so the size follows from what fits rather than
+    // from a constant that is right for "1" and wrong for "12".
+    const wide = g.measureText(txt).width * aspect;
+    if (wide > inner * size) {
+      px *= (inner * size) / wide;
+      g.font = `bold ${Math.round(px)}px Helvetica, Arial, sans-serif`;
+    }
+    // Centred a fifth of the way up the box: behind where a kart's rear axle
+    // stands, which is the only part of a grid box that is not under a kart
+    // when the grid is full — and the part a camera behind the grid sees most
+    // of. `CanvasTexture` flips V, so the number is drawn upright here and
+    // arrives upright to a driver looking down the road.
+    const cx = i * size + size * 0.5;
+    const cy = (1 - 0.205) * size;
+    g.save();
+    g.translate(cx, cy);
+    // Two transforms in one, and the second is the only asymmetric mark this
+    // file has ever drawn, so it is the first time either has mattered.
+    //
+    // The stretch: a cell is square in texels and a grid box is not in metres,
+    // so a glyph drawn round comes out elongated down the road by exactly the
+    // box's aspect ratio unless it is pre-squashed by it.
+    //
+    // The mirror: the circuit's own lateral axis runs to the *left* of a
+    // forward-facing camera. Measured, by projecting one box's corners at t=0 —
+    // u = 0 lands at NDC x = +0.012 and u = 1 at -0.086, while v = 0 is 26.07 m
+    // from the camera and v = 1 is 30.77 m. So V is exactly what `flipY` and the
+    // comment above claim, and U is reversed, and every previous surface here
+    // was symmetric across it and could not have told anyone.
+    g.scale(-aspect, 1);
+    g.strokeStyle = '#ff0000';
+    g.fillStyle = '#ff0000';
+    g.lineWidth = (keyW * size * 2) / aspect;
+    g.strokeText(txt, 0, 0);
+    g.fillText(txt, 0, 0);
+    // Additive, so the fill in green does not erase the dilation in red.
+    g.globalCompositeOperation = 'lighter';
+    g.fillStyle = '#00ff00';
+    g.fillText(txt, 0, 0);
+    g.globalCompositeOperation = 'source-over';
+    g.restore();
+  }
+  const numData = g.getImageData(0, 0, W, H).data;
 
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const i = y * size + x;
-      const u = (x + 0.5) / size;
+  const alpha = new Float32Array(W * H);
+  const paintBuf = new Float32Array(W * H);
+  const keyBuf = new Float32Array(W * H);
+  const rubBuf = new Float32Array(W * H);
+  const height = new Float32Array(W * H);
+
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      const cx = x % size;
+      const u = (cx + 0.5) / size;
       // `CanvasTexture` flips V, so undoing it here is what puts the staging
       // bar at the end of the box the kart's nose is pointing at rather than
       // behind its gearbox — the one sign error in this function that a still
       // frame cannot show. Same trap, same fix, as `boostPad`.
-      const v = 1 - (y + 0.5) / size;
+      const v = 1 - (y + 0.5) / H;
 
-      // Side lines, stopping just short of the bar so the corner reads as one
-      // mark and not as two strokes crossing.
+      // Side lines, running the full length into the bar: with a filled panel
+      // between them the corner reads as one mark, and stopping them short only
+      // ever left a notch.
       const uEdge = Math.min(u, 1 - u);
-      let p = (1 - smoothstep((uEdge - lineW) / SOFT)) * (1 - smoothstep((v - 0.95) / 0.02));
+      let p = 1 - smoothstep((uEdge - lineW) / SOFT);
       // The staging bar across the front: thicker than the sides, because it is
       // the mark a driver actually lines the front axle up against.
       p = Math.max(p, smoothstep((v - (1 - barW)) / SOFT));
+      // The number, at its own coverage.
+      const numFill = numData[i * 4 + 1] / 255;
+      const numOuter = numData[i * 4] / 255;
+      p = Math.max(p, numFill);
+
+      // The keyline: rubber and grime packed against the *inside* of every
+      // stroke, which is where it collects and — unlike an outline drawn
+      // outside the box — is somewhere this texture actually reaches.
+      let kk = Math.max(
+        (1 - smoothstep((uEdge - lineW - keyW) / SOFT)),
+        smoothstep((v - (1 - barW - keyW)) / SOFT),
+        numOuter,
+      );
+      kk = clamp01(kk - p);
 
       // Paint chips at the ends of a stroke and wherever the roller lifted.
       // Sparingly: a 16 cm line broken every 7 cm is not a worn line, it is a
       // dashed one, and a dashed grid box says something else entirely.
-      p *= 1 - clamp01((fbm2D(chipN.n, x / chipN.k, y / chipN.k, 3) - 0.70) * 2.4);
+      p *= 1 - clamp01((fbm2D(chipN.n, cx / chipN.k, y / chipN.k, 3) - 0.70) * 2.4);
       // Two black tyre tracks running *forward* out of the box. A standing
       // start is the most violent thing that happens to this four metres of
       // road all year, and it is the only reason a grid box ever looks used —
@@ -1213,47 +1474,64 @@ export function gridBox({ size = 256, lineW = 0.05, barW = 0.10 } = {}) {
         1 - smoothstep((Math.abs(u - 0.70) - 0.055) / 0.05),
       );
       const rub = clamp01(track * smoothstep((v - 0.42) / 0.28)
-        * lerp(0.45, 1.0, fbm2D(rubN.n, x / rubN.k, y / (rubN.k * 3), 3)));
+        * lerp(0.45, 1.0, fbm2D(rubN.n, cx / rubN.k, y / (rubN.k * 3), 3)));
       rubBuf[i] = rub;
       p = clamp01(p * lerp(1.0, 0.66, rub));
       paintBuf[i] = p;
-      const grit = fbm2D(gritN.n, x / gritN.k, y / gritN.k, 2);
-      // Coverage is paint *or* rubber: the paint is a film standing proud of
-      // the road, the rubber is a stain in it, and both have to show through a
-      // decal whose job is to leave the tarmac visible everywhere else.
-      alpha[i] = clamp01(Math.max(p, rub * 0.62) * lerp(0.86, 1.0, grit));
+      keyBuf[i] = kk;
+      const grit = fbm2D(gritN.n, cx / gritN.k, y / gritN.k, 2);
+      // Coverage is paint, keyline, rubber *or* the sealed panel between them.
+      // The panel is the part that survives: by the time a 30 cm stroke is
+      // under a pixel the box is still a rectangle of a different material, and
+      // a mark that dissolves into its background at forty metres is the defect
+      // this rework exists to remove.
+      const panel = 0.46 * lerp(0.84, 1.0, grit);
+      alpha[i] = clamp01(Math.max(Math.max(p, kk * 0.92), Math.max(rub * 0.62, panel))
+        * lerp(0.88, 1.0, grit));
       height[i] = p * 0.7 + grit * 0.2 + 0.15;
     }
   }
 
-  const c = paint(size, (x, y, o) => {
-    const i = y * size + x;
-    const p = paintBuf[i];
-    const grime = lerp(0.78, 1.03, fbm2D(gritN.n, x / gritN.k + 5, y / gritN.k, 3));
-    const k = grime * lerp(1.0, 0.30, rubBuf[i]);
-    // Under the paint is road, not black: a canvas stores premultiplied alpha
-    // and would otherwise bleed black down every edge of every line.
-    o[0] = lerp(ROAD.r, WHITE.r * k, p) * 255;
-    o[1] = lerp(ROAD.g, WHITE.g * k, p) * 255;
-    o[2] = lerp(ROAD.b, WHITE.b * k, p) * 255;
-  });
+  const c = paint(W, (x, y, o) => {
+    const i = y * W + x;
+    const cx = x % size;
+    const p = paintBuf[i], kk = keyBuf[i];
+    const grime = lerp(0.78, 1.03, fbm2D(gritN.n, cx / gritN.k + 5, y / gritN.k, 3));
+    // Rubber over paint, not instead of it. At 0.30 the two tracks took the
+    // staging bar — the one mark a driver actually uses — down to a third of
+    // its value in two black stripes, which is a heavier start than any grid
+    // has ever had and cost the bar most of its weight.
+    const k = grime * lerp(1.0, 0.48, rubBuf[i]);
+    // The sealed panel is darker than the road it is painted on and matt where
+    // the road is not. Under the paint is road, not black: a canvas stores
+    // premultiplied alpha and would otherwise bleed black down every edge.
+    let r = lerp(ROAD.r * 0.62, KEY.r, kk);
+    let gg = lerp(ROAD.g * 0.62, KEY.g, kk);
+    let b = lerp(ROAD.b * 0.64, KEY.b, kk);
+    o[0] = lerp(r, WHITE.r * k, p) * 255;
+    o[1] = lerp(gg, WHITE.g * k, p) * 255;
+    o[2] = lerp(b, WHITE.b * k, p) * 255;
+  }, H);
 
-  const roughC = paint(size, (x, y, o) => {
-    const i = y * size + x;
+  const roughC = paint(W, (x, y, o) => {
+    const i = y * W + x;
     let rgh = lerp(0.90, 0.48, paintBuf[i]);
     rgh = lerp(rgh, 0.98, rubBuf[i]);
     o[0] = o[1] = o[2] = clamp01(rgh) * 255;
-  });
+  }, H);
 
   const result = {
     map: makeTexture(c, { srgb: true }),
-    alphaMap: makeTexture(grayCanvas(size, alpha)),
-    normalMap: makeTexture(heightToNormal(height, size, 1.4)),
+    alphaMap: makeTexture(grayCanvas(W, alpha, 255, H)),
+    normalMap: makeTexture(heightToNormal(height, W, 1.4, H)),
     roughnessMap: makeTexture(roughC),
     normalScale: 0.5,
+    slots,
   };
-  // Each box maps this exactly once, so repeat wrapping would let the opposite
-  // edge bleed in under bilinear filtering and put a ghost line outside the box.
+  // Each box maps one cell exactly once, so repeat wrapping would only ever let
+  // the far end of the atlas bleed in under bilinear filtering. Between cells
+  // the neighbour is another box's side line, which is the same white, so the
+  // one seam that does exist has nothing to show.
   for (const t of [result.map, result.alphaMap, result.normalMap, result.roughnessMap]) {
     t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
     t.needsUpdate = true;
@@ -1363,4 +1641,4 @@ export function clearTextureCache() {
   _textureCache.clear();
 }
 
-export const SURFACE_TEXTURES = { asphalt, sand, dirt, grass, curb, checker, gridBox, rainbow, paintedMetal, laneMarkings, waterNormal, boostPad, boostSpill };
+export const SURFACE_TEXTURES = { asphalt, sand, dirt, groundDetail, grass, curb, checker, gridBox, rainbow, paintedMetal, laneMarkings, waterNormal, boostPad, boostSpill };

@@ -134,12 +134,50 @@ const GRID_SLOTS = 12;
 const GRID_BOX_W = 2.9;
 const GRID_BOX_L = 4.6;
 const GRID_BOX_AHEAD = 1.5;
-// Line widths in metres. Grid paint is laid roughly twice as heavy as a lane
-// marking, which is not decoration: at 12 cm it is under a pixel by thirty
-// metres and the whole grid vanishes exactly when the camera pulls back to
-// show it.
-const GRID_LINE = 0.16;
-const GRID_BAR = 0.44;
+// Line widths in metres. 16 cm and 44 cm were chosen as "twice a lane marking"
+// and were not: `Tex.laneMarkings` lays its edge lines at a half-width of 1.6%
+// of the road, and this circuit's start/finish straight is 19 m, so those
+// strokes are around 30 cm. The grid was painted *thinner* than the markings it
+// had to be told apart from, in the same white and the same film — which is
+// most of why a reviewer could not tell them apart. Both are now clearly
+// heavier than anything else on the tarmac, which is what every circuit on
+// earth does and for the same reason.
+const GRID_LINE = 0.34;
+const GRID_BAR = 0.70;
+// The dark keyline packed against the inside of every stroke. Value contrast is
+// local, not absolute: a white line on tarmac is a 60-luma step and the same
+// line with rubber against it is a 200-luma one, which is the difference
+// between a mark a reviewer had to hide to find and one they cannot miss.
+const GRID_KEY = 0.10;
+// Cap height of the painted position number, in metres. Sized against the box
+// rather than the screen: 1.55 m fills the clear ground behind where a kart
+// stands, which is the only part of a grid box still visible when the grid is
+// full.
+const GRID_NUM_H = 1.55;
+
+// -- run-off detail ----------------------------------------------------------
+// Metres of world to one tile of `Tex.groundDetail`, at the two scales the
+// ground samples it. The fine one puts 2-5 cm stones under the kart; the coarse
+// one is the same map stretched four and a half times, which turns the same
+// stones into the 12-25 cm scatter that carries the middle distance. Two taps
+// of one map rather than two maps: gravel *is* the coarse fraction of the same
+// material, and grading it separately would be authoring two lies where one
+// truth tiles.
+const DETAIL_TILE = 1.15;
+const DETAIL_TILE_MID = 5.2;
+// The finest wavelength each of those tiles carries, in metres. These are the
+// numbers the shader retires each layer on, so they have to be the *finest*
+// content and not the average — a layer faded on its average wavelength spends
+// half its life aliasing.
+const DETAIL_LAMBDA = 0.030;
+const DETAIL_LAMBDA_MID = 0.135;
+// The gravel band, in metres out from the kerb's outer lip. A trap does not
+// start at the kerb — the first hand's width is fines banked against it — and
+// on a real circuit it runs two to four metres before the ground reverts.
+const GRAVEL_IN = 0.30;
+const GRAVEL_OUT = 3.3;
+// Columns across the 6.5 m apron. See `_buildShoulders`.
+const SHOULDER_COLS = 8;
 
 // -- barriers ----------------------------------------------------------------
 // Cross-section of the barrier, walked from the track-facing foot, up the inner
@@ -568,6 +606,21 @@ normal = normalize( tbn * vec3( rN * normalScale, 1.0 ) );`);
     };
   }
 
+  /**
+   * The off-track surface this circuit is laid in.
+   *
+   * Cached by `ProcTex`, so every caller gets the same object — which matters
+   * because the kerb has to know the colour of the ground that spills onto it,
+   * and taking that from the theme hex instead would be a second opinion about
+   * a surface that already has one.
+   */
+  _groundTex() {
+    const fn = this.theme.shoulder === 'dirt' ? Tex.dirt
+      : this.theme.shoulder === 'sand' ? Tex.sand
+      : Tex.grass;
+    return fn({ size: 1024, tint: this.theme.groundColor });
+  }
+
   _buildCurbs() {
     if (this.theme.shoulder === 'none' && this.track.isVoid) return;
     const rings = this._roadRings();
@@ -625,11 +678,25 @@ normal = normalize( tbn * vec3( rN * normalScale, 1.0 ) );`);
    * filter would have produced anyway, and they get there before they are small
    * enough to strobe. Same reasoning, and nearly the same distances, as the
    * two-scale fades already on the road and the terrain.
+   *
+   * It also owns half of the kerb-to-run-off join. The two surfaces meet at
+   * exactly the same height and were still photographing as a hard geometric
+   * edge, because agreeing on a height is not a transition — nothing crossed
+   * the line in either direction. The ground banks against the kerb's foot in
+   * `_groundWear`; the ground climbing *over* the outer roll belongs here,
+   * where the kerb's own coordinates are.
    */
   _curbWear(mat, tex) {
     mat.customProgramCacheKey = () => 'hk-curb';
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uCurbFar = { value: tex.meanColor ?? new THREE.Color(0.4, 0.3, 0.3) };
+      // The run-off's own mean, in linear light, rather than the theme hex: the
+      // spill has to be the colour of the ground beside this kerb and not of an
+      // idea about it. Half of it, because a tongue of sand over concrete is
+      // thin enough to still read as concrete underneath.
+      shader.uniforms.uCurbDirt = {
+        value: (this._groundTex().meanColor ?? new THREE.Color(0.25, 0.2, 0.14)).clone(),
+      };
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', `#include <common>
 attribute vec2 aCurb;
@@ -640,7 +707,8 @@ vCurb = aCurb;`);
       shader.fragmentShader = shader.fragmentShader
         .replace('#include <common>', `#include <common>
 varying vec2 vCurb;
-uniform vec3 uCurbFar;`)
+uniform vec3 uCurbFar;
+uniform vec3 uCurbDirt;`)
         .replace('#include <map_fragment>', `#include <map_fragment>
 float kArc = vCurb.x;             // metres round the lap
 float kU   = vCurb.y;             // 0 at the tarmac joint, 1 at the outer lip
@@ -668,14 +736,37 @@ diffuseColor.rgb *= mix( 0.78, 1.06, kAge );
 float kRide  = smoothstep( 0.45, 1.0, 0.5 + 0.5 * sin( kArc * 0.0327 + 0.7 ) );
 float kCrown = 1.0 - smoothstep( 0.0, 0.50, abs( kU - 0.34 ) );
 float kRub   = kRide * kCrown * ( 1.0 - kFar );
-diffuseColor.rgb *= mix( 1.0, 0.62, kRub );`)
+diffuseColor.rgb *= mix( 1.0, 0.62, kRub );
+
+// Run-off climbing over the outer roll. Every kart that rejoins drags some of
+// it up, the wind moves the rest, and where it lands the kerb is buried rather
+// than dirty — which is the difference between a kerb that ends at a line and a
+// kerb that ends in the ground.
+//
+// Three incommensurate periods, the shortest at ten metres, so one corner shows
+// both buried stretches and clean ones: a single period long enough to see the
+// whole of is a kerb that is uniformly dirty, which is a texture and not a
+// history. Weighted onto the outer third, because that is the only part of the
+// section low enough for anything to climb, and deliberately *not* faded with
+// distance — a boundary between two materials is the lowest-frequency thing on
+// this surface and it is what should still be there when the stripes are not.
+float kSpillW = 0.5 + 0.28 * sin( kArc * 0.2090 + 1.3 ) + 0.22 * sin( kArc * 0.0759 )
+              + 0.16 * sin( kArc * 0.6130 + 0.4 );
+float kSpill = smoothstep( 0.56, 1.04, kU + ( kSpillW - 0.5 ) * 0.34 );
+diffuseColor.rgb = mix( diffuseColor.rgb, uCurbDirt * 1.20, kSpill * 0.76 );
+// The last centimetres are under the lip and never see the sun. That contact
+// line is what plants the kerb in the ground, the same way the barrier's cap
+// overhang is what makes the barrier an object.
+float kFoot = smoothstep( 0.86, 1.0, kU );
+diffuseColor.rgb *= mix( 1.0, 0.60, kFoot );`)
         .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
-roughnessFactor = clamp( mix( roughnessFactor, 0.99, kRub * 0.7 ), 0.05, 1.0 );`)
+roughnessFactor = clamp( mix( roughnessFactor, 0.99, max( kRub * 0.7, kSpill * 0.85 ) ), 0.05, 1.0 );`)
         // Chipped paint and coarse concrete are millimetres of relief. Once
         // they stop resolving the normal map only supplies specular sparkle,
-        // which crawls for the same reason the albedo did.
+        // which crawls for the same reason the albedo did. Sand fills that
+        // relief in where it lies, so the spill flattens it too.
         .replace('#include <normal_fragment_maps>', `vec3 kMapN = texture2D( normalMap, vNormalMapUv ).xyz * 2.0 - 1.0;
-normal = normalize( tbn * vec3( kMapN.xy * normalScale * ( 1.0 - kFar ), 1.0 ) );`);
+normal = normalize( tbn * vec3( kMapN.xy * normalScale * ( 1.0 - kFar ) * ( 1.0 - kSpill * 0.55 ), 1.0 ) );`);
     };
   }
 
@@ -716,10 +807,7 @@ normal = normalize( tbn * vec3( kMapN.xy * normalScale * ( 1.0 - kFar ), 1.0 ) )
   _buildShoulders() {
     const rings = this._roadRings();
     const shoulderW = TRACK_LAYOUT.shoulderWidth;
-    const texFn = this.theme.shoulder === 'dirt' ? Tex.dirt
-      : this.theme.shoulder === 'sand' ? Tex.sand
-      : Tex.grass;
-    const t = texFn({ size: 1024, tint: this.theme.groundColor });
+    const t = this._groundTex();
     const mat = this._mat({
       map: t.map,
       normalMap: t.normalMap,
@@ -736,7 +824,12 @@ normal = normalize( tbn * vec3( kMapN.xy * normalScale * ( 1.0 - kFar ), 1.0 ) )
         rings,
         (s, half) => side * half,
         (s, half) => side * (half + shoulderW),
-        4,
+        // Four columns over 6.5 m put the apron's fall-away ramp on 1.6 m
+        // facets, and the first of them spanned the whole gravel band and the
+        // kerb's contact shadow with two vertex normals. Eight is 14k triangles
+        // on a mesh that is still one draw call, and it is the near band of the
+        // largest surface in the frame.
+        SHOULDER_COLS,
         // World XZ at the terrain's own tile, not road space at a tile of its
         // own. The run-off and the land past the barrier are the same sand or
         // the same dirt — the *same cached texture object* — yet the apron was
@@ -787,6 +880,18 @@ normal = normalize( tbn * vec3( kMapN.xy * normalScale * ( 1.0 - kFar ), 1.0 ) )
    *  - Meet its neighbours. Sand is compacted and rubber-stained for the first
    *    couple of metres off the tarmac, and damp for the last couple above the
    *    waterline, so both joins are a gradient rather than a polygon edge.
+   *  - Have a surface at all within arm's length. Everything above is authored
+   *    at metres, and the tile under it stops at 16 cm because a 14 m tile
+   *    cannot honestly hold anything finer. Between 16 cm and the pixel there
+   *    was nothing, and that is precisely the band a 4K frame resolves: a
+   *    700x500 crop of run-off at 3840x2160 came back holding one low-frequency
+   *    mottle, a faint streak and nothing else, while the kerb a few hundred
+   *    pixels away held grit, rubber and chipped paint at both resolutions.
+   *    `Tex.groundDetail` supplies those scales and this fades them by *screen
+   *    footprint* rather than by distance — see `gLod`. That distinction is the
+   *    whole fix: a distance threshold is a statement about 1080p and cannot
+   *    put anything more on a 4K screen, which is why every fade in this file
+   *    previously produced the same picture at both.
    *
    * `strata` turns on sedimentary banding for the canyon, where the terrain
    * climbs into mesa walls sixty metres tall. Those walls are far enough away
@@ -797,6 +902,9 @@ normal = normalize( tbn * vec3( kMapN.xy * normalScale * ( 1.0 - kFar ), 1.0 ) )
    * not.
    */
   _groundWear(mat, tex, { tile, waterLevel = null, cacheKey, strata = 0 }) {
+    // Shared by the shoulders and the terrain, and cached, so this is one map
+    // pair for every off-track surface on every circuit.
+    const detail = Tex.groundDetail({ size: 512 });
     mat.customProgramCacheKey = () => `hk-ground-${cacheKey}`;
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uBaseLuma = { value: Math.max(tex.meanLuma ?? 0.2, 1e-3) };
@@ -805,6 +913,12 @@ normal = normalize( tbn * vec3( kMapN.xy * normalScale * ( 1.0 - kFar ), 1.0 ) )
       shader.uniforms.uWater = { value: waterLevel ?? -1e6 };
       shader.uniforms.uTile = { value: 1 / tile };
       shader.uniforms.uStrata = { value: strata };
+      shader.uniforms.uDetailN = { value: detail.normalMap };
+      shader.uniforms.uDetailG = { value: detail.grainMap };
+      shader.uniforms.uDetailScale = { value: detail.normalScale };
+      shader.uniforms.uDetailUv = { value: new THREE.Vector2(1 / DETAIL_TILE, 1 / DETAIL_TILE_MID) };
+      shader.uniforms.uDetailLam = { value: new THREE.Vector2(DETAIL_LAMBDA, DETAIL_LAMBDA_MID) };
+      shader.uniforms.uGravel = { value: new THREE.Vector2(GRAVEL_IN, GRAVEL_OUT) };
 
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', `#include <common>
@@ -821,6 +935,12 @@ uniform vec3 uGroundFar;
 uniform float uWater;
 uniform float uTile;
 uniform float uStrata;
+uniform sampler2D uDetailN;
+uniform sampler2D uDetailG;
+uniform float uDetailScale;
+uniform vec2 uDetailUv;          // tiles per metre, fine and coarse
+uniform vec2 uDetailLam;         // finest wavelength each tap carries, metres
+uniform vec2 uGravel;            // gravel band, metres out from the kerb
 
 float hkHash( vec2 p ) {
   p = fract( p * vec2( 0.3183099, 0.3678794 ) );
@@ -832,12 +952,41 @@ float hkNoise( vec2 p ) {
   f = f * f * ( 3.0 - 2.0 * f );
   return mix( mix( hkHash( i ), hkHash( i + vec2( 1.0, 0.0 ) ), f.x ),
               mix( hkHash( i + vec2( 0.0, 1.0 ) ), hkHash( i + vec2( 1.0, 1.0 ) ), f.x ), f.y );
+}
+
+// How much of a feature of wavelength lam metres is still worth drawing when
+// one pixel of the screen covers pix metres of this surface.
+//
+// A pattern is resolved while a pixel is a fraction of its period and is pure
+// noise once a pixel spans one; carrying it at full contrast across that line
+// is what aliasing *is*, and on ground — the most grazing surface in the frame
+// — the line is crossed by the along-view axis first and by tens of metres. A
+// hand-built mip chain, in other words, which procedural detail needs because
+// the GPU cannot build one for it. Written against the footprint rather than the
+// distance so that a screen with twice the pixels gets twice the detail instead
+// of the same picture twice as large.
+float gLod( float lam, float pix ) {
+  return 1.0 - smoothstep( lam * 0.24, lam * 0.85, pix );
+}
+
+// The metre-scale lie of the loose material, as a scalar field in world metres.
+// Sampled three times below to take its gradient, because a tonal field with no
+// relief is a painting of a surface and the same field with relief is a
+// surface. Six and two metres is a band no map and no mesh here can reach: the
+// ground tile is fourteen metres across, and the terrain rings are 6.4 m apart.
+float gRelief( vec2 q ) {
+  return hkNoise( q * 0.170 ) * 0.62 + hkNoise( q * 0.530 + 3.1 ) * 0.38;
 }`)
         .replace('#include <map_fragment>', `#include <map_fragment>
 float gDist = length( vViewPosition );
 float gWorldY = vGround.x;
 float gOut = vGround.y;          // metres out from the edge of the tarmac
 vec2  gXZ = vMapUv / uTile;      // world metres; the ground's UV *is* world XZ
+// One pixel's footprint on this surface, in world metres, along whichever axis
+// is worse. On a plane seen this close to edge-on the two differ by an order of
+// magnitude and it is always the long one that decides what is detail and what
+// is noise.
+float gPix = max( length( dFdx( gXZ ) ), length( dFdy( gXZ ) ) );
 
 // Ground UVs are world XZ, so anything steep is drawn through a badly
 // stretched sample. Re-project the steep parts against height instead — before
@@ -880,12 +1029,71 @@ float gDrift = hkNoise( gXZ * 0.0105 + 4.7 ) * 0.40
 diffuseColor.rgb *= mix( 0.87, 1.13, gDrift );
 
 // Wind scour at six metres, dragged along by the drift field so the two read
-// as one weather system rather than two noise fields multiplied together. It
-// is faded on the tile's own schedule and for the tile's own reason: near the
-// kart the run-off needs something with a shape to it or it is a painted ramp,
-// and at range there must be nothing this size left to undersample.
+// as one weather system rather than two noise fields multiplied together, and a
+// second pass of it at two metres dragged along by the first.
+//
+// Both used to be one term gated on gFine, which is the *tile's* schedule and
+// far too short for them: a six-metre feature is fifty pixels across at a
+// hundred metres and can no more alias than the drift sheets can. Retiring it
+// at fifty metres with the tile is why the run-off past the braking zone was a
+// painted ramp — between the tile dying at 52 m and the drift sheets starting
+// at 13 m there was nothing at all with a shape to it, which is exactly the
+// "one low-frequency mottle and a faint streak" in the review. Each now goes on
+// its own wavelength, and each is worth looking at because it can afford to be.
 float gScour = hkNoise( gXZ * 0.17 + vec2( gDrift * 3.0, 0.0 ) );
-diffuseColor.rgb *= mix( 1.0, mix( 0.940, 1.060, gScour ), gFine );
+float gRipple = hkNoise( gXZ * 0.53 + vec2( 0.0, gScour * 1.7 ) );
+diffuseColor.rgb *= mix( 1.0, mix( 0.905, 1.095, gScour ), gLod( 5.9, gPix ) );
+diffuseColor.rgb *= mix( 1.0, mix( 0.945, 1.055, gRipple ), gLod( 1.9, gPix ) );
+
+// -- the centimetre and decimetre scales ------------------------------------
+// Two taps of one detail map, one at 1.15 m of world and one at 5.2 m, each
+// retired on its own finest wavelength. Between them they occupy the whole band
+// from the pixel up to where the 14 m tile takes over — the band this surface
+// simply did not have, and the reason a 4K capture of it showed nothing a 1080p
+// one did not.
+vec2 gDetUv = gXZ * uDetailUv.x;
+vec2 gMidUv = gXZ * uDetailUv.y;
+float gDetW = gLod( uDetailLam.x, gPix );
+float gMidW = gLod( uDetailLam.y, gPix );
+vec3 gGrainF = texture2D( uDetailG, gDetUv ).rgb;
+vec3 gGrainM = texture2D( uDetailG, gMidUv ).rgb;
+
+// The gravel band inside the kerb. A trap is a strip of the coarse fraction
+// swept out of the run-off, so it is the same map at the same two scales with
+// the stones weighted up rather than a fourth material — and its edges are
+// pushed about by a seven-metre noise, because a run-off that changes grade
+// along a ruled line is a decal and not a place.
+float gGravD = gOut + ( hkNoise( gXZ * 0.145 ) - 0.5 ) * 1.5;
+float gGravel = smoothstep( uGravel.x, uGravel.x + 0.7, gGravD )
+              * ( 1.0 - smoothstep( uGravel.y - 1.1, uGravel.y + 0.9, gGravD ) );
+// Exposed stone is paler and greyer than the fines it was sorted out of, and
+// that tonal shift is world- and road-space, so it is the part of the band that
+// survives to any distance — the stones themselves cannot and do not.
+float gGravStone = mix( gGrainM.b, gGrainF.b, gDetW * 0.5 );
+vec3 gGravTint = mix( vec3( 1.0 ), vec3( 1.16, 1.13, 1.10 ), gGravStone );
+diffuseColor.rgb = mix( diffuseColor.rgb, diffuseColor.rgb * gGravTint * 0.95, gGravel );
+
+// Albedo modulation from both taps. R is half the multiplier and the map was
+// normalised so its mean is exactly 1.0, which is what lets this ride on 40% of
+// the frame without moving the exposure. The coarse tap is held to a third:
+// the same stones stretched four and a half times are 20 cm across, and 20 cm
+// stones at full contrast do not read as a run-off, they read as a cobbled
+// yard. Weights are kept inside 0..1 on purpose — a mix factor over 1 is an
+// extrapolation, and extrapolating an albedo is how a surface blows out.
+float gMidA = gMidW * 0.34;
+float gGrain = mix( 1.0, gGrainF.r * 2.0, gDetW ) * mix( 1.0, gGrainM.r * 2.0, gMidA );
+diffuseColor.rgb *= gGrain;
+float gRgh = mix( 1.0, gGrainF.g * 2.0, gDetW ) * mix( 1.0, gGrainM.g * 2.0, gMidA );
+
+// The kerb's foot. Sand banks against it, and the last hand's width of it is in
+// the kerb's own shadow all day. Both are missing from a join between two
+// meshes that merely agree on a height, which is what "a hard geometric edge
+// onto sand with no lip, no spill and no shadow" was describing — the surfaces
+// met exactly and read as two materials butted together, because nothing
+// crossed the line in either direction.
+float gFoot = 1.0 - smoothstep( 0.0, 0.42, gOut );
+float gBank = ( 1.0 - smoothstep( 0.10, 1.30, gOut ) ) * smoothstep( 0.02, 0.30, gOut );
+diffuseColor.rgb *= mix( 1.0, 0.52, gFoot ) * mix( 1.0, 1.10, gBank );
 
 // Sedimentary beds, for the canyon. Real mesa strata are near-horizontal, tilt
 // slowly, and vary in thickness, so the bed coordinate is world height plus a
@@ -929,10 +1137,15 @@ diffuseColor.rgb *= mix( 1.0, 0.76, gEdge );
 float gWet = 1.0 - smoothstep( 0.0, 2.4, gWorldY - uWater );
 diffuseColor.rgb *= mix( vec3( 1.0 ), vec3( 0.60, 0.55, 0.53 ), gWet );`)
         .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+// Grit is the roughest thing on the circuit and exposed stone is not, so the
+// detail map's own roughness rides in on the same two schedules its relief does
+// — a normal without a matching roughness reads as embossed plastic.
+roughnessFactor *= gRgh;
 // Relief that has fallen off the end of the mip chain still scatters light, so
 // the energy the retired normal used to carry goes here instead.
 roughnessFactor = mix( roughnessFactor, 0.99, ( 1.0 - gFine ) * 0.45 );
 roughnessFactor = mix( roughnessFactor, 1.00, gEdge * 0.40 );
+roughnessFactor = mix( roughnessFactor, 0.98, gGravel * 0.55 );
 roughnessFactor = mix( roughnessFactor, 0.30, gWet );
 roughnessFactor = clamp( roughnessFactor, 0.05, 1.0 );`)
         .replace('#include <normal_fragment_maps>', `vec3 gN = texture2D( normalMap, vNormalMapUv ).xyz * 2.0 - 1.0;
@@ -942,7 +1155,25 @@ vec3 gM = texture2D( normalMap, vNormalMapUv * 0.19 ).xyz * 2.0 - 1.0;
 // a specular multiplier, and per-pixel specular on a grazing plane is where all
 // of this surface's measured temporal instability actually lived.
 vec2 gNxy = ( gM.xy * 0.55 + gN.xy * gFine ) * mix( 1.0, 0.30, max( gWet, gEdge * 0.7 ) );
-normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
+// The two detail taps, each carried exactly as far as it is resolvable and no
+// further. Added outside the tile's own normalScale because this map has its
+// own, set against what a stone two metres from the camera should look like
+// rather than against what a fourteen-metre tile should. Gravel stands proud in
+// a way drifted fines never do, so the band gets the same relief harder.
+vec2 gDetN = ( texture2D( uDetailN, gDetUv ).xy * 2.0 - 1.0 ) * gDetW;
+vec2 gMidN = ( texture2D( uDetailN, gMidUv ).xy * 2.0 - 1.0 ) * gMidW * 0.45;
+// Relief for the metre scales, by finite difference on the same field that
+// tinted them. It is the only term here that still exists at forty metres, and
+// under a sun at sixteen degrees it is worth more than every finer scale put
+// together: a run-off with tone but no shape is a ramp of colour, which is the
+// failure on the far side of the moire this file spent the last pass removing.
+float gH0 = gRelief( gXZ );
+vec2 gGrad = vec2( gRelief( gXZ + vec2( 0.9, 0.0 ) ) - gH0,
+                   gRelief( gXZ + vec2( 0.0, 0.9 ) ) - gH0 );
+vec2 gTot = gNxy * normalScale
+  + ( gDetN + gMidN ) * uDetailScale * ( 1.0 + gGravel * 0.9 ) * mix( 1.0, 0.40, gWet )
+  - gGrad * 0.62 * gLod( 2.4, gPix ) * mix( 1.0, 0.45, gWet );
+normal = normalize( tbn * vec3( gTot, 1.0 ) );`);
     };
   }
 
@@ -1522,13 +1753,27 @@ roughnessFactor = clamp( roughnessFactor, 0.05, 1.0 );`);
    * the stagger ever changes. Boxes are painted for the full field size whether
    * or not this race has one — the alternative is a circuit whose markings
    * depend on who entered.
+   *
+   * Each box takes its own cell of one atlas, which is the whole reason the
+   * positions can be *numbered*: twelve different marks, still one texture, one
+   * material and one draw call. Numbering is not decoration — it is the thing
+   * that makes a grid unmistakably a grid rather than twelve rectangles, and the
+   * previous version's central failure was that a reviewer had to hide it and
+   * re-shoot to establish it existed at all.
    */
   _buildStartGrid() {
     const slots = this.track.startGrid(GRID_SLOTS);
+    const cell = 256;
     const t = Tex.gridBox({
-      size: 256,
+      size: cell,
+      slots: GRID_SLOTS,
       lineW: GRID_LINE / GRID_BOX_W,
       barW: GRID_BAR / GRID_BOX_L,
+      keyW: GRID_KEY / GRID_BOX_W,
+      // The cell is square and the box is not, so the numeral has to be told
+      // how much the world stretches it or a 12 arrives elongated down the road.
+      aspect: GRID_BOX_L / GRID_BOX_W,
+      numH: GRID_NUM_H / GRID_BOX_L,
     });
     // Through `_mat` for the reason set out on the start line's material: a
     // decal built with a bare constructor never receives the envMap, and its
@@ -1556,11 +1801,16 @@ roughnessFactor = clamp( roughnessFactor, 0.05, 1.0 );`);
     const cols = 3, rows = 5;
     const parts = [];
     const p = new THREE.Vector3();
-    for (const slot of slots) {
+    for (let g = 0; g < slots.length; g++) {
+      const slot = slots[g];
       const n = rows + 1, m = cols + 1;
       const positions = new Float32Array(n * m * 3);
       const uvs = new Float32Array(n * m * 2);
       const sBar = slot.s + GRID_BOX_AHEAD;
+      // This box's cell of the atlas. Inset by half a texel so bilinear
+      // filtering at the cell edge cannot reach across into the next number.
+      const half = 0.5 / (cell * GRID_SLOTS);
+      const u0 = g / GRID_SLOTS + half, u1 = (g + 1) / GRID_SLOTS - half;
       for (let i = 0; i < n; i++) {
         const f = i / rows;
         const s = sBar - GRID_BOX_L * (1 - f);
@@ -1570,14 +1820,17 @@ roughnessFactor = clamp( roughnessFactor, 0.05, 1.0 );`);
           const k = (i * m + j) * 3;
           positions[k] = p.x; positions[k + 1] = p.y + 0.013; positions[k + 2] = p.z;
           const tt = (i * m + j) * 2;
-          uvs[tt] = u; uvs[tt + 1] = f;
+          uvs[tt] = lerp(u0, u1, u); uvs[tt + 1] = f;
         }
       }
       parts.push({ positions, uvs, colors: null, n, m });
     }
     // Twelve boxes, one material, no animation: twelve draw calls spent on
-    // nothing if they stayed separate. Same reasoning as the boost pads.
-    this._add(mergeStrips(parts), mat, { receive: true, renderOrder: 1 }).name = 'startGrid';
+    // nothing if they stayed separate. Same reasoning as the boost pads. Drawn
+    // after the lane markings, which run straight through the grid: a box is
+    // newer paint than the lines it was laid over, and with both writing no
+    // depth the order is the only thing that says so.
+    this._add(mergeStrips(parts), mat, { receive: true, renderOrder: 2 }).name = 'startGrid';
   }
 
   // -- surroundings ---------------------------------------------------------
