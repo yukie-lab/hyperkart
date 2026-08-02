@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { roundedBox, lathe, tyreGeometry, capsule, mergeGeometries, xform } from '../render/GeoUtils.js';
 import { heightToNormal } from '../render/ProcTex.js';
+import { PHYS } from './KartTuning.js';
 import { clamp, clamp01, damp, fbm2D, lerp, makeValueNoise2D, smoothstep, TAU } from '../core/MathX.js';
 
 /**
@@ -41,6 +42,34 @@ import { clamp, clamp01, damp, fbm2D, lerp, makeValueNoise2D, smoothstep, TAU } 
 const WHEEL_R = 0.36;
 const WHEEL_W = 0.30;
 const FRONT_WHEEL_R = 0.30;
+
+/**
+ * How far the presentation hangs below the simulation's reference point.
+ *
+ * `kart.pos` is not on the road — `PHYS.rideHeight` puts it at axle height, and
+ * its own comment says so. Every piece of geometry in this file is authored
+ * against a contact plane at y = 0, and nothing was ever reconciling the two,
+ * so every kart in the game was hovering 42 cm over the surface: measured at
+ * the near camera, an eighty-pixel gap between the bottom of a rear tyre and
+ * the road directly beneath it. That is what the "shadow detached from the
+ * tyre" report was actually looking at. The shadow was in the right place.
+ *
+ * Applied to `body` rather than to `group`, because `group` is the transform
+ * the race director writes the interpolated physics pose into every frame. It
+ * also moves the pivot for lean, pitch and squash down onto the contact plane,
+ * which is where a kart's roll centre belongs: rolling about axle height swung
+ * the tyres sideways out of their own contact patches.
+ */
+// Measured per wheel, and it lands almost exactly on `PHYS.rideHeight`.
+//
+// The measurement that matters is: wheel world Y, minus that wheel's radius,
+// minus the ground sampled *directly beneath that wheel*. Sampling the ground
+// at the chassis origin instead gives a completely different number on any
+// crowned or banked road, and reading a bounding box over the tyre meshes
+// gives a third — both were tried here and both are misleading. With this
+// value the four wheels sit within a few millimetres of the surface on the
+// flat grid, on both tracks, and they agree with each other to 3 mm.
+const RIDE_DROP = 0.411;
 
 // Rim radius of the steering wheel, and where on it the hands grip. The driver
 // rig solves to these every frame, so the hands are never "near" the wheel.
@@ -738,6 +767,37 @@ function buildChassis(buildKey, wingKind) {
   column.rotateX(Math.PI / 2 - 0.65);
   parts.push({ slot: 'darkMetal', geo: column, matrix: xform([0, 0.48, 0.30]) });
 
+  // --- Suspension, chassis end -----------------------------------------
+  // The damper body and its top mount. The rod that runs up from the upright
+  // slides inside this tube, so the pair telescopes as the body settles onto
+  // the wheel instead of separating: that sliding *is* the suspension working,
+  // and it is the only reason the travel now reads as travel. Merged into the
+  // chassis' existing dark-metal buffer, so the whole mechanism — both ends,
+  // all four corners — costs this model nothing at all.
+  //
+  // A wishbone would be the other obvious part to draw and is deliberately
+  // absent: its inboard end pivots on the tub while its outboard end is on a
+  // hub that steers thirty degrees, and nothing that spans that gap can be
+  // parented to either one.
+  const tube = new THREE.CylinderGeometry(0.043, 0.038, 0.24, 8);
+  const topMount = roundedBox(0.10, 0.05, 0.10, 0.02, 1);
+  for (const [tx, tz, r, ww] of [
+    [B.track, B.wbF, FRONT_WHEEL_R * B.tyre, WHEEL_W * 0.86 * B.tyre],
+    [B.rearTrack, B.wbR, WHEEL_R * B.tyre, WHEEL_W * B.tyre],
+  ]) {
+    for (const s of [-1, 1]) {
+      // Coaxial with the rod: same inboard offset off the wheel centre, same
+      // eight-degree lean. Wheel-space heights are relative to the axle, so the
+      // conversion into chassis space is the axle height less the build's own
+      // stance. The tube's lower half swallows the rod's upper half at rest and
+      // takes the whole of the travel before they part.
+      const cx = s * tx - s * ww * 0.44;
+      const y0 = r - B.stance;
+      parts.push({ slot: 'darkMetal', geo: tube, matrix: xform([cx + s * 0.020, y0 + 0.145, tz], [0, 0, s * 0.14]) });
+      parts.push({ slot: 'darkMetal', geo: topMount, matrix: xform([cx + s * 0.036, y0 + 0.275, tz], [0, 0, s * 0.14]) });
+    }
+  }
+
   for (const w of wingParts(B, wingKind)) parts.push(w);
 
   const merged = mergeBySlot(parts);
@@ -747,12 +807,114 @@ function buildChassis(buildKey, wingKind) {
   return out;
 }
 
+/**
+ * The wheel end of the suspension: upright, brake disc, and the lower half of a
+ * coilover.
+ *
+ * There was nothing at all connecting a wheel to the chassis, which is why the
+ * travel read as the wheel sliding — a wheel that moves relative to a body it
+ * is not visibly attached to is a wheel that has come off. The other half of
+ * the damper lives on the chassis and does not move; this rod slides up inside
+ * it. That telescoping is the point, and it is why the damper is the one
+ * element worth spending on: a wishbone would have to pivot about a point on
+ * the tub, and anything mounted here inherits the steering yaw instead.
+ *
+ * Kept near the steering axis for the same reason. A strut that stands almost
+ * plumb through the pivot's own origin barely moves when the front wheel turns
+ * thirty degrees, so one part serves both axles.
+ *
+ * @param {number} inboard  -1 or +1: which way the chassis is from this wheel.
+ */
+function uprightParts(r, w, inboard) {
+  const x = (v) => v * inboard;
+  // Leaning inboard eight degrees off plumb, so the strut clears the tyre's
+  // inner shoulder. A positive z rotation tips the top toward -x, so the sign
+  // is the opposite of the inboard direction.
+  const lean = [0, 0, -x(0.14)];
+  const out = [];
+  // Hub carrier: a plate on the inboard face of the wheel, reaching up to the
+  // damper's lower eye. Inside the tyre's silhouette from directly behind, and
+  // the whole point of the exercise from three-quarters on.
+  const carrier = roundedBox(w * 0.26, r * 1.00, w * 0.58, 0.026, 1);
+  out.push({ slot: 'hub', geo: carrier, matrix: xform([x(w * 0.42), 0, 0]) });
+  // A brake disc and caliper were drawn here and then deleted: they sit inside
+  // the rim bore behind five spokes, and they cost more triangles than the
+  // whole coilover for something no frame of this game ever shows.
+
+  // The coilover's moving half. Metres, not multiples of the tyre radius: this
+  // is a chassis-scale part and it has to meet a fixed pickup on the tub
+  // whatever size wheel the build runs.
+  const rod = new THREE.CylinderGeometry(0.026, 0.026, 0.23, 8);
+  out.push({ slot: 'hub', geo: rod, matrix: xform([x(w * 0.44), 0.085, 0], lean) });
+  const seat = new THREE.CylinderGeometry(0.056, 0.056, 0.022, 10);
+  out.push({ slot: 'hub', geo: seat, matrix: xform([x(w * 0.44), -0.020, 0], lean) });
+  // A real helix, six sides over five turns. It is the icon that reads as
+  // "suspension" at a glance; a plain sleeve reads as an exhaust.
+  out.push({
+    slot: 'hub', geo: coilGeometry(0.048, 0.175, 4, 5, 0.012),
+    matrix: xform([x(w * 0.44), -0.012, 0], lean),
+  });
+  return out;
+}
+
+/**
+ * Tone the merged hub buffer: rim down to a machined near-black, damper up to
+ * bright steel, spring warmer still so the one part that says "suspension"
+ * separates from the strut it is wound around.
+ */
+function paintHub(geo, rimVerts, upright) {
+  const n = geo.attributes.position.count;
+  const col = new Float32Array(n * 3);
+  // Everything before `rimVerts` is the rim; after it, one span per part in the
+  // order `uprightParts` built them — the last of which is the coil.
+  const coilStart = n - upright[upright.length - 1].geo.attributes.position.count;
+  for (let i = 0; i < n; i++) {
+    let r, g, b;
+    if (i < rimVerts) { r = 0.19; g = 0.20; b = 0.23; }
+    else if (i >= coilStart) { r = 1.00; g = 0.78; b = 0.52; }
+    else { r = 0.86; g = 0.88; b = 0.92; }
+    col[i * 3] = r; col[i * 3 + 1] = g; col[i * 3 + 2] = b;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  return geo;
+}
+
+/** A helical spring: a hexagonal tube swept along a helix. */
+function coilGeometry(radius, height, turns, sides, wire) {
+  const steps = Math.round(turns * 5);
+  const pos = [], idx = [];
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const th = t * turns * TAU;
+    const c = Math.cos(th), s = Math.sin(th);
+    // Ring plane spanned by the outward radial and the world up: near enough
+    // to a proper tube frame at this pitch, and a fraction of the cost.
+    for (let j = 0; j < sides; j++) {
+      const a = (j / sides) * TAU;
+      const ca = Math.cos(a) * wire, sa = Math.sin(a) * wire;
+      pos.push(c * (radius + ca), t * height + sa, s * (radius + ca));
+    }
+  }
+  for (let i = 0; i < steps; i++) {
+    for (let j = 0; j < sides; j++) {
+      const jn = (j + 1) % sides;
+      const a = i * sides + j, b = i * sides + jn;
+      idx.push(a, a + sides, b + sides, a, b + sides, b);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+
 function buildWheels(scale) {
   const key = scale.toFixed(3);
   const hit = _wheelCache.get(key);
   if (hit) return hit;
 
-  const make = (r, w, seg) => {
+  const make = (r, w, seg, inboard) => {
     const tyre = tyreGeometry(r, r * 0.56, w, seg);
     // Rim and hub in one lathe: the hub was its own draw call for a part that
     // lives entirely inside the rim's silhouette.
@@ -773,11 +935,39 @@ function buildWheels(scale) {
     }
     // A chrome dish this size reads as a white donut from any distance; a dark
     // machined rim lets the accent spokes and the tyre carry the wheel.
+    //
+    // The rim rides in the `hub` slot, which the model hangs off the steering
+    // pivot rather than off the spinning group. It is a surface of revolution
+    // about the axle, so rotating it was never doing anything anybody could
+    // see — and taking it out of the spin buys somewhere to put the upright and
+    // the damper for free, in a material they already share. That is the whole
+    // reason this kart can have visible suspension without a thirty-sixth draw
+    // call: the parts that must not spin now have a mesh to live in.
+    const upright = uprightParts(r, w, inboard);
     const parts = mergeBySlot([
       { slot: 'rubber', geo: tyre },
-      { slot: 'darkMetal', geo: rim },
+      { slot: 'hub', geo: rim },
+      ...upright,
       ...spokes,
     ]);
+    // Two very different tones out of one mesh, because the draw-call budget
+    // says the rim and the suspension have to share one. The rim must stay
+    // dark — a chrome dish this size reads as a white donut from any distance —
+    // but a dark damper against a black tyre is a damper nobody can see, which
+    // is the whole reason it is being drawn. So the material carries the bright
+    // steel and the rim's own vertices multiply themselves back down.
+    //
+    // Index ranges rather than a position predicate: the parts overlap in every
+    // axis, and `mergeBySlot` appends in the order handed to it, which is the
+    // order below.
+    paintHub(parts.get('hub'), rim.attributes.position.count, upright);
+    // What the *distant* kart uses for the same slot. At thirty metres a 2.6 cm
+    // damper rod is a third of a pixel, but the shell bakes whatever the live
+    // model is carrying — so without this the LOD that exists to make far karts
+    // cheap would have inherited every triangle of the suspension eleven times
+    // over. The rim stays, because it is what closes the wheel's bore: drop it
+    // and a distant wheel is a ring you can see the far kerb through.
+    const hubShell = rim;
 
     // Two thin discs, one per wheel face, stand in for the spokes above the
     // speed at which five spokes strobe against a 60 Hz frame. Same mesh, same
@@ -787,12 +977,18 @@ function buildWheels(scale) {
       { geo: ring, matrix: xform([-w * 0.22, 0, 0], [0, Math.PI / 2, 0]) },
       { geo: ring, matrix: xform([w * 0.22, 0, 0], [0, Math.PI / 2, 0]) },
     ]);
-    return { parts, blur };
+    return { parts, blur, hubShell };
   };
 
+  // Four buffers, not two: the upright hangs off the inboard face, so a left
+  // wheel and a right wheel are no longer the same object. Still cached per
+  // tyre scale, so a twelve-kart field across three chassis sizes builds
+  // twelve wheel assemblies in total.
   const out = {
-    front: make(FRONT_WHEEL_R * scale, WHEEL_W * 0.86 * scale, 26),
-    rear: make(WHEEL_R * scale, WHEEL_W * scale, 30),
+    front: [make(FRONT_WHEEL_R * scale, WHEEL_W * 0.86 * scale, 26, 1),
+      make(FRONT_WHEEL_R * scale, WHEEL_W * 0.86 * scale, 26, -1)],
+    rear: [make(WHEEL_R * scale, WHEEL_W * scale, 30, 1),
+      make(WHEEL_R * scale, WHEEL_W * scale, 30, -1)],
     rF: FRONT_WHEEL_R * scale,
     rR: WHEEL_R * scale,
   };
@@ -818,11 +1014,18 @@ function buildHead(kind) {
   // fairing sized against an unscaled sphere reads as a detached cone.
   const S = HELMET_SCALE[kind] || HELMET_SCALE.dome;
   const parts = [];
-  const shell = new THREE.SphereGeometry(0.185, 18, 12, 0, TAU, 0, Math.PI * 0.86);
+  // 30 x 20, not 18 x 12. The helmet is the one part of this model that is ever
+  // seen at 400 px across — the bumper camera puts the back of the player's own
+  // lid in the bottom third of the frame — and at 18 segments a 0.185 m sphere
+  // filling that much screen has quads over a hundred pixels wide, so it read
+  // as a faceted ball with visible polygon edges rather than as a gloss shell.
+  // The cost is paid once: heads are cached by kind and shared by every kart
+  // wearing one, and past LOD_DISTANCE the whole model is a baked shell anyway.
+  const shell = new THREE.SphereGeometry(0.185, 26, 16, 0, TAU, 0, Math.PI * 0.86);
   shell.scale(S[0], S[1], S[2]);
   parts.push({ slot: 'helmet', geo: shell });
   // Chin bar: without it the "helmet" is a bowl balanced on a face.
-  const chin = roundedBox(0.24 * S[0], 0.10, 0.16, 0.045, 2);
+  const chin = roundedBox(0.24 * S[0], 0.10, 0.16, 0.045, 3);
   parts.push({ slot: 'helmet', geo: chin, matrix: xform([0, -0.10, 0.115 * S[2]], [0.30, 0, 0]) });
 
   switch (kind) {
@@ -834,7 +1037,7 @@ function buildHead(kind) {
     case 'aero': {
       // The shell is already a teardrop; this is only the trailing fairing,
       // and it starts well inside the shell so the two read as one moulding.
-      const tailG = lathe([[0.0, 0], [0.125, 0.01], [0.115, 0.06], [0.07, 0.14], [0, 0.17]], 12);
+      const tailG = lathe([[0.0, 0], [0.125, 0.01], [0.115, 0.06], [0.07, 0.14], [0, 0.17]], 20);
       tailG.rotateX(-Math.PI / 2 + 0.20);
       parts.push({ slot: 'helmet', geo: tailG, matrix: xform([0, 0.045, -0.13]) });
       break;
@@ -856,12 +1059,12 @@ function buildHead(kind) {
   }
 
   const helmet = mergeBySlot(parts).get('helmet');
-  const face = new THREE.SphereGeometry(0.145, 12, 8);
+  const face = new THREE.SphereGeometry(0.145, 16, 10);
   // SphereGeometry's phi=0 is -X, so the visor aperture has to start a quarter
   // turn round or the driver ends up looking out of the side of the lid. The
   // radius also has to clear the shell — inside it, the visor is invisible,
   // which is what left every driver in this game faceless.
-  const visor = new THREE.SphereGeometry(0.194, 20, 8, Math.PI / 2 - 0.98, 1.96, Math.PI * 0.29, Math.PI * 0.24);
+  const visor = new THREE.SphereGeometry(0.194, 26, 10, Math.PI / 2 - 0.98, 1.96, Math.PI * 0.29, Math.PI * 0.24);
   visor.scale(S[0], S[1], S[2]);
   const out = { helmet, face, visor };
   _headCache.set(kind, out);
@@ -921,6 +1124,109 @@ function buildSteering() {
 let _steeringGeo = null;
 
 // ---------------------------------------------------------------------------
+// Contact occlusion
+// ---------------------------------------------------------------------------
+
+/**
+ * Four elliptical AO patches, one per tyre, in one buffer.
+ *
+ * A cast shadow says where the sun is. Contact occlusion says the tyre is
+ * *touching*, and the two are not interchangeable: the shadow map only covers a
+ * box around the player, it slides away from the tyre entirely at a low sun,
+ * and on the void track there is no ground to receive one at all — so without
+ * this a kart is a sticker on the road no matter how good its shadow is.
+ *
+ * The falloff lives in a per-vertex weight rather than in a texture, which is
+ * what lets all four patches share one draw call and still respond
+ * independently to load: the update loop rewrites 168 colours, not a transform.
+ *
+ * Ring radii matter more than they look. A patch the size of the contact patch
+ * is perfectly hidden by the tyre that casts it — that is exactly the geometry
+ * of the problem — so the opaque core sits inside the footprint and the soft
+ * half spills onto road the tyre does not cover.
+ */
+const CONTACT_SEGS = 14;
+// Flat-topped rather than a smooth bell. The dark core has to reach past the
+// tyre's own footprint before it starts falling off, or the only part of the
+// patch anybody ever sees is its faintest quarter — measured on tarmac, a
+// bell profile put 16% of darkening on the visible ring and 55% under the
+// rubber.
+const CONTACT_RINGS = [[0.55, 1.0], [0.80, 0.62], [1.0, 0.0]];
+
+function contactGeometry(defs) {
+  const pos = [], shade = [], wheel = [], idx = [];
+  for (let d = 0; d < defs.length; d++) {
+    const { x, z, halfX, halfZ } = defs[d];
+    const base = pos.length / 3;
+    pos.push(x, 0, z); shade.push(1); wheel.push(d);
+    for (const [r, sh] of CONTACT_RINGS) {
+      for (let j = 0; j < CONTACT_SEGS; j++) {
+        const th = (j / CONTACT_SEGS) * TAU;
+        pos.push(x + Math.cos(th) * halfX * r, 0, z + Math.sin(th) * halfZ * r);
+        shade.push(sh);
+        wheel.push(d);
+      }
+    }
+    // Fan from the centre to the inner ring, then a strip between each pair.
+    for (let j = 0; j < CONTACT_SEGS; j++) {
+      const a = base + 1 + j, b = base + 1 + ((j + 1) % CONTACT_SEGS);
+      idx.push(base, b, a);
+    }
+    for (let r = 0; r < CONTACT_RINGS.length - 1; r++) {
+      const i0 = base + 1 + r * CONTACT_SEGS, i1 = i0 + CONTACT_SEGS;
+      for (let j = 0; j < CONTACT_SEGS; j++) {
+        const jn = (j + 1) % CONTACT_SEGS;
+        idx.push(i0 + j, i1 + jn, i1 + j, i0 + j, i0 + jn, i1 + jn);
+      }
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(pos.map((_, i) => (i % 3 === 1 ? 1 : 0)), 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(shade.length * 3).fill(1), 3));
+  geo.setIndex(idx);
+  geo.computeBoundingSphere();
+  return { geo, shade: Float32Array.from(shade), wheel: Uint8Array.from(wheel) };
+}
+
+/**
+ * Multiply-blended, because the thing under it is asphalt on one track, sand on
+ * another and a saturated rainbow on the third. An alpha blend toward any fixed
+ * dark colour desaturates whatever it lands on, which on Rainbow Skyway reads as
+ * haze rather than as occlusion; a multiply darkens green road to dark green.
+ *
+ * Fog is undone by hand for the same reason `blobMaterial` in SceneryKit does:
+ * three's fog mixes toward the fog colour, and a multiplier faded toward grey is
+ * still a multiplier, so a rival forty metres up the road would stamp a hard
+ * dark ellipse onto a wall of haze. The density arrives as a uniform because
+ * nothing hands this model the scene it will be added to.
+ */
+function contactMaterial() {
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xffffff, vertexColors: true, transparent: true,
+    blending: THREE.MultiplyBlending, premultipliedAlpha: true,
+    depthWrite: false, toneMapped: false, fog: false,
+    // Coplanar with a road the kart is also standing on: without this the patch
+    // stipples in and out along the tyre's own contact line.
+    polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
+  });
+  mat.userData.uFog = { value: 0 };
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uFogDensity = mat.userData.uFog;
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nuniform float uFogDensity;\nvarying float vClear;')
+      .replace('#include <project_vertex>', `#include <project_vertex>
+        { float fd = uFogDensity * max(-mvPosition.z, 0.0); vClear = 1.0 - exp(-fd * fd); }`);
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying float vClear;')
+      .replace('#include <dithering_fragment>',
+        '#include <dithering_fragment>\ngl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(1.0), vClear);');
+  };
+  mat.customProgramCacheKey = () => 'kartContact';
+  return mat;
+}
+
+// ---------------------------------------------------------------------------
 // Level of detail
 // ---------------------------------------------------------------------------
 
@@ -960,6 +1266,7 @@ const LOD_SLOT = {
   suit: 'suit',
   lamp: 'lamp',
   darkMetal: 'lodDark',
+  hub: 'lodDark',
   exhaust: 'lodDark',
   rubber: 'lodDark',
   skin: 'lodDark',
@@ -1034,6 +1341,14 @@ function makeMaterials(character, envMap) {
   const darkMetal = new THREE.MeshStandardMaterial({
     color: 0x30343c, metalness: 0.85, roughness: 0.42, envMapIntensity: 1.0,
   });
+  // Suspension, upright and rim. Its own slot only so that the mesh carrying
+  // it can hang off the steering pivot rather than the spinning group;
+  // slightly darker and rougher than the bodywork's dark metal because it is
+  // the part of the kart that lives in the wheel well and never sees sky.
+  const hub = new THREE.MeshStandardMaterial({
+    color: 0x8b939c, metalness: 0.78, roughness: 0.40, envMapIntensity: 0.9,
+    vertexColors: true,
+  });
   const exhaust = new THREE.MeshStandardMaterial({
     map: exhaustTexture(), color: 0xffffff, metalness: 0.95, roughness: 0.30, envMapIntensity: 1.5,
   });
@@ -1073,9 +1388,9 @@ function makeMaterials(character, envMap) {
     color: 0x2e3239, metalness: 0.28, roughness: 0.64, envMapIntensity: 0.58,
   });
 
-  const all = [body, accent, helmet, rubber, chrome, darkMetal, exhaust, lamp, blur, glass, suit, skin, lodDark];
+  const all = [body, accent, helmet, rubber, chrome, darkMetal, hub, exhaust, lamp, blur, glass, suit, skin, lodDark];
   if (envMap) for (const m of all) { m.envMap = envMap; m.needsUpdate = true; }
-  return { body, accent, helmet, rubber, chrome, darkMetal, exhaust, lamp, blur, glass, suit, skin, lodDark, glow, all };
+  return { body, accent, helmet, rubber, chrome, darkMetal, hub, exhaust, lamp, blur, glass, suit, skin, lodDark, glow, all };
 }
 
 const _v1 = new THREE.Vector3();
@@ -1109,6 +1424,7 @@ export class KartModel {
     // `body` carries all lean/squash animation; `root` carries world placement
     // so physics never fights the presentation transforms.
     this.body = new THREE.Group();
+    this.body.position.y = -RIDE_DROP;
     this.group.add(this.body);
 
     // The LOD sits *under* `body`, so swapping detail levels never costs the
@@ -1166,26 +1482,55 @@ export class KartModel {
       { pos: [B.rearTrack, wheels.rR, B.wbR], front: false },
     ];
     for (const def of wheelDefs) {
-      const pivot = new THREE.Group();          // steering
+      const pivot = new THREE.Group();          // steering + upright
       pivot.position.set(...def.pos);
       const spin = new THREE.Group();           // rolling
       pivot.add(spin);
       this.detail.add(pivot);
 
-      const src = def.front ? wheels.front : wheels.rear;
+      const src = (def.front ? wheels.front : wheels.rear)[def.pos[0] < 0 ? 0 : 1];
       let spokeMesh = null;
       for (const [slot, geo] of src.parts) {
-        // Only the tyre casts: the rim and spokes sit inside its silhouette,
-        // so shadowing them again buys nothing but shadow-pass draw calls.
-        const mesh = add(geo, slot, spin, slot === 'rubber');
+        // Only the tyre casts: the rim, spokes and upright sit inside its
+        // silhouette, so shadowing them again buys nothing but shadow-pass
+        // draw calls. `hub` is everything that steers but does not roll.
+        const mesh = add(geo, slot, slot === 'hub' ? pivot : spin, slot === 'rubber');
+        if (slot === 'hub') mesh.userData.shellGeo = src.hubShell;
         if (slot === 'accent') spokeMesh = mesh;
       }
       this.wheels.push({
         pivot, spin, front: def.front, base: pivot.position.clone(),
         radius: def.front ? wheels.rF : wheels.rR,
+        halfW: (def.front ? WHEEL_W * 0.86 : WHEEL_W) * B.tyre * 0.5,
         spokeMesh, spokeGeo: spokeMesh.geometry, blurGeo: src.blur, blurred: false,
       });
     }
+
+    // --- Contact occlusion ------------------------------------------------
+    // Parented to `group`, not to `body`: the patches belong to the road, so
+    // they must not inherit lean, pitch, squash or a trick spin. Outside the
+    // LOD as well — a kart at 200 m still has to be standing on something, and
+    // this is one draw call whichever level is showing.
+    // Elongated along the kart, and sized off the tyre's *radius* fore and aft
+    // rather than off its width. Seen from a chase camera the tyre's own
+    // silhouette covers the ground from the contact point back roughly one
+    // radius, so a patch that stops at the radius is a patch nobody ever sees;
+    // the visible half is the part that clears the tyre.
+    const contact = contactGeometry(this.wheels.map((w) => ({
+      x: w.base.x, z: w.base.z,
+      halfX: w.halfW + 0.28, halfZ: w.radius + 0.26,
+    })));
+    this._contactShade = contact.shade;
+    this._contactWheel = contact.wheel;
+    this._contactStr = new Float32Array(4);
+    // Deliberately not in `mats.all`: that list exists to receive the
+    // environment map, and an env map on an unlit multiply quad tints the
+    // occlusion with the sky.
+    this._contactMat = contactMaterial();
+    this.contact = new THREE.Mesh(contact.geo, this._contactMat);
+    this.contact.name = 'contactAO';   // nameable so `shot.mjs --hide` isolates it
+    this.contact.renderOrder = 2;      // before the FX blob; multiply commutes
+    this.group.add(this.contact);
 
     // --- Driver ---------------------------------------------------------
     this.driver = new THREE.Group();
@@ -1287,7 +1632,10 @@ export class KartModel {
         const dst = LOD_SLOT[slot] || 'lodDark';
         if (!lists.has(dst)) lists.set(dst, []);
         lists.get(dst).push({
-          geo: mesh.geometry,
+          // `shellGeo` lets a slot hand the distant model a cheaper stand-in
+          // than the one it is drawing up close, without a second authoring
+          // pass and without the two ever disagreeing about where it sits.
+          geo: mesh.userData.shellGeo || mesh.geometry,
           matrix: new THREE.Matrix4().multiplyMatrices(toBody, mesh.matrixWorld),
         });
       }
@@ -1318,19 +1666,49 @@ export class KartModel {
     const g = this.group;
 
     // Wheels ------------------------------------------------------------
+    //
+    // Suspension is expressed on the *chassis*, not on the wheels. The old sign
+    // was inside out: it moved each wheel down by the compression, so a landing
+    // drove all four tyres up to 13 cm through the road and the travel read as
+    // the wheel sliding rather than as anything supporting the kart. A wheel in
+    // contact does not move — the body settles onto it. Kart space has its
+    // origin on the contact plane, so "planted" here is literally y = 0.
     const speed = Math.abs(kart.speed);
+    const air = kart.grounded ? 0 : 1;
+    let sagSum = 0, sagPitch = 0, sagRoll = 0;
     for (let i = 0; i < 4; i++) {
       const w = this.wheels[i];
       w.spin.rotation.x = -kart.wheelSpin * (WHEEL_R / w.radius);
       if (w.front) w.pivot.rotation.y = kart.wheelSteer * 0.52;
-      // Suspension travel, plus a contact patch that flattens under it. The
-      // patch stays put and the axle drops, which is the whole tell; real
-      // squash is a couple of centimetres, more than that reads as a bug.
-      const compress = kart.suspension[i] * 0.13;
+
+      // The simulation compresses all four corners equally on a landing and
+      // never differentiates them, so the per-corner half is derived here from
+      // weight transfer — presentation only, and nothing is written back. The
+      // loaded corners are the ones the driver's mass is thrown toward, which
+      // is the same quantity the rig already solves for.
+      const xfer = clamp(
+        -Math.sign(w.base.x) * this._gLat * 0.60
+        - Math.sign(w.base.z) * this._gLong * 0.55, -1, 1);
+      // Airborne, every corner extends: the body floats up off the wheels
+      // rather than the wheels dangling, which is the same picture and costs
+      // no per-wheel transform.
+      const sag = kart.suspension[i] * 0.075 + xfer * 0.026 - air * 0.045;
+      sagSum += sag * 0.25;
+      sagPitch += (w.front ? sag : -sag) * 0.5;
+      sagRoll += (w.base.x < 0 ? sag : -sag) * 0.5;
+
+      // The tyre still flattens under load — real squash is a couple of
+      // centimetres, more than that reads as a bug — but about the contact
+      // patch, so the footprint stays exactly where the road is.
       const load = clamp01(kart.suspension[i] * 0.9 + Math.abs(this._gLat) * 0.25);
       const sq = 1 - load * 0.055;
       w.pivot.scale.y = sq;
-      w.pivot.position.y = w.base.y - compress - w.radius * (1 - sq);
+      w.pivot.position.y = w.radius * sq;
+
+      // Contact occlusion tracks the same load: a corner carrying weight has a
+      // wider, darker patch than one going light. That is the only per-wheel
+      // compression cue that survives being seen from a chase camera.
+      this._contactStr[i] = clamp(0.86 + sag * 3.2, 0.42, 1.0);
 
       // Five spokes at racing speed alias into a standing wave. Past the
       // threshold the same mesh draws a smear disc instead — no extra call.
@@ -1343,6 +1721,15 @@ export class KartModel {
         w.spokeMesh.material = wantBlur ? this.mats.blur : this.mats.accent;
       }
     }
+    // In three's convention a positive x rotation drops +z, which is the nose,
+    // and a positive z rotation drops -x, which is the left. Both are divided
+    // by the span they act over, so the angles are the ones the travel actually
+    // implies rather than a hand-picked gain.
+    this.chassis.position.y = this.B.stance - sagSum;
+    this.chassis.rotation.x = sagPitch / (this.B.wbF - this.B.wbR);
+    this.chassis.rotation.z = sagRoll / (this.B.track + this.B.rearTrack);
+
+    this._updateContact(kart);
 
     // Body attitude -----------------------------------------------------
     // Roll into the corner, pitch under acceleration/braking, plus a small
@@ -1360,7 +1747,7 @@ export class KartModel {
 
     this.body.rotation.z = this._leanZ;
     this.body.rotation.x = this._pitch;
-    this.body.position.y = idleBob;
+    this.body.position.y = idleBob - RIDE_DROP;
 
     // Tricks ------------------------------------------------------------
     if (kart.trick.playing) {
@@ -1404,11 +1791,60 @@ export class KartModel {
     const blink = kart.invuln > 0 ? (Math.sin(kart.invuln * 40) > 0 ? 0.25 : 1) : 1;
     if (this._blink !== blink) {
       this._blink = blink;
-      g.traverse((o) => { if (o.isMesh && o.material.opacity !== undefined) {
+      // The contact patches are exempt. This sweep asserts `transparent` for
+      // every mesh under the kart, and it was silently turning the multiply
+      // blend off on the first frame of every race — the patches were built,
+      // updated and submitted, and rendered zero pixels.
+      g.traverse((o) => { if (o.isMesh && o !== this.contact && o.material.opacity !== undefined) {
         o.material.transparent = blink < 1 || o.material === this.mats.glass;
         if (o.material !== this.mats.glass) o.material.opacity = blink;
       } });
     }
+  }
+
+  /**
+   * Re-shade the four contact patches.
+   *
+   * One buffer upload of 168 colours per kart per frame, against one draw call
+   * — the alternative, a mesh per corner, is four draws on a model with one to
+   * spare. Nothing here writes to the simulation.
+   */
+  _updateContact(kart) {
+    // The patches belong to the road surface, so they follow the ground rather
+    // than the kart: over a crest or on a hop the kart's origin lifts and they
+    // stay put, and past a wheel radius of altitude there is no contact left to
+    // draw and the FX blob is the only honest cue.
+    const gh = kart.ground ? kart.ground.height : undefined;
+    const alt = gh === undefined ? 0 : this.group.position.y - gh - RIDE_DROP;
+    const fade = 1 - clamp01((alt - 0.02) / 0.30);
+    // Written on the edge, not every frame: an unconditional assignment here
+    // would quietly undo `shot.mjs --hide contactAO` and make the one
+    // measurement that can prove this feature draws anything report a
+    // pixel-identical pair for the wrong reason.
+    const want = fade > 0.001;
+    if (this._contactOn !== want) { this._contactOn = want; this.contact.visible = want; }
+    if (!want) return;
+    this.contact.position.y = 0.014 - RIDE_DROP - clamp(alt, 0, 0.32);
+
+    // Fog density is read from whatever scene the kart was added to, once: the
+    // model is handed an env map at construction and nothing else.
+    if (this._fogSeen === undefined) {
+      const scene = this.group.parent;
+      this._fogSeen = scene && scene.fog && scene.fog.isFogExp2 ? scene.fog.density : 0;
+      this._contactMat.userData.uFog.value = this._fogSeen;
+    }
+
+    const col = this.contact.geometry.attributes.color;
+    const arr = col.array;
+    const sh = this._contactShade;
+    const wh = this._contactWheel;
+    for (let i = 0; i < sh.length; i++) {
+      // Never all the way to black: a multiply that reaches zero is a hole, and
+      // the road under a tyre is still lit by everything except the tyre.
+      const v = 1 - sh[i] * this._contactStr[wh[i]] * fade * 0.80;
+      arr[i * 3] = v; arr[i * 3 + 1] = v; arr[i * 3 + 2] = v;
+    }
+    col.needsUpdate = true;
   }
 
   /**
@@ -1436,19 +1872,32 @@ export class KartModel {
     this._jolt = damp(this._jolt, 0, 7, dt);
     const jolt = this._jolt * Math.sin(this._joltPhase);
 
+    // Gains roughly doubled across the rig. The numbers below used to top out
+    // at 7 degrees of torso roll and 4.5 cm of lateral throw at a full drift —
+    // real, but under the amplitude at which a 40 cm figure seen from six
+    // metres reads as anything at all, which is why the driver sat bolt upright
+    // through a slide that has the kart itself at 38 degrees of yaw. A drift is
+    // the most violent thing that happens to this character and it is the pose
+    // the player looks at for most of a lap.
     const d = this.driver;
-    d.position.x = this._driverBase.x - this._gLat * 0.045;
-    d.position.z = this._driverBase.z + this._gLong * 0.022 + jolt * 0.02;
-    d.position.y = this._driverBase.y - Math.abs(jolt) * 0.012;
-    d.rotation.z = -this._gLat * 0.13;
-    d.rotation.x = -this._gLong * 0.10 + jolt * 0.10;
+    d.position.x = this._driverBase.x - this._gLat * 0.082;
+    d.position.z = this._driverBase.z + this._gLong * 0.030 + jolt * 0.02
+      - this._brake * 0.030;                     // brace forward on the brakes
+    d.position.y = this._driverBase.y - Math.abs(jolt) * 0.012
+      - Math.abs(this._gLat) * 0.026;            // and hunker down under load
+    d.rotation.z = -this._gLat * 0.30;
+    d.rotation.x = -this._gLong * 0.16 + jolt * 0.10 + Math.abs(this._gLat) * 0.10;
     // Shoulders stay pointed where the kart is going, not where it is facing.
-    d.rotation.y = -kart.wheelSteer * 0.12 - kart.drift.bodyAngle * 0.22;
+    d.rotation.y = -kart.wheelSteer * 0.20 - kart.drift.bodyAngle * 0.42;
 
+    // The head counter-rotates the torso and then some: through a slide the
+    // driver is looking down the road, not out of the side window, so the yaw
+    // has to cover the drift's whole body angle and the roll has to keep the
+    // helmet nearer level than the shoulders under it.
     const h = this.headGroup;
-    h.rotation.y = damp(h.rotation.y, kart.wheelSteer * 0.34 + kart.drift.bodyAngle * 0.55, 9, dt);
-    h.rotation.z = this._gLat * 0.30 - this._leanZ * 0.45;
-    h.rotation.x = -this._gLong * 0.06 + jolt * 0.42;
+    h.rotation.y = damp(h.rotation.y, kart.wheelSteer * 0.46 + kart.drift.bodyAngle * 0.92, 9, dt);
+    h.rotation.z = this._gLat * 0.46 - this._leanZ * 0.55;
+    h.rotation.x = -this._gLong * 0.10 + jolt * 0.42 - Math.abs(this._gLat) * 0.07;
 
     this.steering.rotation.z = -kart.wheelSteer * 1.25;
     this._solveHands();
@@ -1498,5 +1947,7 @@ export class KartModel {
 
   dispose() {
     for (const m of this.mats.all) m.dispose();
+    this._contactMat.dispose();
+    this.contact.geometry.dispose();
   }
 }

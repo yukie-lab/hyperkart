@@ -823,25 +823,47 @@ export function personGeometry(rng, { armsUp = false, skin = 0xe8c6a8 } = {}) {
   // makes it read as a torso — but a grandstand holds a thousand of these, so
   // it buys that silhouette in one sweep and an octahedron head, not four
   // primitives. Under forty triangles each.
+  //
+  // Three rings described a cone with a ball on it — which is a capsule, and
+  // that is what a grandstand of them read as. A human silhouette at this
+  // distance is carried by four features and none of them is detail: a waist
+  // that is narrower than both the hips and the shoulders, shoulders that are
+  // the widest thing below the head, a *neck* (the gap is what separates head
+  // from body at twenty pixels), and arms breaking the outline at the sides.
+  // Two more rings and two three-sided sticks buy all four inside the same
+  // instanced draw, which is the constraint that matters here.
   const parts = [
     {
       geo: sweepStack([
-        { p: new THREE.Vector3(0, 0.02, 0), r: 0.115 },
-        { p: new THREE.Vector3(0, 0.46, 0), r: 0.168 },
-        { p: new THREE.Vector3(0, 0.76, 0), r: 0.130 },
-      ], 5, { capStart: true, capEnd: true }),
+        { p: new THREE.Vector3(0, 0.00, 0), r: 0.105 },   // planted, not floating
+        { p: new THREE.Vector3(0, 0.30, 0), r: 0.128 },   // hips
+        { p: new THREE.Vector3(0, 0.48, 0), r: 0.112 },   // waist
+        { p: new THREE.Vector3(0, 0.68, 0), r: 0.175 },   // shoulders
+        { p: new THREE.Vector3(0, 0.78, 0), r: 0.062 },   // neck
+      // The neck cap is inside the head; only the sole needs closing, and it
+      // needs closing because a stand is looked *up* at from the road.
+      ], 5, { capStart: true, capEnd: false }),
       color: 0xffffff,
     },
-    { geo: new THREE.OctahedronGeometry(0.115, 0), color: skin, m: T([0, 0.89, 0], [0, 0.4, 0], [1, 0.9, 1]) },
+    { geo: new THREE.OctahedronGeometry(0.118, 0), color: skin, m: T([0, 0.885, 0], [0, 0.4, 0], [1, 0.92, 1]) },
   ];
-  if (armsUp) {
-    for (const s of [-1, 1]) {
-      parts.push({
-        geo: columnGeometry(0.32, 0.045, 0.036, { segs: 1, sides: 3, curve: 1 }),
+  // Arms either way. Raised is the celebration pose; hanging is what the rest
+  // of the crowd is doing, and a figure with no arms at all is the bollard.
+  for (const s of [-1, 1]) {
+    // Asymmetric by a hair, off the caller's own generator: two spectators
+    // standing in identical mirror-image poses is its own kind of tell.
+    const j = (rng() - 0.5) * 0.28;
+    parts.push(armsUp
+      ? {
+        geo: columnGeometry(0.34, 0.045, 0.034, { segs: 1, sides: 3, curve: 1 }),
         color: skin,
-        m: T([s * 0.15, 0.50, 0], [0, 0, s * -0.34]),
+        m: T([s * 0.15, 0.50, 0], [0, 0, s * -0.34 + j * 0.5]),
+      }
+      : {
+        geo: columnGeometry(0.36, 0.048, 0.036, { segs: 1, sides: 3, curve: 1 }),
+        color: skin,
+        m: T([s * 0.165, 0.63, 0.01], [0.10 + j, 0, s * 0.10 + Math.PI]),
       });
-    }
   }
   return mergeParts(parts);
 }

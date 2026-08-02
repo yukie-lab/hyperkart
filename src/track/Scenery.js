@@ -207,10 +207,17 @@ export class Scenery {
 
   /** Queue a spectator. `armsUp` picks the raised-arms silhouette variant. */
   _person(s, pos, { yaw = 0, scale = 1, color = 0xffffff, armsUp = false }) {
+    // Height *and* build vary, and both wider than before. Two silhouettes
+    // shared by a thousand figures need the instance transform to do the rest
+    // of the work: a crowd where everyone is the same width is a row of
+    // identical cut-outs however good the shape is, and adults in a stand
+    // differ by rather more than the +-7% this used to allow.
+    const h = lerp(0.86, 1.16, this.rng());
+    const w = lerp(0.90, 1.12, this.rng());
     const m = new THREE.Matrix4().compose(
       pos,
       new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw),
-      new THREE.Vector3(scale, scale * lerp(0.94, 1.08, this.rng()), scale),
+      new THREE.Vector3(scale * w, scale * h, scale * w),
     );
     this._crowd[armsUp ? 1 : 0].push({ s, m, color });
   }
@@ -517,6 +524,15 @@ export class Scenery {
       const { s, side, lateral, y } = best;
       const m = this._alongBasis(s, lateral, y - 0.15, side);
       items.push({ s, m });
+      // The largest object on the circuit that stands on the ground, and it had
+      // no contact cue of any kind — the plinth's own base darkening tells you
+      // the wall is turned away from the sun, not that it is planted. Three
+      // patches down the footprint rather than one: the stand is 30 m of
+      // frontage, and a single disc that covers it is a disc whose falloff is
+      // measured in tens of metres and reads as terrain shading.
+      for (const k of [-1, 0, 1]) {
+        this._blob({ s: mod(s + k * 9, L), lateral, u: 0.25, v: 0.5 }, 9.0, { opacity: 0.62 });
+      }
       const faceYaw = Math.atan2(-m.elements[8], -m.elements[10]);
 
       // Populate it. Gaps are deliberate: a completely full stand reads as a
@@ -677,6 +693,11 @@ export class Scenery {
       steelGeo.applyMatrix4(m);
       steelGeo.computeBoundingSphere();
       addMesh(this.group, steelGeo, steelMat, { name: 'gantry', cast: true, receive: true });
+      // Both feet, separately. One patch spanning the road would darken the
+      // racing line; the towers are what is standing on anything.
+      for (const sx of [-1, 1]) {
+        this._blob({ s, lateral: sx * legLat, u: 0.0, v: 0.5 }, 2.6, { opacity: 0.7 });
+      }
 
       // Sponsor beam. Two faces so it reads coming and going.
       const beamW = legLat * 2, beamH = 1.55;
@@ -750,6 +771,14 @@ export class Scenery {
               yaw: this.rng() * TAU, scale: lerp(0.9, 1.12, this.rng()),
             }, new THREE.Matrix4()),
           });
+          // A stack of tyres is a cylinder standing on sand and it was the
+          // prop the critic photographed floating. `darkenBase` shades the
+          // bottom of the stack, which is the object's own occlusion; the ring
+          // of ground it is sitting on needs its own.
+          // Yaw and aspect come from the loop counters, not from `this.rng()`:
+          // this generator also lays out every prop family built after this
+          // one, so drawing from it here would silently rearrange the circuit.
+          this._blob({ s: ss, lateral, u: k / 3, v: r * 0.5 }, 1.35, { opacity: 0.72 });
         }
       }
     }
@@ -775,6 +804,10 @@ export class Scenery {
           m: poseMatrix(p.clone().setY(p.y - 0.1), { yaw: this.rng() * 0.4 - 0.2 }, new THREE.Matrix4()),
           color: (n % 4 === 0) ? accentColor : 0xf2f5f8,
         });
+        // Small and tight: a marker post is 7 cm across, and the only thing
+        // separating a planted one from a floating one is a patch about the
+        // size of a dinner plate.
+        this._blob({ s, lateral, u: 0.2, v: 0.5 }, 0.42, { opacity: 0.85 });
       }
       n++;
     }
@@ -971,7 +1004,11 @@ export class Scenery {
         s: it.s,
         m: poseMatrix(it.pos, { yaw: it.v * TAU, normal: n, align: 0.55, scale: [sc, sc * lerp(0.6, 1.0, it.w), sc * lerp(0.85, 1.2, it.v)] }, new THREE.Matrix4()),
       });
-      if (sc > 1.3) this._blob(it, sc * 1.5, { opacity: 0.55 });
+      // Ramped in rather than switched on. The old threshold handed a
+      // metre-wide bush exactly as much grounding as a seedling — none — and
+      // the size at which a plant stops being ground texture and starts being
+      // an object it is well below the size at which it was getting a patch.
+      if (sc > 0.95) this._blob(it, sc * 1.5, { opacity: 0.55 * clamp01((sc - 0.85) / 0.5) });
     }
     this._spread('coastScrub', scrubGeo, scrubMat, sItems, { per: 60, maxChunks: 8, cast: false, inflate: 0.5 });
   }
@@ -1090,7 +1127,11 @@ export class Scenery {
           scale: [sc * lerp(0.8, 1.4, it.v), sc * lerp(0.55, 1.0, it.w), sc * lerp(0.8, 1.3, it.u)],
         }, new THREE.Matrix4()),
       });
-      if (sc > 1.0) this._blob(it, sc * 1.4, { opacity: 0.6 });
+      // See `_coastCover`: ramped, and from a size well under a metre. The
+      // long tail on this scatter means most instances are shingle, but the
+      // ones between shingle and boulder are exactly the ones that read as
+      // decals when they have nothing under them.
+      if (sc > 0.6) this._blob(it, sc * 1.4, { opacity: 0.6 * clamp01((sc - 0.5) / 0.7) });
     }
     for (let i = 0; i < 3; i++) {
       this._spread(`coastRock${i}`, geos[i], mat, buckets[i], { per: 46, maxChunks: 7, cast: true, receive: true });
@@ -1267,6 +1308,11 @@ export class Scenery {
     geo.applyMatrix4(m);
     geo.computeBoundingSphere();
     addMesh(this.group, geo, mat, { name: 'lighthouse', cast: true, receive: true });
+    // The tower and the cottage sit on the highest headland on the circuit,
+    // silhouetted against sky and well outside the shadow box, so nothing else
+    // was ever going to tell the eye they were resting on it.
+    this._blob({ s: best.s, lateral: best.lateral, u: 0.0, v: 0.5 }, 4.6, { opacity: 0.75 });
+    this._blob({ s: best.s, lateral: best.lateral + 7.5, u: 0.0, v: 0.5 }, 4.4, { opacity: 0.6 });
 
     // Rotating beam. Additive, unlit, no depth write — it is light, not a solid.
     const beamGeo = new THREE.ConeGeometry(2.6, 150, 10, 1, true);
@@ -1487,7 +1533,7 @@ export class Scenery {
         s: it.s,
         m: poseMatrix(it.pos, { yaw: it.v * TAU, normal: n, align: 0.5, scale: [sc, sc * lerp(0.55, 0.95, it.w), sc * lerp(0.85, 1.2, it.v)] }, new THREE.Matrix4()),
       });
-      if (sc > 1.2) this._blob(it, sc * 1.5, { opacity: 0.5 });
+      if (sc > 0.9) this._blob(it, sc * 1.5, { opacity: 0.5 * clamp01((sc - 0.8) / 0.5) });
     }
     this._spread('sagebrush', sageGeo, sageMat, sItems, { per: 62, maxChunks: 8, inflate: 0.4 });
   }
@@ -1618,7 +1664,7 @@ export class Scenery {
           scale: [sc * lerp(0.8, 1.5, it.v), sc * lerp(0.5, 1.0, it.w), sc * lerp(0.8, 1.4, it.u)],
         }, new THREE.Matrix4()),
       });
-      if (sc > 1.1) this._blob(it, sc * 1.4, { opacity: 0.62 });
+      if (sc > 0.6) this._blob(it, sc * 1.4, { opacity: 0.62 * clamp01((sc - 0.5) / 0.7) });
     }
     for (let i = 0; i < 3; i++) this._spread(`canyonRock${i}`, geos[i], mat, buckets[i], { per: 52, maxChunks: 7, cast: true, receive: true });
   }
@@ -2113,7 +2159,10 @@ vHkFade = smoothstep( 110.0, 260.0, - mvPosition.z );
       const heads = 8 + Math.floor(rng() * 10);
       for (let k = 0; k < heads; k++) {
         const th = rng() * TAU, rr = rng() * 5.6;
-        q.set(Math.cos(th) * rr, 0.1, Math.sin(th) * rr).applyMatrix4(m);
+        // The deck's top face is at local y = 0. Standing them at 0.1 put the
+        // whole crowd a hand's width above the only surface on this track that
+        // anything stands on, which no amount of base darkening can hide.
+        q.set(Math.cos(th) * rr, 0, Math.sin(th) * rr).applyMatrix4(m);
         this._person(s, q.clone(), {
           yaw: rng() * TAU, scale: lerp(1.6, 1.9, rng()),
           color: new THREE.Color().setHSL(rng(), 0.9, 0.66), armsUp: rng() < 0.45,
