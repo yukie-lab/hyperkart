@@ -56,10 +56,22 @@ const _c2 = new THREE.Color();
  * *sideways*, along the drift direction, is what puts the shower across the
  * screen where it can be read.
  */
+/**
+ * Third correction, from captures of a real stage 1 rather than a forced one:
+ * the shower was aimed where the camera cannot see it. Drift anchors sit at the
+ * rear contact patches, and the chase camera looks straight down the kart's
+ * spine — so anything emitted there is behind the chassis and between the rear
+ * wheels until something throws it clear. `out` (sideways, along the slide) and
+ * `lift` are therefore not decoration, they are the whole visibility budget,
+ * and both climb hard with the tier. `alpha` climbed back up too: the tier
+ * colours are heavily saturated primaries and a *small* sprite can carry a lot
+ * of radiance before its dominant channel saturates — that failure mode was
+ * about fifty-pixel sparks overlapping, not about the number itself.
+ */
 const DRIFT_TIERS = [
-  { rate: 150, size: 0.17, alpha: 0.85, glow: 0.26, glowA: 0.30, hz: 6.5, ring: 0.34, ringA: 0.22, streak: 0.12, strSize: 0.9, spread: 3.0, lift: 1.5, out: 2.0 },
-  { rate: 235, size: 0.22, alpha: 1.05, glow: 0.34, glowA: 0.36, hz: 9.5, ring: 0.46, ringA: 0.28, streak: 0.22, strSize: 1.2, spread: 3.8, lift: 1.9, out: 3.0 },
-  { rate: 330, size: 0.28, alpha: 1.25, glow: 0.44, glowA: 0.42, hz: 14.0, ring: 0.60, ringA: 0.34, streak: 0.32, strSize: 1.6, spread: 4.6, lift: 2.3, out: 4.2 },
+  { rate: 175, size: 0.19, alpha: 1.15, glow: 0.30, glowA: 0.30, hz: 6.5, ring: 0.40, ringA: 0.26, streak: 0.14, strSize: 1.0, spread: 3.0, lift: 2.4, out: 2.8 },
+  { rate: 280, size: 0.25, alpha: 1.50, glow: 0.42, glowA: 0.38, hz: 10.0, ring: 0.58, ringA: 0.34, streak: 0.26, strSize: 1.4, spread: 3.9, lift: 3.1, out: 4.1 },
+  { rate: 420, size: 0.32, alpha: 1.85, glow: 0.56, glowA: 0.46, hz: 15.0, ring: 0.80, ringA: 0.42, streak: 0.40, strSize: 1.9, spread: 4.8, lift: 3.8, out: 5.6 },
 ];
 
 /**
@@ -71,6 +83,31 @@ const SHADOW_BOX = 78;
 
 /** Dust colour per off-road surface id (see SURFACE in track/Tracks.js). */
 const DUST_COLOR = { 2: 0xbdb6ad, 3: 0xa87c50, 4: 0xdcc79a, 5: 0x8f9a5e };
+
+/**
+ * Golden ratio conjugate — the step that spreads a sequence of hues as evenly
+ * as possible for *any* number of samples, which is what a rainbow emitted a
+ * few particles at a time needs. See `_starSparkle`.
+ */
+const PHI = 0.6180339887498949;
+
+/**
+ * Rescale `c` to a target scene-linear luminance, keeping its hue, and never
+ * letting a channel past 1.0.
+ *
+ * A hue swept round the wheel at fixed HSL lightness swings about 2.6x in
+ * actual luminance — yellow is a headlight and blue is a bruise — so a cycling
+ * palette authored that way blooms for a third of every cycle and disappears
+ * for another third. Every fixed palette in this file is authored against a
+ * brightness budget; this is how the cycling one joins them.
+ */
+function setLuma(c, target) {
+  const y = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+  c.multiplyScalar(target / Math.max(y, 1e-4));
+  const m = Math.max(c.r, c.g, c.b);
+  if (m > 1) c.multiplyScalar(1 / m);
+  return c;
+}
 
 export class KartFX {
   constructor(scene, opts = {}) {
@@ -178,6 +215,18 @@ export class KartFX {
     if (kart.isPlayer) return 1;
     const d = kart.pos.distanceTo(cameraPos);
     // Emission falls off with distance; beyond 70 m nothing is legible anyway.
+    //
+    // This was briefly tightened to 46 m on a measurement that turned out to be
+    // an artefact of the capture harness rather than a property of the game.
+    // `shot.mjs` fast-forwards through `loop.fastForward`, which steps the
+    // simulation without ever rendering — so every one-shot burst `drainEvents`
+    // fires during the skipped minute is spawned and then never aged, and a
+    // captured frame carries ~2000 frozen particles scattered round the whole
+    // circuit. Sampled from the live loop instead, the additive pool peaks at
+    // 579 of 2480 and smoke at 257 of 1520. There is no contention to fix, and
+    // 46 m visibly thinned the pack. Two things follow for anyone tuning here:
+    // captures under-represent every continuous effect in this file, and pool
+    // occupancy must be measured from a running race, never from a capture.
     return clamp01(1 - (d - 18) / 52) * 0.7;
   }
 
@@ -185,7 +234,7 @@ export class KartFX {
   _state(kart) {
     let s = this._fx.get(kart);
     if (!s) {
-      s = { lastStage: -1, ringPhase: 0, boostPhase: 0, sparkPhase: 0 };
+      s = { lastStage: -1, ringPhase: 0, boostPhase: 0, sparkPhase: 0, starSeq: 0 };
       this._fx.set(kart, s);
     }
     return s;
@@ -353,7 +402,14 @@ export class KartFX {
     // the trail end-on, so a second of emission piles into a few hundred pixels
     // and normal-blended layers compound to opaque white however low each one's
     // alpha is. Count, not per-particle alpha, is what has to stay small.
-    const smokeN = this._emitAccum(kart, 'driftSmoke', dt, 55 * rate);
+    //
+    // The code said 55 and the comment said 42, and 55 with sizeGrow 2.0 was
+    // measurably worse than either: thirty puffs alive, each ending 1.9 m
+    // across, stacking to about 93% coverage of a mid-grey over a dark road —
+    // a pale wash over the kart and over the sparks it exists to back. It is
+    // also darker now. "Dark backing" was the stated intent and lightness 0.50
+    // is brighter than any road surface in the game.
+    const smokeN = this._emitAccum(kart, 'driftSmoke', dt, 42 * rate);
     for (let i = 0; i < smokeN; i++) {
       const side = i % 2 === 0 ? 'driftL' : 'driftR';
       model.anchors[side].getWorldPosition(_p);
@@ -365,15 +421,15 @@ export class KartFX {
       // wedge instead of leaving a plume sitting on the racing line.
       _v.addScaledVector(_w, kart.speed * 0.26);
       _v.addScaledVector(_side, -d.dir * (1.6 + this.rng() * 1.8));
-      _c.setHSL(0.08, 0.05, 0.50);
+      _c.setHSL(0.08, 0.05, 0.34);
       if (tier) { _c2.setHex(DRIFT.stages[stage].color); _c.lerp(_c2, 0.24); }
       // Positive gravity, not buoyancy: tyre smoke that climbs leaves the soft
       // ground fade behind and turns back into a floating billboard.
       this.smoke.spawn(_p, _v, _c, {
-        shape: SHAPE.SMOKE, size: 0.55 + this.rng() * 0.45,
-        life: 0.38 + this.rng() * 0.28, alpha: 0.085, gravity: 0.5, drag: 2.8,
-        rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 2.6, sizeGrow: 2.0,
-        ground: gy, colorB: 0x4e5158,
+        shape: SHAPE.SMOKE, size: 0.50 + this.rng() * 0.40,
+        life: 0.34 + this.rng() * 0.24, alpha: 0.062, gravity: 0.5, drag: 2.8,
+        rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 2.6, sizeGrow: 1.2,
+        ground: gy, colorB: 0x3a3d43,
       });
     }
 
@@ -416,13 +472,19 @@ export class KartFX {
     for (let i = 0; i < sparkN; i++) {
       const left = i % 2 === 0;
       model.anchors[left ? 'driftL' : 'driftR'].getWorldPosition(_p);
-      _v.set((this.rng() - 0.5) * tier.spread, this.rng() * tier.lift + 0.5, (this.rng() - 0.5) * tier.spread);
-      // Sparks keep a quarter of the kart's momentum, so relative to the kart
-      // they stream backwards rather than being carried along beside it, and
-      // they are thrown hard toward the *outside* of the slide — the direction
-      // a scrubbing tyre actually flings debris, and the one direction that is
-      // still visible from directly behind.
-      _v.addScaledVector(_w, kart.speed * 0.25);
+      _v.set((this.rng() - 0.5) * tier.spread, this.rng() * tier.lift + 0.8, (this.rng() - 0.5) * tier.spread);
+      // Sparks keep most of the kart's momentum, and are thrown hard toward the
+      // *outside* of the slide — the direction a scrubbing tyre actually flings
+      // debris, and the one direction still visible from directly behind.
+      //
+      // The inherited fraction was a quarter, which sounds like "left behind"
+      // and is: at racing speed that is twenty-three metres a second of closing
+      // rate on a lens six metres back, so the shower stopped being a shower
+      // and became a thin file of sparks strung out between the kart and the
+      // camera, most of them past the near-fade by the time you looked. Two
+      // thirds keeps the cloud within a couple of metres of the tyre for its
+      // whole life, which is where a drift shower lives.
+      _v.addScaledVector(_w, kart.speed * 0.66);
       _v.addScaledVector(_side, -d.dir * tier.out * (0.5 + this.rng()));
       _c.setHex(col);
       // A hot white fraction gives the plume a core; it grows as the next tier
@@ -484,7 +546,12 @@ export class KartFX {
     const base = DUST_COLOR[surf.id] ?? 0xa57b52;
     _w.set(Math.sin(kart.yaw), 0, Math.cos(kart.yaw));
 
-    const n = this._emitAccum(kart, 'dust', dt, 76 * intensity * rate);
+    // Was 76/s at alpha 0.26 with sizeGrow 1.7: about seventy puffs alive, each
+    // ending 2.5 m across, normal-blended — which composites to a solid tan
+    // disc roughly 200 px wide with the kart inside it. Going off-road is
+    // allowed to be dramatic, but not to be the moment you can no longer see
+    // your own kart; the same rule the boost plume is held to.
+    const n = this._emitAccum(kart, 'dust', dt, 58 * intensity * rate);
     for (let i = 0; i < n; i++) {
       const side = i % 2 === 0 ? 'driftL' : 'driftR';
       model.anchors[side].getWorldPosition(_p);
@@ -495,9 +562,9 @@ export class KartFX {
       // Darker at the end of life: real dust settles and loses its lit edge.
       _c2.setHex(base).offsetHSL(0, 0.05, -0.22);
       this.smoke.spawn(_p, _v, _c, {
-        shape: SHAPE.SMOKE, size: 0.75 + this.rng() * 0.75,
-        life: 0.55 + this.rng() * 0.45, alpha: 0.26, gravity: 0.3, drag: 1.8,
-        rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 2.4, sizeGrow: 1.7,
+        shape: SHAPE.SMOKE, size: 0.70 + this.rng() * 0.70,
+        life: 0.50 + this.rng() * 0.40, alpha: 0.165, gravity: 0.3, drag: 1.8,
+        rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 2.4, sizeGrow: 1.15,
         ground: gy, colorB: _c2,
       });
     }
@@ -577,30 +644,64 @@ export class KartFX {
     _side.set(_w.z, 0, -_w.x);
 
     // Two palettes, both authored in linear so the numbers below are the
-    // numbers the exposure pass sees.
-    const mid = strong ? _MID_BLUE : _MID_ORANGE;
-    const tail = strong ? _TAIL_BLUE : _TAIL_ORANGE;
-    const halo = strong ? _HALO_BLUE : _HALO_ORANGE;
+    // numbers the exposure pass sees — plus a third that only exists while the
+    // star does. A star boost used to fire the ordinary blue jet, so the kart
+    // wore a rainbow of sparks and a cold blue plume that shared no colour
+    // logic with them and read as two unrelated effects on one vehicle. One
+    // hue clock now drives both, and the plume cycles with the sparkle.
+    let mid, tail, halo;
+    if (kart.star > 0) {
+      const h = (this._time * 0.5) % 1;
+      mid = setLuma(_STAR_MID.setHSL(h, 0.88, 0.60), 0.55);
+      halo = setLuma(_STAR_HALO.setHSL((h + 0.10) % 1, 0.85, 0.45), 0.30);
+      tail = setLuma(_STAR_TAIL.setHSL((h + 0.30) % 1, 1.0, 0.20), 0.10);
+    } else {
+      mid = strong ? _MID_BLUE : _MID_ORANGE;
+      tail = strong ? _TAIL_BLUE : _TAIL_ORANGE;
+      halo = strong ? _HALO_BLUE : _HALO_ORANGE;
+    }
 
     const emit = (key, perSecond) => this._emitAccum(kart, key, dt, perSecond * rate);
 
-    // 1. Core — small, short, near-white, riding with the pipe.
+    // Where a jet's mouth is.
+    //
     // Outboard offset: the anchors sit 26 cm either side of the centreline, so
     // a plume emitted exactly on them is behind the chassis and invisible from
     // the only camera that matters. Pushing the jets out past the rear wheels
     // is what turns "a glow somewhere behind the kart" into two visible pipes.
+    //
+    // BACK is the second half of the same problem, found once the plume was
+    // thin enough to see what it was doing: outboard put the jets *level with
+    // the rear tyres*, and a tyre is the tallest opaque thing on this kart. The
+    // whole plume was rendering behind two black cylinders and reading as
+    // nothing more than a warm rim light on them. Half a metre further back
+    // clears them, and the chase camera looks down, so it also drops the plume
+    // onto the road where its colour has something to sit against.
     const OUT = 0.48;
-    const coreN = emit('boostCore', 150);
-    for (let i = 0; i < coreN; i++) {
+    const BACK = 0.50;
+    /** Seats `_p` at jet `i`'s mouth and returns which side it is. */
+    const jet = (i) => {
       const sgn = i % 2 === 0 ? -1 : 1;
       model.anchors[i % 2 === 0 ? 'exhaustL' : 'exhaustR'].getWorldPosition(_p);
       _p.addScaledVector(_side, sgn * OUT);
+      _p.addScaledVector(_w, -BACK);
+      return sgn;
+    };
+
+    // 1. Core — small, short, near-white, riding with the pipe.
+    const coreN = emit('boostCore', 150);
+    for (let i = 0; i < coreN; i++) {
+      jet(i);
       _v.copy(_w).multiplyScalar(sp * 0.80 - (3 + this.rng() * 4));
       _v.y += 0.4;
+      // The core is near-white everywhere else, which is right for a flame —
+      // but a star jet whose hottest part never takes the hue reads as an
+      // ordinary boost with something coloured happening around it.
       _c.copy(_CORE);
+      if (kart.star > 0) _c.lerp(mid, 0.45);
       this.additive.spawn(_p, _v, _c, {
-        shape: SHAPE.GLOW, size: 0.34 + this.rng() * 0.20,
-        life: 0.08 + this.rng() * 0.05, alpha: 0.58, drag: 4, sizeGrow: 0.6,
+        shape: SHAPE.GLOW, size: 0.32 + this.rng() * 0.18,
+        life: 0.09 + this.rng() * 0.06, alpha: 0.72, drag: 4, sizeGrow: 0.6,
         colorB: mid,
       });
     }
@@ -609,9 +710,7 @@ export class KartFX {
     //    falling behind the core into a cone.
     const midN = emit('boostMid', 200);
     for (let i = 0; i < midN; i++) {
-      const sgn = i % 2 === 0 ? -1 : 1;
-      model.anchors[i % 2 === 0 ? 'exhaustL' : 'exhaustR'].getWorldPosition(_p);
-      _p.addScaledVector(_side, sgn * OUT);
+      const sgn = jet(i);
       _v.copy(_w).multiplyScalar(sp * 0.48 - (5 + this.rng() * 6));
       _v.addScaledVector(_side, sgn * (0.5 + this.rng() * 1.2));
       _v.x += (this.rng() - 0.5) * 1.6;
@@ -619,34 +718,46 @@ export class KartFX {
       _v.z += (this.rng() - 0.5) * 1.6;
       _c.copy(mid);
       this.additive.spawn(_p, _v, _c, {
-        shape: SHAPE.GLOW, size: 0.52 + this.rng() * 0.50,
-        life: 0.18 + this.rng() * 0.16, alpha: 0.30, drag: 3.2, sizeGrow: 1.4,
+        shape: SHAPE.GLOW, size: 0.46 + this.rng() * 0.44,
+        life: 0.20 + this.rng() * 0.18, alpha: 0.38, drag: 3.2, sizeGrow: 1.1,
         colorB: tail,
       });
     }
 
-    // 3. Halo — wide, dim, almost no inherited speed, so it stays where it was
+    // 3. Halo — dim, almost no inherited speed, so it stays where it was
     //    emitted and lays a trail that bends with the racing line.
-    const haloN = emit('boostHalo', 85);
+    //
+    // Every number here came down, because this layer was the one eating the
+    // kart. A halo particle used to end life 3.8 m across; at the ~6.5 m the
+    // chase camera sits back that is a 264-pixel disc, sixty of them alive at
+    // once, all in the same colour, and the silhouette they are supposed to
+    // frame is inside them. A halo is a rim around a jet, not weather: it may
+    // reach a metre and a half, and the trail's *length* — not its radius —
+    // is what says "going fast".
+    const haloN = emit('boostHalo', 80);
     for (let i = 0; i < haloN; i++) {
-      const sgn = i % 2 === 0 ? -1 : 1;
-      model.anchors[i % 2 === 0 ? 'exhaustL' : 'exhaustR'].getWorldPosition(_p);
-      _p.addScaledVector(_side, sgn * OUT);
+      const sgn = jet(i);
       _v.copy(_w).multiplyScalar(sp * 0.12);
-      _v.y += 0.4 + this.rng() * 0.6;
-      _v.addScaledVector(_side, sgn * (0.8 + this.rng() * 1.6));
+      _v.y += 0.30 + this.rng() * 0.45;
+      _v.addScaledVector(_side, sgn * (0.5 + this.rng() * 0.9));
       _c.copy(halo);
       this.additive.spawn(_p, _v, _c, {
-        shape: SHAPE.GLOW, size: 0.95 + this.rng() * 0.7,
-        life: 0.50 + this.rng() * 0.40, alpha: 0.090, drag: 1.0, sizeGrow: 2.4,
+        shape: SHAPE.GLOW, size: 0.58 + this.rng() * 0.42,
+        life: 0.30 + this.rng() * 0.26, alpha: 0.055, drag: 1.2, sizeGrow: 0.9,
         colorB: tail,
       });
       // A normal-blended twin gives the trail body against a bright sky, where
-      // an additive-only plume disappears.
-      _c2.copy(halo).lerp(_WHITE, 0.45);
+      // an additive-only plume disappears. One in three, not one each: normal
+      // blending compounds toward opaque, and at the old rate the column
+      // between the camera and the kart stacked seventy layers deep — roughly
+      // total coverage, whatever each one's alpha said. This layer is the only
+      // thing here that can hide the kart outright rather than wash it out, so
+      // it is the one that has to stay thin.
+      if (i % 3 !== 0) continue;
+      _c2.copy(halo).lerp(_WHITE, 0.40);
       this.smoke.spawn(_p, _v, _c2, {
-        shape: SHAPE.SMOKE, size: 0.75 + this.rng() * 0.55,
-        life: 0.60 + this.rng() * 0.45, alpha: 0.050, drag: 0.9, sizeGrow: 1.5,
+        shape: SHAPE.SMOKE, size: 0.42 + this.rng() * 0.32,
+        life: 0.34 + this.rng() * 0.28, alpha: 0.038, drag: 1.0, sizeGrow: 0.7,
         gravity: -0.5, rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 2,
         colorB: tail,
       });
@@ -656,31 +767,34 @@ export class KartFX {
     //    backwards hard so they stretch into visible lines.
     const strN = emit('boostStreak', 110);
     for (let i = 0; i < strN; i++) {
-      const sgn = i % 2 === 0 ? -1 : 1;
-      model.anchors[i % 2 === 0 ? 'exhaustL' : 'exhaustR'].getWorldPosition(_p);
-      _p.addScaledVector(_side, sgn * (OUT + this.rng() * 0.5));
+      const sgn = jet(i);
+      _p.addScaledVector(_side, sgn * this.rng() * 0.5);
       _v.copy(_w).multiplyScalar(-(12 + this.rng() * 14));
       _v.y += (this.rng() - 0.5) * 1.6 + 0.3;
       _c.copy(mid).lerp(_WHITE, 0.35);
+      // Thrown backwards at 12-26 m/s while the kart pulls away at 31, a
+      // streak closes on the chase lens at up to 57 m/s. The old life let it
+      // arrive — a 4-metre sprite two metres from the camera is a 450-pixel
+      // bar across the kart, and seventeen of them were the "wide pale haze".
+      // It now expires around five metres back, short of the lens, which is
+      // also where a real jet streak has already burned out.
       this.additive.spawn(_p, _v, _c, {
-        shape: SHAPE.STREAK, size: 2.2 + this.rng() * 2.4,
-        life: 0.12 + this.rng() * 0.09, alpha: 0.42, drag: 1.8, colorB: tail,
+        shape: SHAPE.STREAK, size: 1.4 + this.rng() * 1.4,
+        life: 0.11 + this.rng() * 0.07, alpha: 0.32, drag: 1.8, colorB: tail,
       });
     }
 
     // 5. Heat shimmer directly over the pipes.
     const shimN = emit('boostHeat', 26);
     for (let i = 0; i < shimN; i++) {
-      const sgn = i % 2 === 0 ? -1 : 1;
-      model.anchors[i % 2 === 0 ? 'exhaustL' : 'exhaustR'].getWorldPosition(_p);
-      _p.addScaledVector(_side, sgn * OUT);
-      _p.addScaledVector(_w, -0.5 - this.rng() * 1.4);
+      jet(i);
+      _p.addScaledVector(_w, -this.rng() * 1.4);
       _v.copy(_w).multiplyScalar(sp * 0.55);
       _v.y += 1.2 + this.rng() * 0.9;
       _c.setRGB(0.55, 0.50, 0.46);
       this.additive.spawn(_p, _v, _c, {
-        shape: SHAPE.RIPPLE, size: 1.1 + this.rng() * 0.9,
-        life: 0.30 + this.rng() * 0.20, alpha: 0.085, drag: 1.6, sizeGrow: 2.2,
+        shape: SHAPE.RIPPLE, size: 0.75 + this.rng() * 0.60,
+        life: 0.26 + this.rng() * 0.18, alpha: 0.075, drag: 1.6, sizeGrow: 1.4,
         rot: this.rng() * TAU, colorB: 0x30281f,
       });
     }
@@ -690,9 +804,8 @@ export class KartFX {
     st.boostPhase += dt * 18;
     if (st.boostPhase >= 1) {
       st.boostPhase -= Math.floor(st.boostPhase);
-      for (const side of ['exhaustL', 'exhaustR']) {
-        model.anchors[side].getWorldPosition(_p);
-        _p.addScaledVector(_side, side === 'exhaustL' ? -OUT : OUT);
+      for (let s = 0; s < 2; s++) {
+        jet(s);
         _v.copy(_w).multiplyScalar(sp * 0.35);
         _c.copy(mid);
         this.additive.spawn(_p, _v, _c, {
@@ -704,20 +817,26 @@ export class KartFX {
 
     // Speed lines: only for the kart the camera is glued to, and placed out in
     // the periphery where they add velocity without covering the road.
+    //
+    // "Periphery" was a claim, not a fact: a 2.6 m radius at chase distance is
+    // 180 screen pixels off centre, i.e. still on the kart, and they were
+    // seeded up to ten metres *ahead* so they swept the whole length of it on
+    // their way past. The ring now starts outside the kart's own silhouette
+    // and they are seeded close enough that they leave frame before growing.
     if (kart.isPlayer) {
       const lines = emit('speedLine', 52);
       for (let i = 0; i < lines; i++) {
         const a = this.rng() * TAU;
-        const r = 2.6 + this.rng() * 3.4;
+        const r = 4.6 + this.rng() * 4.0;
         model.anchors.center.getWorldPosition(_p);
         _p.addScaledVector(_side, Math.cos(a) * r);
         _p.y += Math.sin(a) * r * 0.55 + 0.4;
-        _p.addScaledVector(_w, 3 + this.rng() * 7);
+        _p.addScaledVector(_w, 1.5 + this.rng() * 4.5);
         _v.copy(_w).multiplyScalar(-(20 + this.rng() * 18));
         _c.copy(mid).lerp(_WHITE, 0.55);
         this.additive.spawn(_p, _v, _c, {
-          shape: SHAPE.STREAK, size: 2.6 + this.rng() * 2.6,
-          life: 0.12 + this.rng() * 0.08, alpha: 0.11, drag: 0.6, colorB: mid,
+          shape: SHAPE.STREAK, size: 2.0 + this.rng() * 1.8,
+          life: 0.10 + this.rng() * 0.07, alpha: 0.075, drag: 0.6, colorB: mid,
         });
       }
     }
@@ -749,20 +868,43 @@ export class KartFX {
     if (kart.star <= 0) return;
     const model = kart.model;
     if (!model) return;
-    const n = this._emitAccum(kart, 'star', dt, 90 * rate);
+    const st = this._state(kart);
+    const n = this._emitAccum(kart, 'star', dt, 200 * rate);
     const gy = this._groundY(kart);
+    _w.set(Math.sin(kart.yaw), 0, Math.cos(kart.yaw));
     for (let i = 0; i < n; i++) {
       model.anchors.center.getWorldPosition(_p);
-      _p.x += (this.rng() - 0.5) * 2.0;
-      _p.y += (this.rng() - 0.5) * 1.2;
-      _p.z += (this.rng() - 0.5) * 2.6;
-      _v.set((this.rng() - 0.5) * 2, this.rng() * 2 + 0.5, (this.rng() - 0.5) * 2);
-      _c.setHSL((this._time * 0.6 + this.rng() * 0.35) % 1, 0.95, 0.62);
-      _c2.setHSL((this._time * 0.6 + 0.4) % 1, 1.0, 0.22);
+      _p.x += (this.rng() - 0.5) * 2.3;
+      _p.y += (this.rng() - 0.5) * 1.4;
+      _p.z += (this.rng() - 0.5) * 2.8;
+      // Symmetric in Y. A strictly positive lift made every spark climb, so
+      // instead of a kart wrapped in glitter you got a plume of it hanging
+      // above the roll bar and nothing at all along the sills.
+      _v.set((this.rng() - 0.5) * 2.4, (this.rng() - 0.38) * 2.4, (this.rng() - 0.5) * 2.4);
+      // Sparks keep almost all of the kart's momentum. With none of it they
+      // were instantly thirty metres per second slower than the thing shedding
+      // them, which is not a sparkle on a kart — it is a trail of litter down
+      // the middle of the road, which is exactly how it read.
+      _v.addScaledVector(_w, kart.speed * 0.86);
+      // Hue steps off a per-spark counter, not off the clock. A clock gives
+      // every spark alive in one frame the *same* hue: the frame is monochrome
+      // and merely animates through the spectrum over a second, which is the
+      // one thing a rainbow must never do. Stepping by the golden ratio puts
+      // consecutive sparks 222 degrees apart, so the fifty-odd alive at any
+      // instant cover the whole wheel and no two neighbours match. The slow
+      // clock term only exists so a stationary kart still shimmers.
+      const h = (st.starSeq++ * PHI + this._time * 0.11) % 1;
+      _c.setHSL(h, 0.95, 0.62);
+      // Cooling stays inside its own hue: a shared dark end colour would drag
+      // every spark through the same mauve on the way out and undo the spread.
+      _c2.setHSL(h, 1.0, 0.15);
       this.additive.spawn(_p, _v, _c, {
-        shape: SHAPE.SPARK, size: 0.30 + this.rng() * 0.30,
-        life: 0.3 + this.rng() * 0.3, alpha: 0.65, gravity: 4.5, drag: 1.6,
-        ground: gy, bounce: 0.3, rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 14,
+        // Half the old size and half the old life. Big and long-lived is what
+        // let them pile up on the tarmac as static lozenges; a spark is a
+        // fleck that is gone before it lands.
+        shape: SHAPE.SPARK, size: 0.13 + this.rng() * 0.13,
+        life: 0.15 + this.rng() * 0.19, alpha: 0.95, gravity: 3.0, drag: 1.4,
+        ground: gy, rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 18,
         colorB: _c2,
       });
     }
@@ -948,3 +1090,8 @@ const _HALO_BLUE = new THREE.Color().setRGB(0.16, 0.36, 0.85);
 const _MID_ORANGE = new THREE.Color().setRGB(1.00, 0.46, 0.10);
 const _TAIL_ORANGE = new THREE.Color().setRGB(0.35, 0.05, 0.02);
 const _HALO_ORANGE = new THREE.Color().setRGB(0.85, 0.30, 0.06);
+// Rewritten every frame a star is up, hence separate instances: the plume
+// loops hold references to these while `_c`/`_c2` are being reused inside them.
+const _STAR_MID = new THREE.Color();
+const _STAR_TAIL = new THREE.Color();
+const _STAR_HALO = new THREE.Color();

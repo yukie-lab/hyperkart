@@ -213,7 +213,21 @@ const harness = {
   race, loop, chase, post, rs, sky, lighting, hud, audio, scene, camera,
   trackId,
 
-  /** Advance the simulation by `seconds` with no rendering. */
+  /**
+   * Advance the simulation by `seconds`.
+   *
+   * The presentation layer is advanced too, which it did not used to be. A
+   * seek only ran `race.step`, so every one-shot effect spawned during the
+   * skipped span was born and then never aged: a captured frame arrived
+   * carrying roughly two thousand frozen particles strewn around the circuit,
+   * and the additive pool read 2480 of 2480 when a live race peaks near 579.
+   * Every continuous effect was then being judged from the fraction of the
+   * pool it could still win — and one agent nearly shipped an emission-rate
+   * cut to fix "contention" that only existed in the harness.
+   *
+   * Ageing costs a particle update per step and no GPU work, which is cheap
+   * next to being unable to review a visual effect at all.
+   */
   seek(seconds) {
     const driver = autoDriver || new AIDriver(race.player, race.track, { skill: 0.92, seed: 31337 });
     const saved = loop.step;
@@ -224,7 +238,8 @@ const harness = {
         drift: c.drift, driftPressed: c.driftPressed,
         item: false, itemPressed: !!c.useItem,
       });
-      race.drainEvents();
+      handleEvents(race.drainEvents());
+      race.render(1, dt, camera.position);
     };
     loop.fastForward(seconds);
     loop.step = saved;

@@ -640,7 +640,13 @@ export class ItemSystem {
         b.spark = (b.spark || this.rng() * 0.5) + dt;
         if (b.spark > 0.34) {
           b.spark = 0;
-          this.fx?.trail(b.mesh.position, 0xffe27a, { size: 0.26, alpha: 0.30, life: 0.42, glow: 0.5 });
+          // Half the size and half the alpha it had. A dozen boxes in view were
+          // throwing gold stars the same size and twice the brightness of the
+          // player's own blue drift sparks, on the same grey asphalt — so the
+          // loudest coloured thing on screen during a drift belonged to the
+          // scenery. A box is a landmark; it does not get to outshine the
+          // player's own state.
+          this.fx?.trail(b.mesh.position, 0xffe27a, { size: 0.15, alpha: 0.15, life: 0.30, glow: 0.34 });
         }
       }
 
