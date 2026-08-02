@@ -137,12 +137,23 @@ export const TRACKS = {
       // what reaches the tone mapper — see tools/skyprobe.mjs.
       sunStrength: 4.25,
       exposureTarget: 0.46,
-      envIntensity: 0.20,
+      // Multiplied by the preset's envScale (1.35) this lands on 1.0, which is
+      // simply "believe the probe". The probe is the actual metered sky, so
+      // anything below 1.0 is claiming the sky is dimmer than it was measured
+      // to be. It had been 0.20, and under a 16-degree sun — which puts almost
+      // no direct light on a flat road — that starved ambient was the whole
+      // reason the tarmac read as a void.
+      envIntensity: 0.74,
       ambientColor: 0x6a86b8,
       ambientIntensity: 0.16,
       water: { enabled: true, level: -9.5, color: 0x18506b, sunColor: 0xffd9a0 },
       groundColor: 0xc9b183,
       roadSurface: 'asphalt',
+      // Pale, sun-bleached seaside tarmac. Measured: with the stock 0x4d4d54
+      // the driving surface sat at 26/255 for the half of the lap that faces
+      // away from a 16-degree sun, which is not a surface a player can read a
+      // racing line on.
+      roadTint: 0x7a7a83,
       shoulder: 'sand',
       offroad: 'sand',
       props: ['palm', 'rock', 'parasol', 'crowdStand', 'buoy', 'lighthouse'],
@@ -215,7 +226,10 @@ export const TRACKS = {
       // this lands ~30% hotter than sunsetCoast on purpose.
       sunStrength: 10.1,
       exposureTarget: 0.44,
-      envIntensity: 0.18,
+      // As with the coast: envScale is 1.15 here, so this lands on 1.0 too.
+      // The two daylight tracks now trust the probe by the same amount, and
+      // only sun elevation and strength separate them.
+      envIntensity: 0.87,
       ambientColor: 0x9ab4d8,
       ambientIntensity: 0.20,
       water: { enabled: false },

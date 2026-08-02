@@ -188,7 +188,13 @@ export class TrackMesh {
       // sand beside it, which is what keeps the circuit reading as a ribbon
       // laid across the dunes rather than as another shade of them. Biased a
       // touch blue so a low warm sun lands it on neutral grey instead of tan.
-      const t = Tex.asphalt({ size: 1024, tint: 0x4d4d54 });
+      // Per-theme, because sun elevation decides how much of the surface's
+      // brightness it can supply. Canyon's sun is at 56 degrees and puts real
+      // light on a flat road; the coast's is at 16 and puts almost none, so
+      // the same tarmac that reads correctly at noon reads as a void at golden
+      // hour. Physically that is just true, and the answer a circuit designer
+      // reaches for is a lighter surface, not a brighter sun.
+      const t = Tex.asphalt({ size: 1024, tint: this.theme.roadTint ?? 0x4d4d54 });
       mat = this._mat({
         map: t.map,
         normalMap: t.normalMap,
@@ -196,9 +202,16 @@ export class TrackMesh {
         normalScale: new THREE.Vector2(t.normalScale, t.normalScale),
         metalness: 0.0,
         roughness: 1.0,
-        // Tarmac is not a mirror: a strong sky reflection here reads as wet
-        // road, which is what made the surface look like open water.
-        envMapIntensity: 0.22,
+        // This was 0.22, to stop a strong sky reflection reading as wet road.
+        // It cured the wrong thing: `envMapIntensity` scales the *diffuse*
+        // irradiance the probe delivers as well as the specular, so cutting it
+        // starved the tarmac of sky light. Under sunsetCoast's 16-degree sun,
+        // which puts almost no direct light on a flat road, that left the
+        // driving surface at a median of 3/255 — darker than the sea beside
+        // it. Fully rough and non-metallic already keeps the specular lobe
+        // wide and dim; the wet look came from the over-driven normal map
+        // that the texture rebuild removed.
+        envMapIntensity: 1.0,
         color: 0xffffff,
       });
       this._asphaltWear(mat, t);

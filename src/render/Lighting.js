@@ -65,9 +65,20 @@ export class Lighting {
 
     this.hemi.color.setHex(theme.ambientColor);
     this.hemi.groundColor.setHex(theme.groundColor);
-    // Hemisphere light is a small shaping fill on top of the IBL, not a
-    // second ambient term — the environment probe already does that job.
-    this.hemi.intensity = (theme.ambientIntensity ?? 0.2) * (sunIntensity ?? 1) * 0.10;
+    // This is the *ground bounce*, and it is not a rounding error.
+    //
+    // The environment probe is generated from the sky dome alone, so it
+    // contains no light coming back up off the world. At sunsetCoast's
+    // 16-degree sun that omission dominates: the sun puts almost nothing on a
+    // flat road, the probe supplies only downward sky light, and the tarmac
+    // measured a median of 26/255 for the half of the lap that faces away from
+    // the sun while measuring 143/255 on the half that faces it. A four-fold
+    // swing in the readability of the driving surface, from a term that was
+    // set to 0.10 and described as a rounding detail.
+    //
+    // `groundColor` is the theme's own sand/dirt, so this warms shadowed
+    // surfaces from below the way a bright sunlit landscape actually does.
+    this.hemi.intensity = (theme.ambientIntensity ?? 0.2) * (sunIntensity ?? 1) * 0.38;
 
     this.fill.color.setHex(theme.ambientColor);
     this.fill.intensity = (sunIntensity ?? 1) * (theme.key === 'rainbow' ? 0.10 : 0.045);
