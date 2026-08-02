@@ -128,19 +128,34 @@ async function main() {
       // and produce a bit-identical frame. Groups are descended into, because
       // three's projectObject recurses into children outside the layer test —
       // hiding a Group alone hides nothing.
+      //
+      // Matched case-insensitively. `--hide beam` missed `lighthouseBeam`
+      // entirely and reported "nothing matched", which produces a capture
+      // bit-identical to the control -- and a reviewer reads that as "this
+      // feature draws nothing", the exact false conclusion this tool exists to
+      // prevent.
       const hidden = await page.evaluate((ps) => {
         const names = [];
         window.__hk.scene.traverse((o) => {
-          if (o.name && ps.some((x) => o.name.includes(x))) {
+          if (o.name && ps.some((x) => o.name.toLowerCase().includes(x))) {
             o.traverse((c) => c.layers.set(31));
             names.push(o.name);
           }
         });
         return names;
-      }, pats);
+      }, pats.map((x) => x.toLowerCase()));
       hiddenNames = hidden;
       if (target === times[0]) {
         process.stdout.write(`hidden (${hidden.length}): ${hidden.join(', ') || 'nothing matched'}\n`);
+      }
+      // A pattern that matches nothing is not a result, it is a typo. Failing
+      // here costs one re-run; not failing costs a wrong conclusion about the
+      // scene, and there is no way to tell the two apart from the image.
+      if (!hidden.length) {
+        process.stderr.write(`--hide ${JSON.stringify(CFG.hide)} matched no object in the scene.\n`
+          + `Nothing was hidden, so this capture is identical to one without --hide.\n`);
+        await browser.close();
+        process.exit(4);
       }
     }
 
@@ -151,9 +166,17 @@ async function main() {
     // every capture reviewed the world an eighth of a second after the moment
     // it asked for -- long enough that a 55 ms impact flash could never appear
     // in one.
+    //
+    // A target inside the settle window has no room in front of it to settle
+    // through. Clamping only the seek, and still spending all eight frames,
+    // meant `--t 0` landed at 0.13333 -- so the one frame a kart racer is
+    // judged on was the single moment this harness could not address. Spend
+    // only the frames that fit; at t=0 that is none, which is also exactly
+    // what a player sees, there being no history to converge from.
     const SETTLE = 8, SETTLE_DT = 1 / 60;
-    await page.evaluate((d) => window.__hk.seek(d), Math.max(0, target - SETTLE * SETTLE_DT));
-    await page.evaluate(([n, d]) => window.__hk.settle(n, d), [SETTLE, SETTLE_DT]);
+    const settleFrames = Math.max(0, Math.min(SETTLE, Math.floor(target / SETTLE_DT + 1e-9)));
+    await page.evaluate((d) => window.__hk.seek(d), Math.max(0, target - settleFrames * SETTLE_DT));
+    await page.evaluate(([n, d]) => window.__hk.settle(n, d), [settleFrames, SETTLE_DT]);
     // One presented frame with the GPU awaited, so the canvas is complete.
     await page.evaluate((d) => window.__hk.frame(d), SETTLE_DT);
 

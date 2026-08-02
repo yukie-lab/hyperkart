@@ -348,17 +348,24 @@ const harness = {
     // exactly 0 once finished, so three rounds of critique judged "the opening
     // frame of a kart racer" with its single largest HUD element erased —
     // 171x279 px, laid out and composited every frame, invisible in every
-    // capture. Pinning `currentTime` to the race clock keeps determinism and
-    // shows what a player sees. Infinite animations have no end to seek to, so
-    // they are rewound.
-    const seekMs = (race.time % 1000) * 1000;
+    // capture. Infinite animations have no end to seek to, so they are rewound.
+    //
+    // Pinning `currentTime` to the race clock *itself* then repeated the same
+    // error one level down. An animation is at `now - its own start`, not at
+    // `now`: the countdown numeral runs 940 ms, so every capture taken after
+    // race time 0.94 clamped it to its own end and rendered it fully faded.
+    // Sampled across the 3.6 s countdown, the numeral appeared in one moment
+    // out of five. HUD animations now carry the race clock they were issued
+    // on, and the seek is relative to that.
     for (const a of document.getAnimations()) {
       try {
         const t = a.effect?.getComputedTiming?.();
         if (t?.iterations === Infinity) a.currentTime = 0;
         else if (a.playState !== 'finished') {
           a.pause();
-          a.currentTime = Math.min(seekMs, (t?.activeDuration ?? 0) || 0);
+          const born = a.__hkRaceStart;
+          const elapsedMs = born === undefined ? 0 : Math.max(0, (race.time - born) * 1000);
+          a.currentTime = Math.min(elapsedMs, (t?.activeDuration ?? 0) || 0);
         }
       } catch { /* an animation that cannot be settled is not worth failing a capture over */ }
     }

@@ -739,6 +739,21 @@ const EASE_BACK = 'cubic-bezier(.2,1.7,.4,1)';
 const REDUCE = typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : null;
 
 /**
+ * The race clock, as of the last frame the HUD was updated on.
+ *
+ * The capture harness has to place every finite animation where it should be
+ * at the race time being captured, and the Web Animations clock cannot tell it
+ * that: that clock is wall time, which the harness deliberately does not
+ * advance. Seeking to the race clock itself was the same mistake one level
+ * down — an animation issued at race time 3.0 and captured at 3.2 was seeked
+ * to 3200 ms and clamped to its own end. What the seek needs is time *since
+ * this animation began*, so every animation started here carries the race
+ * clock it was issued on.
+ */
+let RACE_NOW = 0;
+const stamp = (a) => { a.__hkRaceStart = RACE_NOW; return a; };
+
+/**
  * Run a multi-step keyframe sequence with LINEAR iteration timing.
  *
  * This exists because of a trap: the `easing` in an animation's options is the
@@ -753,7 +768,7 @@ function seq(el, frames, duration, opts = {}) {
   // animations are outside the cascade. Collapsing to 1ms keeps every
   // `.finished` handler (which is what removes the transient nodes) intact.
   const d = REDUCE && REDUCE.matches ? 1 : duration;
-  return el.animate(frames, { duration: d, easing: 'linear', ...opts });
+  return stamp(el.animate(frames, { duration: d, easing: 'linear', ...opts }));
 }
 
 export class HUD {
@@ -1009,6 +1024,7 @@ export class HUD {
   update(dt, race) {
     const p = race.player;
     if (!p) return;
+    RACE_NOW = race.time ?? RACE_NOW;
     this._retireCountdown(race);
     const c = this._c;
 
@@ -1479,10 +1495,10 @@ export class HUD {
       780, { delay: 170, easing: 'cubic-bezier(.4,0,.3,1)' });
     // The exit keeps the element's own translateX(-50%) centring — a bare
     // translateY here would snap the lozenge a half-width to the right.
-    const out = d.animate([
+    const out = stamp(d.animate([
       { opacity: 1, transform: 'translateX(-50%) translateY(0) scaleX(1)' },
       { opacity: 0, transform: 'translateX(-50%) translateY(-40%) scaleX(.94)' },
-    ], { duration: 260, delay: 890, easing: 'ease-in', fill: 'forwards' });
+    ], { duration: 260, delay: 890, easing: 'ease-in', fill: 'forwards' }));
     out.finished.then(() => d.remove(), () => d.remove());
   }
 
@@ -1508,6 +1524,9 @@ export class HUD {
   countdown(n, raceTime = 0) {
     if (n <= 0 && this._goShown) return;   // Race can emit tick 0 and 'go'
     if (n <= 0) this._goShown = true;
+    // Events are drained before the HUD's own update, so take the clock from
+    // the caller rather than letting these animations stamp a frame stale.
+    RACE_NOW = raceTime;
     this._countAt = raceTime;
     this._countLife = n <= 0 ? 1.05 : 0.90;
 
