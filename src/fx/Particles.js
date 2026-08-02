@@ -24,6 +24,9 @@ export const SHAPE = {
   STREAK: 3,   // stretched along the velocity in screen space — speed lines
   RING: 4,     // expanding annulus — shockwaves, charge tells
   RIPPLE: 5,   // travelling concentric bands — exhaust heat shimmer
+  EMBER: 6,    // tapered comet along the velocity — drift sparks, debris
+  FLAME: 7,    // crisp teardrop with a white-hot axis — jet plumes
+  SHARD: 8,    // hard-edged tumbling chip with a lit facet — impact debris
 };
 
 const VERT = /* glsl */`
@@ -73,13 +76,20 @@ const VERT = /* glsl */`
     float sz = aSize * env;
     vSize = sz;
 
-    // Screen-space travel direction. For a symmetric perspective projection
-    // view-space x/y map linearly to pixels, so the view-space velocity angle
-    // is already the on-screen angle — no aspect correction needed.
-    vec3 vv = (viewMatrix * vec4(aVel, 0.0)).xyz;
-    vAng = atan(vv.y, vv.x);
-
     float d = max(-mv.z, 0.35);
+
+    // Screen-space travel direction.
+    //
+    // The view-space velocity's x/y alone is *not* it, which is what this used
+    // to use. Screen position is (X/d, Y/d), so its derivative carries a second
+    // term — the perspective one: a particle flying straight at the lens has
+    // vv.xy near zero and streams radially outward from the vanishing point,
+    // and the old expression handed back an angle decided entirely by whatever
+    // sub-metre-per-second jitter the emitter happened to add. Every boost
+    // streak was therefore pointing somewhere random.
+    vec3 vv = (viewMatrix * vec4(aVel, 0.0)).xyz;
+    vec2 sv = vec2(vv.x * d + mv.x * vv.z, vv.y * d + mv.y * vv.z);
+    vAng = atan(sv.y, sv.x);
     // Near-camera fade. A chase camera sits a few metres behind the kart, so
     // everything the kart sheds sweeps straight through the lens: without this
     // one puff of tyre smoke at 1.5 m becomes a 700-pixel white disc that
@@ -116,6 +126,11 @@ const FRAG = /* glsl */`
     vec2 local = vec2(gl_PointCoord.x - 0.5, 0.5 - gl_PointCoord.y);
     float r = length(local) * 2.0;
     float a;
+    // How far this fragment is pushed toward white, *within* the sprite. A
+    // per-particle colour can only ever ramp over life, which gives a flame
+    // whose head and tail are the same colour in any single frame — i.e. a
+    // coloured puff. Shapes that need a hot axis or a lit facet write here.
+    float hot = 0.0;
 
     if (vShape < 0.5) {
       float g = smoothstep(1.0, 0.0, r);
@@ -138,17 +153,31 @@ const FRAG = /* glsl */`
       a = edge * 0.92;
     } else if (vShape < 3.5) {
       // Velocity-aligned streak with a hot head — the speed-line primitive.
+      //
+      // Half the width it had. At 6.5 the band spanned 15% of the sprite's own
+      // length, and a two-metre streak thrown backwards out of a jet arrives
+      // about three metres from a chase lens: seventy pixels wide, four
+      // hundred long, a dozen of them alive. That is the pale diverging haze
+      // the plume has been read as, one sprite at a time. A speed line is a
+      // line.
       vec2 q = rot(-vAng) * local;
-      float band = smoothstep(0.5, 0.0, abs(q.y) * 6.5);
+      float band = smoothstep(0.5, 0.0, abs(q.y) * 13.0);
       float along = smoothstep(0.52, 0.0, abs(q.x));
       a = band * along;
       a += smoothstep(0.11, 0.0, length(vec2((q.x - 0.26) * 1.2, q.y * 2.4))) * 0.85;
       a = clamp(a, 0.0, 1.0);
     } else if (vShape < 4.5) {
-      // Annulus that thins as it expands: a shockwave, not a growing disc.
-      float w = mix(0.34, 0.05, 1.0 - vLife);
-      a = smoothstep(w, 0.0, abs(r - 0.84));
-    } else {
+      // Shockwave: a *hard* outer front with the fill trailing inward behind
+      // it, thinning as the ring expands. The old symmetric band was soft on
+      // both edges, which at any size above a few dozen pixels is a smoke ring
+      // — there was no front for the eye to lock onto, and an impact ring that
+      // cannot be located in one frame does not exist in peripheral vision.
+      float w = mix(0.24, 0.045, 1.0 - vLife);
+      float front = smoothstep(0.90, 0.858, r);
+      float back = smoothstep(0.86 - w, 0.86 - w * 0.25, r);
+      a = front * back;
+      hot = front * smoothstep(0.86 - w * 0.45, 0.86, r) * 0.5;
+    } else if (vShape < 5.5) {
       // Heat shimmer. Without a copy of the frame buffer nothing here can
       // actually refract, so this instead does what refraction *looks* like:
       // fast travelling bands of low-contrast luminance over the exhaust.
@@ -156,6 +185,55 @@ const FRAG = /* glsl */`
       float band = sin(r * 13.0 - uTime * 22.0 - vRot * 5.0);
       float n = hash(floor((local + 0.5) * 9.0) + floor(vLife * 5.0));
       a = max(0.0, band) * smoothstep(1.0, 0.25, r) * smoothstep(0.0, 0.30, r) * (0.55 + n * 0.45);
+    } else if (vShape < 6.5) {
+      // Comet: a hard bright head with a tail that tapers to nothing along the
+      // direction of travel. A round sprite carries no motion information at
+      // all, and a four-point star minifies to exactly that by about fifteen
+      // pixels — which is every drift spark at chase distance. The taper is
+      // also most of why you can count them: a comet fills a tenth of its own
+      // quad, so fifty of them overlap into a shower instead of a cloud.
+      vec2 q = rot(-vAng) * local;
+      float t = clamp((q.x + 0.44) / 0.88, 0.0, 1.0);   // 0 tail -> 1 head
+      float w = 0.012 + 0.105 * t * t;
+      float body = smoothstep(w, 0.0, abs(q.y)) * smoothstep(0.0, 0.10, t);
+      float head = smoothstep(0.105, 0.0, length((q - vec2(0.30, 0.0)) * vec2(0.85, 1.0)));
+      a = clamp(body * 0.80 + head * 1.3, 0.0, 1.0);
+      // Only a third of the way to white. The head is the brightest part of the
+      // sprite and therefore the part the eye samples the colour from — take it
+      // much further and the drift tier is decided by a tail nobody looks at.
+      hot = head * 0.34;
+    } else if (vShape < 7.5) {
+      // Flame element: a crisp teardrop along the travel direction with a
+      // white-hot axis and ragged trailing licks. This is the shape a jet
+      // plume is made of. Sixty additive round glows summed at one point is
+      // not a flame at any brightness — it has no silhouette, so it reads as
+      // lit smoke, and lit smoke is what "the boost looks like dust" means.
+      vec2 q = rot(-vAng) * local;
+      float t = clamp((q.x + 0.46) / 0.92, 0.0, 1.0);
+      // Fat behind the head, closing to a point at the tail.
+      float w = 0.30 * pow(t, 0.45) * (0.30 + 0.70 * t);
+      float n = hash(floor((q + 0.5) * 9.0) + floor(vLife * 6.0));
+      // Ragged along the whole length, not only the tail: a clean-edged wedge
+      // reads as a piece of geometry, and thirty pieces of geometry is not a
+      // fire however hot the middle of each one is.
+      float d = abs(q.y) / max(w, 1e-4) + n * 0.34 * (0.35 + 0.65 * (1.0 - t));
+      a = smoothstep(1.0, 0.74, d) * smoothstep(0.0, 0.07, t);
+      // aRot is free on a velocity-oriented shape, so FLAME spends it on how
+      // white-hot its axis runs. Without a per-particle knob every layer of the
+      // plume gets the same white core, and a jet whose *coloured* layer is
+      // also white in the middle is a white blob with a coloured fringe —
+      // which is what a single hard-coded value produced on the first attempt.
+      hot = smoothstep(0.50, 0.0, d) * smoothstep(0.10, 0.55, t) * vRot;
+    } else {
+      // Impact debris: a hard-edged chip that tumbles on aRot, with one facet
+      // catching the light. Impacts read from silhouettes — a piece you can
+      // trace the outline of says "something broke", and no number of soft
+      // round sprites ever will.
+      vec2 uv = rot(vRot) * local * 2.0;
+      float d = max(max(abs(uv.x) * 1.22, abs(uv.y) * 1.85),
+                    abs(uv.x * 0.72 + uv.y * 0.70) * 1.60);
+      a = smoothstep(0.88, 0.74, d);
+      hot = a * step(0.0, uv.x * 0.52 + uv.y * 0.86) * 0.42;
     }
 
     if (a <= 0.003) discard;
@@ -163,6 +241,9 @@ const FRAG = /* glsl */`
     // Colour over life. Squared so the head keeps its start colour and the
     // transition happens in the tail, which is where the eye reads "cooling".
     vec3 col = mix(vColorB, vColor.rgb, vLife * vLife);
+    // …then the spatial ramp, which is what gives a single sprite an internal
+    // hot-to-cool gradient rather than one flat tint.
+    col = mix(col, vec3(1.0), hot);
 
     float alpha = vColor.a * a * vFade;
 

@@ -45,6 +45,9 @@ const ODDS = [
 /** How long a collected box keeps drawing while it blows apart. */
 const POP_TIME = 0.30;
 
+/** Glyph size relative to its authored quad; see `_buildBoxes`. */
+const CORE_SCALE = 0.70;
+
 /**
  * Item-box appearance.
  *
@@ -100,7 +103,7 @@ const BOX_SHELL_FRAG = /* glsl */`
     // colour sweeps as the box rotates and every face reads differently. That
     // angular dependence is the whole difference between "glass" and "a
     // translucent grey cube".
-    vec3 film = hue(0.44 + vHueOff * 0.5 + f * 0.72 + vObj.y * 0.14 + normalize(vNrm).x * 0.09 + uTime * 0.05);
+    vec3 film = hue(0.44 + vHueOff * 0.5 + f * 0.72 + vObj.y * 0.20 + normalize(vNrm).x * 0.09 + uTime * 0.05);
     // Pull toward white by the film's own strength: fully saturated rainbow
     // across a whole face reads as a beach ball, not as a coating.
     film = mix(vec3(0.74, 0.94, 1.00), film, 0.52);
@@ -114,21 +117,38 @@ const BOX_SHELL_FRAG = /* glsl */`
 
     // Moulded frame along the cube edges. Two of the three object-space axes
     // being near the surface means "edge"; all three means "corner".
-    vec3 e = abs(vObj) / 0.78;
+    vec3 e = abs(vObj) / 0.55;
     float m1 = max(max(e.x, e.y), e.z);
     float m2 = max(min(e.x, e.y), min(max(e.x, e.y), e.z));   // second largest
     float edge = smoothstep(0.87, 0.995, m2) * step(0.86, m1);
 
+    // Depth attenuation for the far wall.
+    //
+    // A double-sided shell draws the back of the box through the front of it
+    // at full strength, so every box carried a *second* complete copy of the
+    // moulded frame — three bright lines converging on the glyph from the
+    // corners. That is what made these read as empty wireframe cases with a
+    // question mark floating in them rather than as containers holding
+    // something. Any real translucent medium attenuates what is behind it;
+    // this is the cheapest possible version of that, and it costs one mix.
+    float far = gl_FrontFacing ? 1.0 : 0.26;
+    edge *= far;
+
     // Interior volume: a slow diagonal caustic so the inside of the box is not
     // empty space. Very low amplitude — this is texture, not a feature.
-    float caustic = 0.5 + 0.5 * sin(vObj.x * 7.0 + vObj.z * 5.0 - uTime * 1.7);
+    //
+    // Frequencies scaled with the shell when it shrank, here and on the film's
+    // vObj.y term above: both are cycles per *metre*, so leaving them alone
+    // would have given the smaller box two thirds of a band across a face and
+    // turned the pattern into a flat gradient.
+    float caustic = 0.5 + 0.5 * sin(vObj.x * 10.0 + vObj.z * 7.0 - uTime * 1.7);
 
-    float a = mix(0.15, 0.72, f) + caustic * 0.04;
+    float a = (mix(0.19, 0.74, f) + caustic * 0.04) * far;
     vec3 col = body * (1.05 + caustic * 0.15);
     // The frame is the only part allowed past the bloom threshold, and it is
     // thin enough that it costs a fraction of a percent of the frame.
     col = mix(col, hue(0.30 + vHueOff * 0.5 + uTime * 0.11) * 2.1 + 0.40, edge);
-    a = mix(a, 0.92, edge);
+    a = mix(a, 0.92 * far, edge);
 
     gl_FragColor = vec4(col, a);
   }`;
@@ -280,17 +300,31 @@ export class ItemSystem {
   // -- construction ---------------------------------------------------------
 
   _buildBoxes() {
-    const geo = new THREE.BoxGeometry(1.5, 1.5, 1.5, 2, 2, 2);
+    // 1.05 m, not 1.5. A 1.5 m cube stands as tall as the whole kart including
+    // its rear wing, so approaching a row of them the pickups are the largest
+    // objects on the circuit and the thing you are driving is not. A box is a
+    // prop you collect, and it has to read as smaller than the vehicle.
+    const geo = new THREE.BoxGeometry(1.05, 1.05, 1.05, 2, 2, 2);
     // Round the cube slightly for a moulded look.
     const p = geo.attributes.position;
+    const nrm = geo.attributes.normal;
     const v = new THREE.Vector3();
+    const nv = new THREE.Vector3();
     for (let i = 0; i < p.count; i++) {
       v.fromBufferAttribute(p, i);
-      const l = v.length();
-      v.lerp(v.clone().setLength(1.02), 0.16);
+      // Blend the flat face normal toward the sphere normal by the amount the
+      // position moves, rather than recomputing normals from the mesh.
+      //
+      // `computeVertexNormals` averages the two triangles meeting at each of a
+      // 2x2 face's corners, and those triangles are split along the quad's
+      // diagonal — so the interpolated normal has a crease along every
+      // diagonal, and the fresnel term (a 2.6 power) amplifies it into a
+      // visible line. Deriving the normal analytically has no crease.
+      nv.fromBufferAttribute(nrm, i).lerp(v.clone().normalize(), 0.16).normalize();
+      nrm.setXYZ(i, nv.x, nv.y, nv.z);
+      v.lerp(v.clone().setLength(0.72), 0.16);
       p.setXYZ(i, v.x, v.y, v.z);
     }
-    geo.computeVertexNormals();
 
     // Alpha-blended glass rather than `transmission`. Real transmission makes
     // three re-render the whole opaque scene into a refraction buffer, so a
@@ -321,6 +355,10 @@ export class ItemSystem {
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     });
+    // The glyph quad keeps its authored 0.80 extent — the question mark's
+    // stroke widths are absolute numbers in this space — and shrinks with the
+    // shell through CORE_SCALE instead. Resizing the quad would have left the
+    // hook and the descender sized for the old box.
     const coreGeo = new THREE.PlaneGeometry(0.80, 0.80);
 
     const n = this.track.itemBoxes.length;
@@ -345,7 +383,7 @@ export class ItemSystem {
 
     const frame = {};
     const basis = new THREE.Matrix4();
-    const POOL_R = 3.1;
+    const POOL_R = 2.3;
 
     for (let i = 0; i < n; i++) {
       const def = this.track.itemBoxes[i];
@@ -365,10 +403,11 @@ export class ItemSystem {
       this.boxPool.setMatrixAt(i, basis);
       this.boxPoolOn[i] = 1;
 
-      pos.y += 1.25;
+      pos.y += 1.02;
       const holder = new THREE.Group();
       holder.position.copy(pos);
       const core = new THREE.Mesh(coreGeo, this.boxCoreMaterial);
+      core.scale.setScalar(CORE_SCALE);
       core.renderOrder = 3;
       holder.add(core);
       // Shell after core, so the glass tints the glyph rather than the glyph
@@ -604,13 +643,13 @@ export class ItemSystem {
           const k = 1 - b.pop / POP_TIME;
           b.mesh.rotation.y += dt * 9;
           b.mesh.scale.setScalar(lerp(1, 1.9, smoothstep(clamp01(k))) * (1 - k * k));
-          b.core.scale.setScalar(Math.max(0.001, 1 - k * 1.6));
+          b.core.scale.setScalar(Math.max(0.001, 1 - k * 1.6) * CORE_SCALE);
           if (b.pop <= 0) b.mesh.visible = false;
         }
         if (b.respawn <= 0) {
           b.active = true;
           b.mesh.visible = true;
-          b.core.scale.setScalar(1);
+          b.core.scale.setScalar(CORE_SCALE);
         }
         continue;
       }
@@ -619,18 +658,25 @@ export class ItemSystem {
       // materialising at full size on a single frame.
       const inT = clamp01((ctx.time - (b.bornAt ?? -99)) / 0.38);
 
+      // Tumble on three axes, not one. A cube spun about world Y presents a
+      // face square-on to the camera for most of every turn, so in any single
+      // frame — which is all a still capture ever has — it reads as an
+      // axis-aligned block sitting in the road rather than as something
+      // hovering. The z term is small and prime-ish against the others so the
+      // three never come back into phase.
       b.mesh.rotation.y = b.phase * 1.4;
-      b.mesh.rotation.x = Math.sin(b.phase * 0.8) * 0.22;
+      b.mesh.rotation.x = 0.38 + Math.sin(b.phase * 0.8) * 0.22;
+      b.mesh.rotation.z = Math.sin(b.phase * 0.53) * 0.30;
       // The core is deliberately *not* spun: it billboards, and a question
       // mark you have to read while it cartwheels is a question mark nobody
       // reads. The shell's rotation carries all the motion.
-      b.mesh.position.y = b.pos.y + Math.sin(b.phase * 2.1) * 0.10;
+      b.mesh.position.y = b.pos.y + Math.sin(b.phase * 2.1) * 0.15;
       // A slow breathe on the shell and a faster counter-beat on the core:
       // two rates make it read as a container with something alive inside.
       const breathe = 1 + Math.sin(b.phase * 2.1) * 0.045;
       const pop = inT < 1 ? lerp(0.2, 1, smoothstep(inT)) * (1 + Math.sin(inT * Math.PI) * 0.22) : 1;
       b.mesh.scale.setScalar(breathe * pop);
-      b.core.scale.setScalar((1 + Math.sin(b.phase * 5.3) * 0.14) * pop);
+      b.core.scale.setScalar((1 + Math.sin(b.phase * 5.3) * 0.14) * pop * CORE_SCALE);
 
       // A sparkle every third of a second, but only for boxes the player can
       // actually see. A circuit carries dozens of boxes, and emitting for all
