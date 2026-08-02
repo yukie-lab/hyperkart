@@ -263,6 +263,11 @@ const harness = {
   seek(seconds) {
     const driver = autoDriver || new AIDriver(race.player, race.track, { skill: 0.92, seed: 31337 });
     const saved = loop.step;
+    // Seat the rig on the selected mode *before* advancing, not after. `snapTo`
+    // also clears roll, shake, dip and FOV kick, which is right for a camera
+    // that has no history yet — a fresh page at t=0 — and wrong for one that
+    // has just been driven through a corner.
+    chase.snapTo(race.player);
     loop.step = (dt) => {
       const c = driver.update(dt, race._ctx);
       race.step(dt, {
@@ -272,12 +277,25 @@ const harness = {
       });
       handleEvents(race.drainEvents());
       race.render(1, dt, camera.position);
+      // The camera lives through the seek like everything else.
+      //
+      // It used to be zeroed on arrival instead, to keep a frame's identity
+      // independent of the route taken to reach it. d8246b3 bought that a
+      // better way -- shot.mjs reloads the page per requested time, so there is
+      // only ever one route -- but the reset stayed, and the eight settle
+      // frames recover only part of what it threw away. Every capture in five
+      // rounds of critique was 2.4-3.3 degrees under-banked and up to 5.8
+      // degrees short on FOV, which is to say camera lean and FOV-driven speed,
+      // two of the things the review exists to judge, were never once reviewed
+      // at the value a player sees.
+      chase.update(dt, race.player, { lookBack: false, shakeImpulse, dipImpulse });
+      shakeImpulse = 0;
+      dipImpulse = 0;
     };
     loop.fastForward(seconds);
     loop.step = saved;
     // Re-seat presentation state so the very next frame is correct.
     race.render(1, 1 / 60, camera.position);
-    chase.snapTo(race.player);
     return { time: loop.simTime, lap: race.player.lap, speed: race.player.speedKmh };
   },
 
@@ -340,6 +358,18 @@ const harness = {
    * of their pixels. `stopForCapture()` closes both holes.
    */
   async frame(dt = 1 / 60) {
+    // Present first, pin the animations afterwards.
+    //
+    // The order matters more than anything else in this method. `presentFrame`
+    // calls `hud.update()`, which changes classes on the item slot and the
+    // banners, and a class change *starts a fresh CSS animation*. Pinning
+    // before presenting therefore froze the previous frame's animations and
+    // then let `hud.update` start new ones that ran free until the shutter --
+    // so the item slot still alternated between two images across runs, over
+    // exactly the 820..1100 x 0..271 it occupies, which is the region the
+    // original t=12 failure had already pointed at.
+    presentFrame(1, dt);
+
     // Seek the HUD's Web Animations to a deterministic time rather than
     // finishing them.
     //
@@ -357,19 +387,50 @@ const harness = {
     // Sampled across the 3.6 s countdown, the numeral appeared in one moment
     // out of five. HUD animations now carry the race clock they were issued
     // on, and the seek is relative to that.
+    // Every finite animation is seeked, whatever its `playState`. Skipping the
+    // finished ones made the capture depend on the wall clock, which is the one
+    // thing it must never do: whether a 240 ms banner had finished by the time
+    // the harness got round to shooting was a question about how fast the
+    // machine felt, so t=12 on sunsetCoast alternated between exactly two
+    // images across runs. With the HUD off the same four runs were already
+    // byte-identical, which is what named the HUD as the source. Seeking a
+    // genuinely finished animation to its own end is a no-op, so nothing is
+    // lost by not asking.
     for (const a of document.getAnimations()) {
       try {
         const t = a.effect?.getComputedTiming?.();
-        if (t?.iterations === Infinity) a.currentTime = 0;
-        else if (a.playState !== 'finished') {
+        // Paused *before* being rewound. Rewinding a still-running animation
+        // only resets it and lets it play on, and real time passes between here
+        // and the shutter -- the item slot's reel is `steps(2,end)` over 90 ms,
+        // so it landed on either of its two frames depending on how long the
+        // screenshot took. That was 0.95% of the frame flipping between exactly
+        // two images at t=12, which is precisely what was seen.
+        if (t?.iterations === Infinity) { a.pause(); a.currentTime = 0; }
+        else {
           a.pause();
+          const dur = (t?.activeDuration ?? 0) || 0;
           const born = a.__hkRaceStart;
-          const elapsedMs = born === undefined ? 0 : Math.max(0, (race.time - born) * 1000);
-          a.currentTime = Math.min(elapsedMs, (t?.activeDuration ?? 0) || 0);
+          // An unstamped animation is a CSS one, started by a class change at
+          // a race time nobody recorded. Pin it to its END, not to zero: these
+          // are 220 ms entrances, long finished by the time anything is
+          // captured, and their end state is also the element's settled look --
+          // so the frame is the same whether or not the animation still exists.
+          // Pinning them to zero instead put the ITEM label on its first frame,
+          // invisible, and since its existence depended on whether hud.update
+          // had just re-triggered it, the label blinked in and out across runs.
+          a.currentTime = born === undefined
+            ? dur
+            : Math.min(Math.max(0, (race.time - born) * 1000), dur);
         }
       } catch { /* an animation that cannot be settled is not worth failing a capture over */ }
     }
-    presentFrame(1, dt);
+    // Force the pinned state through style and layout before the compositor is
+    // allowed to sample it. Pausing settles an animation's state but does not
+    // guarantee that state has been composited by the time the screenshot is
+    // taken -- and reading a layout property is what a devtools inspection was
+    // accidentally doing, which is why this always measured deterministic and
+    // did not always photograph that way.
+    void document.documentElement.offsetHeight;
     await new Promise((r) => requestAnimationFrame(r));
   },
 
