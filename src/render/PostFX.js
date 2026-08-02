@@ -50,7 +50,10 @@ const CinematicShader = {
     uniform vec3 uLift, uGain;
     varying vec2 vUv;
 
-    #define TAPS 6
+    // Twelve taps, not six. The tap count and the amplitude are one setting:
+    // six taps across a 63 px smear leaves 13 px between ghosts, which reads as
+    // a stack of copies rather than as motion. See the amplitude note below.
+    #define TAPS 12
 
     float hash(vec2 p) {
       p = fract(p * vec2(443.897, 441.423));
@@ -64,7 +67,16 @@ const CinematicShader = {
 
       // Radial motion blur: strength ramps from the centre outward so the
       // focal point stays readable while the periphery smears.
-      float amt = uSpeed * smoothstep(0.10, 0.72, dist) * 0.085;
+      //
+      // 0.085 was destroying the frame. At 99 km/h it put up to 63 px of smear
+      // in the corners; measured, 82% of the frame's pixels changed and 190k of
+      // them by more than 16/255. It erased the entire trackside world at
+      // racing speed -- two rounds of scenery work present in the scene graph
+      // and absent from the screen -- and it merged two karts 3.05 m apart into
+      // one mass convincingly enough that a reviewer logged it as a physics bug
+      // until a blur-off render disproved it. A post effect that manufactures
+      // false collisions is not a post effect.
+      float amt = uSpeed * smoothstep(0.10, 0.72, dist) * 0.026;
       // Chromatic aberration scales with the same radial term. Kept low: at the
       // previous strength a high-contrast edge near the frame border — a
       // barrier, a kerb — split into visibly separate red and cyan bands, which
@@ -206,6 +218,7 @@ export class PostFX {
     // thresholds are post-exposure, so 1.0 == screen white.
     switch (theme.key) {
       case 'coast':
+        this.u.uGrain.value = 0.024;
         this.u.uSaturation.value = 1.16;
         this.u.uContrast.value = 1.08;
         this.u.uGain.value.setRGB(1.05, 0.995, 0.94);
@@ -215,6 +228,7 @@ export class PostFX {
         this.bloom.radius = 0.60;
         break;
       case 'canyon':
+        this.u.uGrain.value = 0.022;
         this.u.uSaturation.value = 1.10;
         this.u.uContrast.value = 1.12;
         this.u.uGain.value.setRGB(1.03, 1.00, 0.95);
@@ -224,6 +238,11 @@ export class PostFX {
         this.bloom.radius = 0.52;
         break;
       case 'rainbow':
+        // A quarter of the others'. Grain is capped as a fraction of local
+        // luminance, and this road sits squarely in the mid band where that cap
+        // is loosest -- measured, 4.0% of a *stationary* frame was moving more
+        // than 16/255 every 8.3 ms, twenty-six times sunsetCoast.
+        this.u.uGrain.value = 0.007;
         // Was strength 0.42 / threshold 0.80 — roughly three times the other
         // tracks — which bleached the road's own emissive into a white haze
         // that erased the left quarter of the frame including the player kart.

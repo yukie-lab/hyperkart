@@ -305,18 +305,26 @@ const harness = {
    * of their pixels. `stopForCapture()` closes both holes.
    */
   async frame(dt = 1 / 60) {
-    // Settle the HUD's Web Animations. Retiring the countdown off the race
-    // clock made *whether* a banner is on screen deterministic, but its
-    // keyframes still run on the browser's clock, so a grid capture came back
-    // with the numeral at a different point in its scale curve every time —
-    // 0.84% of the frame. Finishing them pins the HUD in its settled state.
-    // Anything infinite (the item slot's idle shimmer) is rewound instead,
-    // since it has no end to seek to.
+    // Seek the HUD's Web Animations to a deterministic time rather than
+    // finishing them.
+    //
+    // `finish()` made captures reproducible and also deleted the thing being
+    // reviewed: the countdown numeral is at opacity 0.273 mid-animation and at
+    // exactly 0 once finished, so three rounds of critique judged "the opening
+    // frame of a kart racer" with its single largest HUD element erased —
+    // 171x279 px, laid out and composited every frame, invisible in every
+    // capture. Pinning `currentTime` to the race clock keeps determinism and
+    // shows what a player sees. Infinite animations have no end to seek to, so
+    // they are rewound.
+    const seekMs = (race.time % 1000) * 1000;
     for (const a of document.getAnimations()) {
       try {
-        const it = a.effect?.getComputedTiming?.().iterations;
-        if (it === Infinity) a.currentTime = 0;
-        else a.finish();
+        const t = a.effect?.getComputedTiming?.();
+        if (t?.iterations === Infinity) a.currentTime = 0;
+        else if (a.playState !== 'finished') {
+          a.pause();
+          a.currentTime = Math.min(seekMs, (t?.activeDuration ?? 0) || 0);
+        }
       } catch { /* an animation that cannot be settled is not worth failing a capture over */ }
     }
     presentFrame(1, dt);

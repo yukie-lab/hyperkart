@@ -85,97 +85,90 @@ async function main() {
   url.searchParams.set('auto', '1');
   url.searchParams.set('shot', '1');
 
-  await page.goto(url.toString(), { waitUntil: 'load', timeout: CFG.timeout });
-
-  // Wait for the first presented frame.
-  await page.waitForFunction(() => window.__hk && window.__hk.ready, null, { timeout: CFG.timeout });
-
-  // Report the actual GPU in use — SwiftShader would invalidate any visual
-  // judgement made from these captures.
-  const gpu = await page.evaluate(() => {
-    const c = document.createElement('canvas');
-    const gl = c.getContext('webgl2');
-    const d = gl.getExtension('WEBGL_debug_renderer_info');
-    return d ? gl.getParameter(d.UNMASKED_RENDERER_WEBGL) : 'unknown';
-  });
-
-  // Take the frame clock before anything is measured. Until this call the live
-  // loop keeps stepping the simulation between harness frames, so a requested
-  // time came back roughly 0.1 s late and the pixel ratio could move mid-series.
-  const pinned = await page.evaluate(() => window.__hk.stopForCapture());
-  process.stdout.write(`clock pinned at t=${pinned.simTime.toFixed(3)}s, pixelRatio ${pinned.pixelRatio.toFixed(2)}\n`);
-
-  if (!CFG.hud) await page.evaluate(() => window.__hk.setHud(false));
-
-  if (CFG.hide) {
-    // Hidden by layer, not by `.visible`.
-    //
-    // Setting `.visible = false` does not survive a frame: the presentation
-    // update paths write it back. `KartModel._updateContact` writes
-    // `contact.visible` on its first edge and `KartFX._shadowBlob` writes
-    // `b.visible = true` unconditionally, so `--hide contactAO` reported
-    // twelve objects hidden and produced a bit-identical frame. Every
-    // attribution made with this flag against a kart, an FX pool, a contact
-    // patch or a shadow blob was therefore unsound. Nothing writes to
-    // `layers`, and layer 31 is rendered by no camera in this project --
-    // including the shadow camera, so a hidden caster stops casting too.
-    const hidden = await page.evaluate((pats) => {
-      const names = [];
-      window.__hk.scene.traverse((o) => {
-        if (o.name && pats.some((p) => o.name.includes(p))) { o.layers.set(31); names.push(o.name); }
-      });
-      return names;
-    }, CFG.hide.split(',').map((s) => s.trim()).filter(Boolean));
-    process.stdout.write(`hidden (${hidden.length}): ${hidden.join(', ') || 'nothing matched'}\n`);
-
-    // Self-check. A hide that matched objects but does not change the draw
-    // count is a hide that did nothing, and a silent no-op here produces a
-    // confident false conclusion downstream -- which is exactly what happened
-    // for the whole life of this flag.
-    //
-    // It counts by rendering the scene straight to the canvas rather than
-    // through `__hk.frame()`, because `frame()` advances particles and
-    // animation: an earlier version of this check burned two frames and moved
-    // 83% of the pixels it was meant to be validating.
-    if (hidden.length) {
-      const drop = await page.evaluate(() => {
-        const { rs, scene, camera } = window.__hk;
-        const count = () => {
-          rs.beginFrame();
-          rs.renderer.setRenderTarget(null);
-          rs.renderer.render(scene, camera);
-          return rs.renderer.info.render.calls;
-        };
-        const withHide = count();
-        const restored = [];
-        scene.traverse((o) => { if (!o.layers.test(camera.layers)) { restored.push(o); o.layers.enable(0); } });
-        const without = count();
-        for (const o of restored) o.layers.set(31);
-        return { withHide, without };
-      });
-      if (drop.withHide >= drop.without) {
-        process.stdout.write(
-          `  ! WARNING: hiding those objects did not reduce draw calls ` +
-          `(${drop.without} -> ${drop.withHide}). Treat this A/B as invalid.\n`);
-      } else {
-        process.stdout.write(`  hide removes ${drop.without - drop.withHide} draw calls\n`);
-      }
-    }
-  }
-
   const times = CFG.series
     ? CFG.series.split(',').map((s) => parseFloat(s.trim())).filter((n) => isFinite(n))
     : [CFG.t];
 
   const results = [];
   let blackFrames = 0;
-  let simTime = 0;
+  let gpu = 'unknown';
 
-  for (let i = 0; i < times.length; i++) {
-    const target = times[i];
-    const delta = Math.max(0, target - simTime);
-    await page.evaluate((d) => window.__hk.seek(d), delta);
-    simTime = target;
+  // One page load per requested time.
+  //
+  // A capture's identity depends on the route taken to reach it: `--t 20` and
+  // `--series 20` are bit-identical, but `--series 10,20` differs from both on
+  // 89% of its pixels, because the eight settle frames at each intermediate
+  // stop advance particles, post-process damping and HUD state that no seek
+  // rewinds. Reaching every frame the same way is the only thing that makes
+  // two captures comparable, and this project's whole verification method
+  // rests on that.
+  for (const target of times) {
+    await page.goto(url.toString(), { waitUntil: 'load', timeout: CFG.timeout });
+    await page.waitForFunction(() => window.__hk && window.__hk.ready, null, { timeout: CFG.timeout });
+
+    if (gpu === 'unknown') {
+      // Report the actual GPU in use — SwiftShader would invalidate any visual
+      // judgement made from these captures.
+      gpu = await page.evaluate(() => {
+        const c = document.createElement('canvas');
+        const gl = c.getContext('webgl2');
+        const d = gl.getExtension('WEBGL_debug_renderer_info');
+        return d ? gl.getParameter(d.UNMASKED_RENDERER_WEBGL) : 'unknown';
+      });
+    }
+
+    await page.evaluate(() => window.__hk.stopForCapture());
+    if (!CFG.hud) await page.evaluate(() => window.__hk.setHud(false));
+
+    if (CFG.hide) {
+      const pats = CFG.hide.split(',').map((x) => x.trim()).filter(Boolean);
+      // Hidden by layer, not by `.visible`: the presentation update paths write
+      // `.visible` straight back, so this flag used to report objects hidden
+      // and produce a bit-identical frame. Groups are descended into, because
+      // three's projectObject recurses into children outside the layer test —
+      // hiding a Group alone hides nothing.
+      const hidden = await page.evaluate((ps) => {
+        const names = [];
+        window.__hk.scene.traverse((o) => {
+          if (o.name && ps.some((x) => o.name.includes(x))) {
+            o.traverse((c) => c.layers.set(31));
+            names.push(o.name);
+          }
+        });
+        return names;
+      }, pats);
+      if (target === times[0]) {
+        process.stdout.write(`hidden (${hidden.length}): ${hidden.join(', ') || 'nothing matched'}\n`);
+      }
+      if (hidden.length) {
+        // A hide that matched objects but does not change the draw count did
+        // nothing, and a silent no-op here produces a confident false
+        // conclusion downstream. Counted by drawing straight to the canvas, not
+        // through `frame()`, which would advance particle and animation state.
+        const drop = await page.evaluate(() => {
+          const { rs, scene, camera } = window.__hk;
+          const count = () => {
+            rs.beginFrame();
+            rs.renderer.setRenderTarget(null);
+            rs.renderer.render(scene, camera);
+            return rs.renderer.info.render.calls;
+          };
+          const withHide = count();
+          const restored = [];
+          scene.traverse((o) => { if (!o.layers.test(camera.layers)) { restored.push(o); o.layers.enable(0); } });
+          const without = count();
+          for (const o of restored) o.layers.set(31);
+          return { withHide, without };
+        });
+        if (target === times[0]) {
+          process.stdout.write(drop.withHide >= drop.without
+            ? `  ! WARNING: hiding those objects did not reduce draw calls (${drop.without} -> ${drop.withHide}). Treat this A/B as invalid.\n`
+            : `  hide removes ${drop.without - drop.withHide} draw calls\n`);
+        }
+      }
+    }
+
+    await page.evaluate((d) => window.__hk.seek(d), target);
 
     // Let post-processing and particle state settle for a few real frames so
     // the capture matches what a player would actually see in motion.
@@ -186,15 +179,6 @@ async function main() {
     const stats = await page.evaluate(() => window.__hk.stats());
     const errs = await page.evaluate(() => window.__hkErrors.slice());
 
-    const outPath = CFG.series
-      ? resolve(CFG.outdir, `${CFG.track}_t${String(target).padStart(3, '0')}.png`)
-      : resolve(CFG.out);
-    await mkdir(dirname(outPath), { recursive: true });
-    // A black frame currently exits 0 and reports plausible draw counts. One
-    // was observed mid-session and never reproduced — almost certainly a vite
-    // reload landing inside a capture — and it was only caught because two
-    // runs happened to be diffed. Sample the framebuffer and fail loudly
-    // instead, because a silently black capture is a review of nothing.
     const lit = await page.evaluate(() => {
       const c = window.__hk.rs.renderer.domElement;
       const s = document.createElement('canvas');
@@ -211,6 +195,10 @@ async function main() {
       blackFrames++;
     }
 
+    const outPath = CFG.series
+      ? resolve(CFG.outdir, `${CFG.track}_t${String(target).padStart(3, '0')}.png`)
+      : resolve(CFG.out);
+    await mkdir(dirname(outPath), { recursive: true });
     await page.screenshot({ path: outPath, type: 'png' });
 
     results.push({ t: target, path: outPath, stats, errors: errs });
@@ -219,11 +207,6 @@ async function main() {
       `   rank=${stats.player.rank} lap=${stats.player.lap} ${stats.player.speedKmh}km/h ` +
       `drift=${stats.player.drift}${stats.player.driftStage >= 0 ? `(${stats.player.driftStage})` : ''} ` +
       `boost=${stats.player.boosting} onRoad=${stats.player.onRoad}\n` +
-      // No fps here. In capture mode the live loop never starts, so
-      // `Loop.smoothedFrameMs` sits at its constructor value forever and this
-      // field printed a constant 60 on every capture ever taken. A fabricated
-      // number is worse than no number; measure frame rate with the loop
-      // running (shot=0) instead.
       `   draws=${stats.drawCalls} tris=${stats.triangles}\n`,
     );
   }

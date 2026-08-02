@@ -70,6 +70,22 @@ export class ChaseCamera {
     this.dist = cfg.dist;
     this.height = cfg.height;
     this.fov = cfg.fov;
+
+    // And clear everything else the rig was carrying. These were left alone,
+    // so a snap inherited whatever roll, dip, FOV kick and shake phase the
+    // previous seek happened to stop on: the simulation came out bit-identical
+    // between `--t 20` and `--series 10,20` — position, yaw, speed and all
+    // twelve ranks agreeing to six decimals — while the camera differed by 2
+    // degrees of roll and 1.34 degrees of FOV, which is 96.8% of the pixels.
+    // A frame's identity must not depend on the route taken to reach it.
+    this.roll = 0;
+    this.shake = 0;
+    this._shakePhase = 0;
+    this._dip = 0;
+    this._fovKick = 0;
+    this._wasBoosting = false;
+    this._t = 0;
+
     this._initialised = false;
     this.update(0.016, kart, { intro: false });
     this._initialised = true;
