@@ -112,8 +112,77 @@ const BOOST_PLATE_ALPHA_NEON = 0.56;
 
 // Checker squares per 3.2 m of start line, which is also its depth — so this is
 // both the square size in metres (3.2 / n) and the number of rows.
-const START_SQUARES = 4;
-const START_DEPTH = 3.2;
+const START_SQUARES = 5;
+// Was 3.2 m, which is 4-5 pixels tall from the back of the grid — measured, the
+// whole band lifted that stretch of road by 11 luma out of 255, which is not a
+// start line, it is a smudge. A real start/finish band is 4-6 m deep for the
+// same reason: it has to be legible from a standing start thirty metres back.
+// The square size is held at ~0.9 m, so this only adds a row.
+const START_DEPTH = 4.6;
+// Metres of solid white timing stripe along each edge of that band. This is the
+// mark that survives distance: 90 cm chequers mip to a mid grey by fifty metres
+// and a mid grey on tarmac is nothing, but a 45 cm line running the full width
+// of the road is still a line, and two of them bound the band into an object.
+const START_EDGE = 0.45;
+
+// Painted grid boxes. Twelve is the largest field this game runs, and a circuit
+// paints its boxes whether or not anyone turns up to fill them.
+const GRID_SLOTS = 12;
+// Box width and length in metres, and how far the staging bar sits ahead of the
+// slot `Track.startGrid` actually places a kart at — far enough that the kart's
+// nose is inside its own box rather than parked on the line.
+const GRID_BOX_W = 2.9;
+const GRID_BOX_L = 4.6;
+const GRID_BOX_AHEAD = 1.5;
+// Line widths in metres. Grid paint is laid roughly twice as heavy as a lane
+// marking, which is not decoration: at 12 cm it is under a pixel by thirty
+// metres and the whole grid vanishes exactly when the camera pulls back to
+// show it.
+const GRID_LINE = 0.16;
+const GRID_BAR = 0.44;
+
+// -- barriers ----------------------------------------------------------------
+// Cross-section of the barrier, walked from the track-facing foot, up the inner
+// face, over the cap, and down the outside. Lateral offsets are metres from the
+// barrier line; heights are fractions of `TRACK_LAYOUT.wallHeight`, so a track
+// that wants a taller barrier gets a taller one and not a stretched one.
+//
+// The previous barrier was a single vertical strip with `side: DoubleSide` and
+// nothing else: a triangle census found 5328 faces per wall and **0 of them
+// facing up**, which is a precise way of saying it had no thickness anywhere on
+// the circuit. What that draws, from a chase camera, is a flat ribbon of paint
+// terminating in a two-pixel trim line — and two pixels is the one feature
+// width that neither the mip chain nor the AA resolve can hold still. It was
+// also the last surface here whose winding carried no information, so it took
+// its lighting from which way a triangle happened to face rather than from a
+// normal that meant anything.
+//
+// The cap overhangs the faces by 9 cm on purpose. That overhang is what puts a
+// shadow line under the top edge, and that shadow line is the entire reason an
+// extruded barrier reads as an object rather than as a strip.
+const WALL_PROFILE = [
+  [-0.17, -0.060],   // inner foot, buried under the run-off so the join is not a seam
+  [-0.17, 0.900],
+  [-0.26, 0.9375],   // cap lip, flaring out over the face
+  [-0.26, 1.000],
+  [0.26, 1.000],
+  [0.26, 0.9375],
+  [0.17, 0.900],
+  [0.17, -0.190],    // outer foot, buried in the terrain, which sits a sill lower
+];
+// Metres of barrier between cross-sections. Coarser than the road's 1.6 m
+// because a barrier is a straight-edged object and 2.4 m of chord bows by 3.5 cm
+// on this circuit's tightest corner — a third of the section's own thickness.
+const WALL_STEP = 2.4;
+// Metres of barrier per bolted panel. Real crash barrier arrives in four metre
+// sections, and the joint between two of them is the cheapest mark on this
+// surface that says the run was built rather than drawn.
+const WALL_PANEL = 4.0;
+// Support posts: metres between them, then width outward from the barrier's
+// outer face, thickness along the run, and top/bottom as fractions of the wall
+// height. The top stops short of the cap so the cap visibly overhangs it.
+const POST_GAP = 5.4;
+const POST_W = 0.20, POST_D = 0.14, POST_TOP = 0.81, POST_BASE = -0.22;
 
 /**
  * Cross-section of a rumble strip, `u` running from the tarmac edge outward.
@@ -691,27 +760,51 @@ normal = normalize( tbn * vec3( kMapN.xy * normalScale * ( 1.0 - kFar ), 1.0 ) )
   /**
    * Shared treatment for every off-track surface: shoulders and terrain.
    *
-   * Three jobs, all of which need to know where a fragment is in the *world*
+   * Four jobs, all of which need to know where a fragment is in the *world*
    * rather than in its tile:
    *
+   *  - Stay quiet. This is the run-off. It is 30-40% of most frames, it is the
+   *    surface the player must not be on, and every kart racer that has shipped
+   *    keeps it deliberately duller than the tarmac for exactly that reason —
+   *    the escape road should not be what pulls the eye off the racing line.
+   *    Measured before this pass, it carried 1.5-1.7x the tarmac's
+   *    high-frequency energy. The tile itself has been retuned (see
+   *    `Tex.sand`), and here it is faded to its own mean colour with distance:
+   *    the same two-scale treatment that fixed the kerb and then the road,
+   *    applied harder and earlier because ground is seen at a more grazing
+   *    angle than anything else in the scene.
    *  - Break the repeat. The terrain tiles every 14 m across half a kilometre
    *    of dune, which the eye picks up instantly as wallpaper. A second sample
    *    of the same map five times larger, pivoted on the map's own mean so the
-   *    ground's brightness does not move, buys 70 m of drift over the top.
+   *    ground's brightness does not move, buys 70 m of drift over the top —
+   *    and now that the tile is quiet, drift authored directly in world space
+   *    over tens of metres carries the surface's whole character. None of it
+   *    can alias at any distance, which is the entire point of putting it here
+   *    rather than in a 14 m tile.
    *  - Hold still. Same fix as the road: fade the fine normal out once its
    *    footprint drops under a texel and widen the specular lobe to stand in
    *    for the relief that was lost.
    *  - Meet its neighbours. Sand is compacted and rubber-stained for the first
    *    couple of metres off the tarmac, and damp for the last couple above the
    *    waterline, so both joins are a gradient rather than a polygon edge.
+   *
+   * `strata` turns on sedimentary banding for the canyon, where the terrain
+   * climbs into mesa walls sixty metres tall. Those walls are far enough away
+   * that the tile has faded out entirely, and with nothing else on them they
+   * photographed as a flat orange gradient — the only large object in that
+   * circuit with no surface at all. Banding is a function of world height, so
+   * it survives to the horizon and holds perfectly still while the camera does
+   * not.
    */
-  _groundWear(mat, tex, { tile, waterLevel = null, cacheKey }) {
+  _groundWear(mat, tex, { tile, waterLevel = null, cacheKey, strata = 0 }) {
     mat.customProgramCacheKey = () => `hk-ground-${cacheKey}`;
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uBaseLuma = { value: Math.max(tex.meanLuma ?? 0.2, 1e-3) };
+      shader.uniforms.uGroundFar = { value: tex.meanColor ?? new THREE.Color(0.22, 0.19, 0.14) };
       // Far below any geometry disables the damp band without a second shader.
       shader.uniforms.uWater = { value: waterLevel ?? -1e6 };
       shader.uniforms.uTile = { value: 1 / tile };
+      shader.uniforms.uStrata = { value: strata };
 
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', `#include <common>
@@ -724,23 +817,107 @@ vGround = aGround;`);
         .replace('#include <common>', `#include <common>
 varying vec2 vGround;
 uniform float uBaseLuma;
+uniform vec3 uGroundFar;
 uniform float uWater;
-uniform float uTile;`)
+uniform float uTile;
+uniform float uStrata;
+
+float hkHash( vec2 p ) {
+  p = fract( p * vec2( 0.3183099, 0.3678794 ) );
+  p += dot( p, p + 27.71 );
+  return fract( p.x * p.y * 41.31 );
+}
+float hkNoise( vec2 p ) {
+  vec2 i = floor( p ), f = fract( p );
+  f = f * f * ( 3.0 - 2.0 * f );
+  return mix( mix( hkHash( i ), hkHash( i + vec2( 1.0, 0.0 ) ), f.x ),
+              mix( hkHash( i + vec2( 0.0, 1.0 ) ), hkHash( i + vec2( 1.0, 1.0 ) ), f.x ), f.y );
+}`)
         .replace('#include <map_fragment>', `#include <map_fragment>
 float gDist = length( vViewPosition );
 float gWorldY = vGround.x;
 float gOut = vGround.y;          // metres out from the edge of the tarmac
-
-float gMacro = dot( texture2D( map, vMapUv * 0.19 ).rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
-diffuseColor.rgb *= mix( 1.0, gMacro / uBaseLuma, 0.40 );
+vec2  gXZ = vMapUv / uTile;      // world metres; the ground's UV *is* world XZ
 
 // Ground UVs are world XZ, so anything steep is drawn through a badly
-// stretched sample. Re-project the steep parts against height instead.
+// stretched sample. Re-project the steep parts against height instead — before
+// the fade below, because this is still a fine-tile sample and has to be faded
+// on the same schedule as the one it replaces.
 vec3 gUp = normalize( mat3( viewMatrix ) * vec3( 0.0, 1.0, 0.0 ) );
-float gSlope = smoothstep( 0.30, 0.80, 1.0 - abs( dot( normalize( vNormal ), gUp ) ) );
+float gSteep = 1.0 - abs( dot( normalize( vNormal ), gUp ) );
+float gSlope = smoothstep( 0.30, 0.80, gSteep );
 if ( gSlope > 0.001 ) {
   vec2 gWallUv = vec2( vMapUv.x + vMapUv.y, gWorldY * uTile );
   diffuseColor.rgb = mix( diffuseColor.rgb, texture2D( map, gWallUv ).rgb, gSlope );
+}
+
+// How much of the 14 m tile is still worth showing. The road keeps a quarter of
+// its own tile past thirty metres; this keeps a fifth past forty-five, and gets
+// there sooner, because the ground is the flattest and therefore most grazing
+// surface in the frame — a 16 cm grain is under a pixel *along* the view axis
+// long before it is across it. Converging to the tile's own mean before that
+// happens is what a perfect filter would have produced anyway.
+float gFine = 1.0 - smoothstep( 10.0, 52.0, gDist );
+diffuseColor.rgb = mix( uGroundFar, diffuseColor.rgb, 0.20 + 0.80 * gFine );
+
+// Everything from here down is authored in world space at tens of metres, is
+// low-frequency at every distance, and therefore cannot alias however far away
+// it is. That is the whole reason the ground's character lives here and the
+// tile only supplies grain.
+float gMacro = dot( texture2D( map, vMapUv * 0.19 ).rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
+diffuseColor.rgb *= mix( 1.0, gMacro / uBaseLuma, 0.45 );
+
+// Drift sheets: broad tongues of loose material banked over the lie of the
+// land. Three scales — 95 m, 33 m and 13 m — because one is a gradient, two
+// beat against each other, and three read as weather. Past fifty metres this
+// is the only thing left carrying the run-off's shape, so it has to be worth
+// looking at; being world-space and this size it is also the one part of the
+// surface that is provably safe to draw at any distance. Centred on 1.0 so the
+// ground's mean brightness — and with it the frame's exposure — does not move.
+float gDrift = hkNoise( gXZ * 0.0105 + 4.7 ) * 0.40
+             + hkNoise( gXZ * 0.0305 ) * 0.36
+             + hkNoise( gXZ * 0.0770 + 11.3 ) * 0.24;
+diffuseColor.rgb *= mix( 0.87, 1.13, gDrift );
+
+// Wind scour at six metres, dragged along by the drift field so the two read
+// as one weather system rather than two noise fields multiplied together. It
+// is faded on the tile's own schedule and for the tile's own reason: near the
+// kart the run-off needs something with a shape to it or it is a painted ramp,
+// and at range there must be nothing this size left to undersample.
+float gScour = hkNoise( gXZ * 0.17 + vec2( gDrift * 3.0, 0.0 ) );
+diffuseColor.rgb *= mix( 1.0, mix( 0.940, 1.060, gScour ), gFine );
+
+// Sedimentary beds, for the canyon. Real mesa strata are near-horizontal, tilt
+// slowly, and vary in thickness, so the bed coordinate is world height plus a
+// hundred-metre warp; the band's own colour comes from a hash of which bed it
+// is. Held to the parts of the terrain that actually stand up — a plain does
+// not show its bedding — and the seam between two beds is widened in screen
+// space so it can never break into a dotted line at range.
+if ( uStrata > 0.0 ) {
+  // From about nine degrees, because the terrain sheet's outer columns are
+  // tens of metres apart and the mesa faces it draws only reach 35 degrees —
+  // a threshold set for a cliff finds nothing on this circuit at all.
+  float gTilt = smoothstep( 0.012, 0.16, gSteep );
+  // Two sets at three to one: three metre beds inside nine metre formations.
+  // One frequency alone lays down evenly spaced lines and what that draws is a
+  // contour map, which is a worse artefact than the flat gradient it replaces —
+  // bedding only convinces when the beds differ in *thickness*, and two
+  // incommensurate sets is the cheapest way to say so.
+  float gWarp = hkNoise( gXZ * 0.0072 ) * 1.7;
+  float gBed = gWorldY * 0.33 + gWarp;
+  float gFmn = gWorldY * 0.11 + gWarp * 0.34;
+  float gBedF = fract( gBed ), gFmnF = fract( gFmn );
+  // Softened over at least a tenth of a bed, so a bedding plane reads as a
+  // weathered recess rather than as a wire drawn across the hill.
+  float gSeam = ( 1.0 - smoothstep( 0.0, max( 0.11, fwidth( gBedF ) * 1.8 ), min( gBedF, 1.0 - gBedF ) ) ) * 0.45
+              + ( 1.0 - smoothstep( 0.0, max( 0.07, fwidth( gFmnF ) * 1.8 ), min( gFmnF, 1.0 - gFmnF ) ) ) * 0.55;
+  // Rock differs in what it is made of, not only in how bright it is: the
+  // iron-rich formations are redder and the marls paler and greyer, and within
+  // one of them each bed is a shade of the same thing. A pure value ramp reads
+  // as lighting, which is exactly what this exists to replace.
+  vec3 gBand = mix( vec3( 1.14, 0.99, 0.88 ), vec3( 0.86, 0.94, 1.03 ), hkHash( vec2( floor( gFmn ), 0.5 ) ) )
+             * mix( 0.90, 1.10, hkHash( vec2( floor( gBed ), 9.0 ) ) );
+  diffuseColor.rgb *= mix( vec3( 1.0 ), gBand * mix( 1.0, 0.86, gSeam ), uStrata * gTilt );
 }
 
 // Karts leave the circuit here: the first couple of metres are packed flat
@@ -752,58 +929,299 @@ diffuseColor.rgb *= mix( 1.0, 0.76, gEdge );
 float gWet = 1.0 - smoothstep( 0.0, 2.4, gWorldY - uWater );
 diffuseColor.rgb *= mix( vec3( 1.0 ), vec3( 0.60, 0.55, 0.53 ), gWet );`)
         .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
-float gFine = 1.0 - smoothstep( 24.0, 130.0, gDist );
-roughnessFactor = mix( roughnessFactor, 0.99, ( 1.0 - gFine ) * 0.35 );
+// Relief that has fallen off the end of the mip chain still scatters light, so
+// the energy the retired normal used to carry goes here instead.
+roughnessFactor = mix( roughnessFactor, 0.99, ( 1.0 - gFine ) * 0.45 );
 roughnessFactor = mix( roughnessFactor, 1.00, gEdge * 0.40 );
 roughnessFactor = mix( roughnessFactor, 0.30, gWet );
 roughnessFactor = clamp( roughnessFactor, 0.05, 1.0 );`)
         .replace('#include <normal_fragment_maps>', `vec3 gN = texture2D( normalMap, vNormalMapUv ).xyz * 2.0 - 1.0;
 vec3 gM = texture2D( normalMap, vNormalMapUv * 0.19 ).xyz * 2.0 - 1.0;
-// Water fills the ripples in; packed run-off has been flattened by tyres.
+// Water fills the ripples in; packed run-off has been flattened by tyres. The
+// fine term now dies on the same schedule as the albedo above: a normal map is
+// a specular multiplier, and per-pixel specular on a grazing plane is where all
+// of this surface's measured temporal instability actually lived.
 vec2 gNxy = ( gM.xy * 0.55 + gN.xy * gFine ) * mix( 1.0, 0.30, max( gWet, gEdge * 0.7 ) );
 normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
     };
   }
 
+  /**
+   * The barrier: an extruded section with a top cap, plus its posts.
+   *
+   * Both sides are merged into one buffer and the coloured top rail is painted
+   * by the shader onto the cap it belongs to, so this is two draw calls where
+   * it used to be four — and the rail can no longer z-fight the wall it sits
+   * on, because it is no longer a separate surface sitting on it.
+   *
+   * Everything the run needs in order to read as *built* rather than drawn is
+   * split by whether it has a silhouette. Thickness, the cap and its overhang,
+   * and the posts are geometry, because no map produces a silhouette. Panel
+   * joints, per-panel paint, the scuffed kick plate and the grime rising off
+   * the run-off are shader, because they are flat and there are four hundred of
+   * them. Both of those are the same call this file already made for the kerb.
+   */
   _buildBarriers() {
-    const rings = this._roadRings();
     const shoulderW = TRACK_LAYOUT.shoulderWidth;
     const H = TRACK_LAYOUT.wallHeight;
+    const n = Math.max(64, Math.round(this.track.length / WALL_STEP));
+    const m = WALL_PROFILE.length;
 
     const tm = Tex.paintedMetal({ size: 512, tint: 0xf0f2f5 });
     const wallMat = this._mat({
       map: tm.map, normalMap: tm.normalMap, roughnessMap: tm.roughnessMap,
       normalScale: new THREE.Vector2(tm.normalScale, tm.normalScale),
-      metalness: 0.35, roughness: 0.55, envMapIntensity: 0.9, side: THREE.DoubleSide,
+      metalness: 0.35, roughness: 0.55, envMapIntensity: 0.9,
     });
-    const railMat = this._mat({
-      color: this.theme.key === 'coast' ? 0xe2483c : 0xdb8a2a,
-      metalness: 0.5, roughness: 0.34, envMapIntensity: 1.1, side: THREE.DoubleSide,
-    });
+    this._barrierWear(wallMat, this.theme.key === 'coast' ? 0xe2483c : 0xdb8a2a);
+
+    // Distance along the section, so the U axis keeps a roughly square texel
+    // density as the profile wraps over the cap rather than stretching across
+    // whichever segment happens to be longest.
+    const arc = new Float64Array(m);
+    for (let k = 1; k < m; k++) {
+      arc[k] = arc[k - 1] + Math.hypot(
+        WALL_PROFILE[k][0] - WALL_PROFILE[k - 1][0],
+        (WALL_PROFILE[k][1] - WALL_PROFILE[k - 1][1]) * H,
+      );
+    }
+
+    const count = n * m * 2;
+    const positions = new Float32Array(count * 3);
+    const uvs = new Float32Array(count * 2);
+    const aWall = new Float32Array(count * 2);
+    const index = new Uint32Array(n * (m - 1) * 6 * 2);
+    const p = new THREE.Vector3();
+    const edge = new THREE.Vector3();
+    let ptr = 0;
+
+    for (let q = 0; q < 2; q++) {
+      const side = q === 0 ? -1 : 1;
+      const base = q * n * m;
+      for (let i = 0; i < n; i++) {
+        const s = (i / n) * this.track.length;
+        const half = this.track.halfWidthAt(s);
+        // Anchored on the barrier line, not on each profile point's own lateral
+        // position. A corner here banks by up to 0.30 rad, and letting a 52 cm
+        // section ride that bank would tilt the barrier with the road; a real
+        // one is driven vertically into the ground whatever the road does.
+        const footY = this._point(s, side * (half + shoulderW), edge).y - 0.40;
+        for (let k = 0; k < m; k++) {
+          const prof = WALL_PROFILE[k];
+          this._point(s, side * (half + shoulderW + prof[0]), p);
+          const v = base + i * m + k;
+          positions[v * 3] = p.x;
+          positions[v * 3 + 1] = footY + prof[1] * H;
+          positions[v * 3 + 2] = p.z;
+          uvs[v * 2] = arc[k] / 3;
+          uvs[v * 2 + 1] = s / 3;
+          aWall[v * 2] = s;                 // metres round the lap
+          aWall[v * 2 + 1] = prof[1] * H;   // metres above the foot
+        }
+      }
+      // The same rule, and the same reason, as `_strip`: the profile's lateral
+      // runs along `side * right`, so on the negative side the whole section is
+      // generated inside out. The cap is the one segment whose facing is known
+      // in advance — it has to point up — and its lateral span is `side * 0.52`,
+      // so the sign of `side` is the whole test.
+      const flip = side < 0;
+      for (let i = 0; i < n; i++) {
+        const i0 = base + i * m, i1 = base + ((i + 1) % n) * m;
+        for (let k = 0; k < m - 1; k++) {
+          const a = i0 + k, b = i1 + k, c = i1 + k + 1, d = i0 + k + 1;
+          if (flip) {
+            index[ptr++] = a; index[ptr++] = c; index[ptr++] = b;
+            index[ptr++] = a; index[ptr++] = d; index[ptr++] = c;
+          } else {
+            index[ptr++] = a; index[ptr++] = b; index[ptr++] = c;
+            index[ptr++] = a; index[ptr++] = c; index[ptr++] = d;
+          }
+        }
+      }
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    geo.setAttribute('aWall', new THREE.BufferAttribute(aWall, 2));
+    geo.setIndex(new THREE.BufferAttribute(index, 1));
+    geo.computeVertexNormals();
+    geo.computeBoundingSphere();
+    this._add(geo, wallMat, { cast: true, receive: true }).name = 'wall';
+
+    this._buildBarrierPosts(tm, shoulderW, H);
+  }
+
+  /**
+   * Support posts, on a fixed spacing outside the barrier.
+   *
+   * A barrier with no posts is a wall; a barrier with posts is a *structure*,
+   * and on a circuit that turns constantly you are looking at the outside of
+   * one of them for most of a lap. They are cheap — ten triangles each, five
+   * hundred of them, one merged draw call — and they are the only thing here
+   * that gives the run a rhythm you can read your own speed against.
+   */
+  _buildBarrierPosts(tm, shoulderW, H) {
+    const nPost = Math.max(8, Math.round(this.track.length / POST_GAP));
+    const boxes = nPost * 2;
+    const positions = new Float32Array(boxes * 8 * 3);
+    const uvs = new Float32Array(boxes * 8 * 2);
+    // Bottom face omitted: it is buried and no camera in this game can be under
+    // the terrain to see it.
+    const QUADS = [[4, 5, 6, 7], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]];
+    const index = new Uint32Array(boxes * QUADS.length * 6);
+    const p = new THREE.Vector3();
+    const edge = new THREE.Vector3();
+    const c0 = new THREE.Vector3(), c1 = new THREE.Vector3(), c2 = new THREE.Vector3();
+    const nrm = new THREE.Vector3(), out = new THREE.Vector3(), mid = new THREE.Vector3();
+    let vo = 0, io = 0;
 
     for (const side of [-1, 1]) {
-      // Inner face of the barrier — a vertical strip at the run-off edge.
-      const wall = this._strip(
-        rings,
-        (s, half) => side * (half + shoulderW),
-        (s, half) => side * (half + shoulderW),
-        3,
-        (u, s) => [s / 3, u * (H / 3)],
-        (s, lat, u) => -0.40 + u * H,
-      );
-      this._add(wall, wallMat, { cast: true }).name = `wall_${side}`;
-
-      // Colour band along the top rail.
-      const rail = this._strip(
-        rings,
-        (s, half) => side * (half + shoulderW - 0.16),
-        (s, half) => side * (half + shoulderW + 0.16),
-        1,
-        (u, s) => [u, s / 3],
-        () => -0.40 + H,
-      );
-      this._add(rail, railMat, { cast: true }).name = `rail_${side}`;
+      for (let j = 0; j < nPost; j++) {
+        const s = (j / nPost) * this.track.length;
+        const half = this.track.halfWidthAt(s);
+        const footY = this._point(s, side * (half + shoulderW), edge).y - 0.40;
+        const lat0 = half + shoulderW + 0.17, lat1 = lat0 + POST_W;
+        const base = vo;
+        mid.set(0, 0, 0);
+        for (let t = 0; t < 2; t++) {
+          const y = footY + (t === 0 ? POST_BASE : POST_TOP) * H;
+          const corners = [[-1, lat0], [-1, lat1], [1, lat1], [1, lat0]];
+          for (const [ds, lat] of corners) {
+            this._point(s + ds * POST_D * 0.5, side * lat, p);
+            positions[vo * 3] = p.x; positions[vo * 3 + 1] = y; positions[vo * 3 + 2] = p.z;
+            // A small fixed patch of the barrier's own map — a post has no
+            // features of its own worth resolving, only its material.
+            uvs[vo * 2] = 0.1 + (lat - lat0) * 0.5;
+            uvs[vo * 2 + 1] = s / 2;
+            mid.x += p.x; mid.y += y; mid.z += p.z;
+            vo++;
+          }
+        }
+        mid.multiplyScalar(1 / 8);
+        // Winding decided per face against the box's own centre rather than
+        // from a handedness argument. `side` mirrors the local frame, and the
+        // last time this project asserted a winding instead of deriving one it
+        // cost an entire side of every circuit.
+        for (const [a, b, c, d] of QUADS) {
+          c0.fromArray(positions, (base + a) * 3);
+          c1.fromArray(positions, (base + b) * 3);
+          c2.fromArray(positions, (base + c) * 3);
+          nrm.copy(c1).sub(c0).cross(out.copy(c2).sub(c0));
+          out.copy(c0).add(c1).add(c2).multiplyScalar(1 / 3).sub(mid);
+          if (nrm.dot(out) >= 0) {
+            index[io++] = base + a; index[io++] = base + b; index[io++] = base + c;
+            index[io++] = base + a; index[io++] = base + c; index[io++] = base + d;
+          } else {
+            index[io++] = base + a; index[io++] = base + c; index[io++] = base + b;
+            index[io++] = base + a; index[io++] = base + d; index[io++] = base + c;
+          }
+        }
+      }
     }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+    geo.setIndex(new THREE.BufferAttribute(index, 1));
+    geo.computeVertexNormals();
+    geo.computeBoundingSphere();
+    const mat = this._mat({
+      map: tm.map, normalMap: tm.normalMap, roughnessMap: tm.roughnessMap,
+      normalScale: new THREE.Vector2(tm.normalScale, tm.normalScale),
+      // Galvanised steel behind painted panels: darker, glossier, and never the
+      // same value as the thing it holds up, or the posts stop reading at all.
+      color: 0x4e535a, metalness: 0.80, roughness: 0.46, envMapIntensity: 1.0,
+    });
+    // Not shadow casters. Five hundred 20 cm sticks cost a shadow-map redraw and
+    // return a dotted line the cascade cannot resolve at any distance that
+    // matters.
+    this._add(geo, mat, { cast: false, receive: true }).name = 'wallPost';
+  }
+
+  /**
+   * The barrier's history, none of which needs geometry.
+   *
+   * Panels, their joints and their paint are a function of *arc length* — where
+   * the section is on the circuit — and the kick plate and the grime are a
+   * function of height above the foot. Neither is a property of a 3 m tile, so
+   * neither can live in one: the same split that moved the kerb's per-stripe
+   * variety and the road's racing line into road space.
+   */
+  _barrierWear(mat, railHex) {
+    mat.customProgramCacheKey = () => 'hk-barrier';
+    mat.onBeforeCompile = (shader) => {
+      // A *shader uniform* consumed in linear light, unlike the canvas bytes
+      // `paintTint` exists for — so the sRGB decode `new THREE.Color(hex)` does
+      // is the right one here, and skipping it would light the rail nine times
+      // too bright.
+      shader.uniforms.uRail = { value: new THREE.Color(railHex) };
+      shader.uniforms.uGrime = { value: new THREE.Color(this.theme.groundColor ?? 0x8a7a5c) };
+
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', `#include <common>
+attribute vec2 aWall;
+varying vec2 vWall;`)
+        .replace('#include <begin_vertex>', `#include <begin_vertex>
+vWall = aWall;`);
+
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `#include <common>
+varying vec2 vWall;
+uniform vec3 uRail;
+uniform vec3 uGrime;
+
+float hkHash( vec2 p ) {
+  p = fract( p * vec2( 0.3183099, 0.3678794 ) );
+  p += dot( p, p + 27.71 );
+  return fract( p.x * p.y * 41.31 );
+}`)
+        .replace('#include <map_fragment>', `#include <map_fragment>
+float wArc = vWall.x;             // metres round the lap
+float wY   = vWall.y;             // metres above the barrier's foot
+
+// Panel joints. A 2 cm shadow gap is sub-pixel long before it is out of sight,
+// so it is widened in screen space rather than allowed to break into a dotted
+// line — the same treatment the road's cold joints get, and for the same
+// reason. The run wanders slowly so four hundred panels never look ruled off.
+float wPanel = wArc / ${WALL_PANEL.toFixed(1)} + 0.14 * hkHash( vec2( floor( wArc / 137.0 ), 3.0 ) );
+float wF = fract( wPanel );
+float wJointD = min( wF, 1.0 - wF );
+float wJoint = 1.0 - smoothstep( 0.0, max( 0.006, fwidth( wJointD ) * 1.7 ), wJointD );
+float wBatch = hkHash( vec2( floor( wPanel ), 0.5 ) );
+
+// No two panels were painted in the same year.
+diffuseColor.rgb *= mix( 0.93, 1.05, wBatch );
+
+// The cap and its lip take the circuit's trim colour. Painting it here rather
+// than laying a second mesh on the cap is what stopped the trim z-fighting the
+// surface it was supposed to be part of.
+float wCap = smoothstep( 0.885 * ${TRACK_LAYOUT.wallHeight.toFixed(2)}, 0.930 * ${TRACK_LAYOUT.wallHeight.toFixed(2)}, wY );
+diffuseColor.rgb = mix( diffuseColor.rgb, uRail * mix( 0.88, 1.06, wBatch ), wCap );
+
+// The kick plate: the bottom 30 cm is where the debris, the spray and the
+// occasional kart arrive, and it is scuffed back to bare metal in places.
+float wKick = 1.0 - smoothstep( 0.26, 0.34, wY );
+diffuseColor.rgb *= mix( 1.0, 0.74, wKick );
+
+// Grime climbing off the run-off, in the run-off's own colour, and an occlusion
+// darkening in the last hand's width. Between them they are what plants the
+// barrier on the ground instead of leaving it hovering over a hard line.
+float wDirt = ( 1.0 - smoothstep( 0.0, 0.62, wY ) ) * mix( 0.55, 1.0, wBatch );
+diffuseColor.rgb = mix( diffuseColor.rgb, diffuseColor.rgb * 0.72 + uGrime * 0.16, wDirt );
+diffuseColor.rgb *= mix( 1.0, 0.58, 1.0 - smoothstep( 0.0, 0.16, wY ) );
+
+diffuseColor.rgb *= mix( 1.0, 0.34, wJoint );`)
+        .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+// Trim paint on a cap is kept clean; a kick plate is not. Not taken all the
+// way to a gloss: the cap is the one horizontal surface on this object and a
+// 16-degree sun rakes straight along it, so every tenth off the roughness here
+// costs a hundred metres of red flare down the outside of a corner.
+roughnessFactor = mix( roughnessFactor, 0.42, wCap * 0.8 );
+roughnessFactor = mix( roughnessFactor, 0.92, max( wKick * 0.6, wDirt * 0.7 ) );
+roughnessFactor = mix( roughnessFactor, 0.88, wJoint );
+roughnessFactor = clamp( roughnessFactor, 0.05, 1.0 );`);
+    };
   }
 
   _buildVoidEdges() {
@@ -1013,9 +1431,28 @@ normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
     // the braking zone a 32 cm square is under a pixel, so the whole band
     // collapsed into moire and read as a grey mesh laid across the road. The
     // depth is unchanged: this only changes how the strip is divided up.
-    const t = Tex.checker({ size: 512, squares: START_SQUARES });
+    const t = Tex.checker({
+      size: 512,
+      squares: START_SQUARES,
+      edgeLine: START_EDGE / START_DEPTH,
+    });
     t.map.repeat.set(1, 1);
-    const mat = new THREE.MeshStandardMaterial({
+    // Through `_mat`, so this decal carries the circuit's environment probe
+    // like every other surface here. Three only reads
+    // `material.envMapIntensity` when the *material* owns an envMap:
+    //
+    //   if ( material.envMap === null && scene.environment !== null )
+    //     m_uniforms.envMapIntensity.value = scene.environmentIntensity;
+    //
+    // so on a decal built with a bare `new MeshStandardMaterial` the figure
+    // written in the constructor is dead code — `markings` still carries a 0.4
+    // the renderer has never read. Worth correcting, but not the reason this
+    // band was faint: measured, routing it through the probe at 1.0 instead of
+    // the scene's 0.74 moved 0.17% of the frame by exactly 1/255, because the
+    // IBL is not what lights a horizontal surface under this sky. The band was
+    // faint because 80 cm chequers mip to a mid grey; that is fixed above, in
+    // its depth and its edge stripes.
+    const mat = this._mat({
       map: t.map,
       alphaMap: t.alphaMap,
       normalMap: t.normalMap,
@@ -1025,9 +1462,8 @@ normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
       transparent: true,
       depthWrite: false,
       polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
-      envMapIntensity: 0.5,
+      envMapIntensity: 1.0,
     });
-    this.materials.push(mat);
     const s0 = this.track.startS;
     const depth = START_DEPTH;
     const steps = 4;
@@ -1069,6 +1505,79 @@ normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
     geo.setIndex(idx);
     geo.computeVertexNormals();
     this._add(geo, mat, { receive: true, renderOrder: 1 }).name = 'startLine';
+    this._buildStartGrid();
+  }
+
+  /**
+   * The starting grid, painted where the karts are actually placed.
+   *
+   * The opening frame of a kart racer is the one the whole game gets judged by,
+   * and until now that frame was twelve karts sitting on bare tarmac forty
+   * metres short of a chequered band nobody could see. A grid box is the only
+   * mark on a circuit that says *this slot is yours*, and it is what turns a
+   * staggered line of karts into a start.
+   *
+   * The slots come from `Track.startGrid` rather than from a second copy of its
+   * arithmetic, so the paint cannot drift away from the karts if the row gap or
+   * the stagger ever changes. Boxes are painted for the full field size whether
+   * or not this race has one — the alternative is a circuit whose markings
+   * depend on who entered.
+   */
+  _buildStartGrid() {
+    const slots = this.track.startGrid(GRID_SLOTS);
+    const t = Tex.gridBox({
+      size: 256,
+      lineW: GRID_LINE / GRID_BOX_W,
+      barW: GRID_BAR / GRID_BOX_L,
+    });
+    // Through `_mat` for the reason set out on the start line's material: a
+    // decal built with a bare constructor never receives the envMap, and its
+    // `envMapIntensity` is silently replaced by the scene's.
+    const mat = this._mat({
+      map: t.map,
+      alphaMap: t.alphaMap,
+      normalMap: t.normalMap,
+      roughnessMap: t.roughnessMap,
+      normalScale: new THREE.Vector2(t.normalScale, t.normalScale),
+      transparent: true,
+      opacity: 0.94,
+      roughness: 1.0,
+      metalness: 0.0,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+      envMapIntensity: 1.0,
+    });
+
+    // Enough subdivision to follow the road under the box. A grid sits on the
+    // start/finish straight, but "straight" here is a harmonic curve and a 4.6 m
+    // flat quad laid on it lifts its corners off the tarmac.
+    const cols = 3, rows = 5;
+    const parts = [];
+    const p = new THREE.Vector3();
+    for (const slot of slots) {
+      const n = rows + 1, m = cols + 1;
+      const positions = new Float32Array(n * m * 3);
+      const uvs = new Float32Array(n * m * 2);
+      const sBar = slot.s + GRID_BOX_AHEAD;
+      for (let i = 0; i < n; i++) {
+        const f = i / rows;
+        const s = sBar - GRID_BOX_L * (1 - f);
+        for (let j = 0; j < m; j++) {
+          const u = j / cols;
+          this._point(s, slot.lateral + lerp(-GRID_BOX_W * 0.5, GRID_BOX_W * 0.5, u), p);
+          const k = (i * m + j) * 3;
+          positions[k] = p.x; positions[k + 1] = p.y + 0.013; positions[k + 2] = p.z;
+          const tt = (i * m + j) * 2;
+          uvs[tt] = u; uvs[tt + 1] = f;
+        }
+      }
+      parts.push({ positions, uvs, colors: null, n, m });
+    }
+    // Twelve boxes, one material, no animation: twelve draw calls spent on
+    // nothing if they stayed separate. Same reasoning as the boost pads.
+    this._add(mergeStrips(parts), mat, { receive: true, renderOrder: 1 }).name = 'startGrid';
   }
 
   // -- surroundings ---------------------------------------------------------
@@ -1293,6 +1802,9 @@ normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
       tile: 14,
       waterLevel: isCoast && this.theme.water?.enabled ? waterLevel : null,
       cacheKey: 'terrain',
+      // Only the canyon has walls to band. On the coast the far terrain is a
+      // beach going flat into the sea, and strata on a beach is a rock face.
+      strata: isCoast ? 0 : 1,
     });
     this._add(geo, mat, { receive: true }).name = 'terrain';
 
