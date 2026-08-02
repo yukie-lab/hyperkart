@@ -1406,6 +1406,19 @@ const _WHITE = new THREE.Color(0xffffff);
 // do — so the dirty target deliberately sits above 1.
 const _DUST = new THREE.Color(3.4, 2.7, 1.9);
 
+/**
+ * A stable 0..TAU phase from a character id.
+ *
+ * Anything that wants per-instance variation has to get it from something the
+ * simulation already knows, not from Math.random() — otherwise two runs of the
+ * same seed differ, and every visual comparison inherits that noise.
+ */
+function hashPhase(id = '') {
+  let h = 2166136261;
+  for (let i = 0; i < id.length; i++) { h ^= id.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return ((h >>> 0) / 4294967296) * TAU;
+}
+
 export class KartModel {
   constructor(character, opts = {}) {
     this.character = character;
@@ -1596,7 +1609,12 @@ export class KartModel {
 
     this._leanZ = 0;
     this._pitch = 0;
-    this._bob = Math.random() * TAU;
+    // Seeded off the character, not Math.random(). The idle bob only shows on
+    // a stationary kart, which is exactly the start grid — so a random phase
+    // meant every capture of the grid differed from the last for a reason no
+    // reviewer could see or attribute.
+    this._bob = hashPhase(character.id);
+    this._t = 0;
     this._gLat = 0;
     this._gLong = 0;
     this._jolt = 0;
@@ -1776,8 +1794,15 @@ export class KartModel {
     this._updateSurfaces(kart, dt);
 
     // Star power: the whole kart flashes through the rainbow.
+    //
+    // Driven off accumulated dt rather than performance.now(). The wall clock
+    // put the body colour of every starred kart somewhere different on every
+    // run, which is the same defect already removed from ChaseCamera and the
+    // HUD countdown — and it is the last one that survived to make long seeks
+    // non-reproducible.
+    this._t += dt;
     if (kart.star > 0) {
-      const hue = (performance.now() * 0.0012) % 1;
+      const hue = (this._t * 1.2) % 1;
       this.mats.body.emissive.setHSL(hue, 0.9, 0.35);
       this.mats.body.emissiveIntensity = 1.4;
       this.mats.accent.emissive.setHSL((hue + 0.4) % 1, 0.9, 0.35);
