@@ -28,8 +28,10 @@ export class Lighting {
     this.sun.shadow.camera.far = 460;
     this.sun.shadow.bias = -0.0006;
     this.sun.shadow.normalBias = 0.028;
-    this.sun.shadow.blurSamples = 12;
-    this.sun.shadow.radius = 2.2;
+    // No `radius`/`blurSamples` here: both are ignored by PCFShadowMap, which
+    // is what the renderer uses (see Renderer.js for why VSM was rejected).
+    // Leaving them set would read as soft shadows being configured when they
+    // are not, which is how they came to be assumed working in the first place.
     const cam = this.sun.shadow.camera;
     cam.left = -SHADOW_EXTENT; cam.right = SHADOW_EXTENT;
     cam.top = SHADOW_EXTENT; cam.bottom = -SHADOW_EXTENT;

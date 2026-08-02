@@ -40,10 +40,16 @@ export class RenderSystem {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.0;
     this.renderer.shadowMap.enabled = true;
-    // PCFSoftShadowMap is deprecated and three silently substitutes this one,
-    // so asking for it directly is the same picture without the warning. The
-    // softness this project wants comes from the shadow-map resolution being
-    // fitted tightly to the action (see Lighting), not from the filter.
+    // PCF, and deliberately so.
+    //
+    // PCFSoftShadowMap is deprecated and three substitutes this one for it, so
+    // asking for it directly is the same picture without the warning. VSM was
+    // tried — it is the only type that honours `shadow.radius`/`blurSamples` —
+    // and rejected: the road is a large, gently curved surface lit at a
+    // grazing angle, which is close to the worst case for variance shadows.
+    // It came back covered in corduroy acne that no bias setting cleaned up
+    // without also detaching every shadow from its caster. Compared side by
+    // side at one simulation instant, PCF is plainly the better image.
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
     // The composer issues several passes per frame; auto-reset would leave
     // `info` describing only the final fullscreen quad.

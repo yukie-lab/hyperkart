@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { clamp, clamp01, lerp, mod, smoothstep, makeValueNoise2D, fbm2D, TAU } from '../core/MathX.js';
+import { clamp, clamp01, lerp, mod, ringDelta, smoothstep, makeValueNoise2D, fbm2D, TAU } from '../core/MathX.js';
 
 /**
  * Shared toolkit for the scenery layer.
@@ -156,6 +156,259 @@ export class TerrainSampler {
 }
 
 // ---------------------------------------------------------------------------
+// Placement
+// ---------------------------------------------------------------------------
+
+/**
+ * A periodic density field around the lap, in -1..1.
+ *
+ * Every harmonic is an integer number of cycles per lap, so the field is
+ * continuous across the start/finish line. A generic noise would leave a seam
+ * of doubled or missing props exactly at the one place on the circuit the
+ * player looks at three times a race.
+ */
+export function loopField(rng, { cycles = 9, octaves = 3, gain = 0.55 } = {}) {
+  const base = Math.max(1, Math.round(cycles));
+  const terms = [];
+  let norm = 0;
+  for (let i = 0; i < octaves; i++) {
+    const a = Math.pow(gain, i);
+    terms.push({ k: base * Math.pow(2, i), ph: rng() * TAU, a });
+    norm += a;
+  }
+  return (u) => {
+    let v = 0;
+    for (const t of terms) v += Math.sin(u * TAU * t.k + t.ph) * t.a;
+    return v / norm;
+  };
+}
+
+/** Roughly normal-distributed in about [-1.7, 1.7]. Cheaper than Box-Muller. */
+export const gauss = (rng) => (rng() + rng() + rng() - 1.5) * 1.15;
+
+/**
+ * Scatter prop sites along the circuit in drifts.
+ *
+ * Even spacing along the spline is the single most obvious tell of procedural
+ * placement, so nothing here is spaced: a periodic density field decides where
+ * a thicket is allowed to exist at all, sites are rejection-sampled against the
+ * square of that field so they pile into its cores, and each accepted site
+ * spawns a small cluster jittered around it. The result is drifts with real
+ * gaps between them, which is what a photographed roadside looks like.
+ *
+ * Returns `[{ s, lateral, d, side, pos, u, v, w }]` ordered by arc position so
+ * `chunkedInstances` can slice it into spatially compact, cullable chunks.
+ */
+export function scatterAlong(rng, terrain, opts = {}) {
+  const {
+    count = 100,
+    band = [TERRAIN_INNER + 1, 40],
+    sides = [-1, 1],
+    cycles = 9,
+    threshold = -0.1,
+    bias = 2.0,             // exponent on the field; higher = tighter drifts
+    cluster = [1, 1],
+    clusterArc = 9,
+    clusterLat = 5,
+    minGap = 0,
+    depthPow = 1.35,        // >1 pulls the band's mass toward the track
+    accept = null,
+  } = opts;
+
+  const L = terrain.track.length;
+  const fields = new Map();
+  for (const side of sides) fields.set(side, loopField(rng, { cycles }));
+
+  // Spatial hash on arc position only — props are a thin ribbon around a
+  // 1-D curve, so one axis is enough to make the min-distance test O(1).
+  const cellS = Math.max(minGap, 4);
+  const cells = Math.max(1, Math.ceil(L / cellS));
+  const grid = new Map();
+  const tooClose = (s, lateral) => {
+    if (minGap <= 0) return false;
+    const ci = Math.floor(s / cellS);
+    for (let k = -1; k <= 1; k++) {
+      const bucket = grid.get(mod(ci + k, cells));
+      if (!bucket) continue;
+      for (let i = 0; i < bucket.length; i += 2) {
+        const ds = ringDelta(bucket[i], s, L);
+        const dl = bucket[i + 1] - lateral;
+        if (ds * ds + dl * dl < minGap * minGap) return true;
+      }
+    }
+    return false;
+  };
+  const remember = (s, lateral) => {
+    const ci = mod(Math.floor(s / cellS), cells);
+    let b = grid.get(ci);
+    if (!b) grid.set(ci, (b = []));
+    b.push(s, lateral);
+  };
+
+  const out = [];
+  const [cLo, cHi] = cluster;
+  let guard = 0;
+  const budget = count * 90 + 4000;
+
+  while (out.length < count && guard++ < budget) {
+    const side = sides[Math.floor(rng() * sides.length) % sides.length];
+    const s0 = rng() * L;
+    const f = fields.get(side)(s0 / L);
+    if (f <= threshold) continue;
+    const p = (f - threshold) / (1 - threshold);
+    if (rng() > Math.pow(p, bias)) continue;
+
+    const dCentre = lerp(band[0], band[1], Math.pow(rng(), depthPow));
+    const n = cLo + Math.floor(rng() * (cHi - cLo + 1));
+    for (let k = 0; k < n && out.length < count; k++) {
+      const s = mod(s0 + (k === 0 ? 0 : gauss(rng) * clusterArc), L);
+      const d = clamp(dCentre + (k === 0 ? 0 : gauss(rng) * clusterLat), band[0], band[1]);
+      const lateral = side * (terrain.track.halfWidthAt(s) + WALL_OFFSET + d);
+      if (tooClose(s, lateral)) continue;
+      const pos = terrain.place(s, lateral, new THREE.Vector3());
+      const item = { s, lateral, d, side, pos, u: rng(), v: rng(), w: rng() };
+      if (accept && !accept(item)) continue;
+      remember(s, lateral);
+      out.push(item);
+    }
+  }
+
+  out.sort((a, b) => a.s - b.s);
+  return out;
+}
+
+const _tn = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+const _te1 = new THREE.Vector3();
+const _te2 = new THREE.Vector3();
+
+/**
+ * Terrain normal by central differences over the sampler.
+ *
+ * Props are tilted toward this rather than left plumb: a rock standing
+ * perfectly upright on a 20-degree dune is the second-most obvious tell of
+ * procedural placement after even spacing.
+ */
+export function terrainNormal(terrain, s, lateral, out = new THREE.Vector3(), h = 4) {
+  terrain.place(s + h, lateral, _tn[0]);
+  terrain.place(s - h, lateral, _tn[1]);
+  terrain.place(s, lateral + h, _tn[2]);
+  terrain.place(s, lateral - h, _tn[3]);
+  _te1.subVectors(_tn[0], _tn[1]);
+  _te2.subVectors(_tn[2], _tn[3]);
+  out.crossVectors(_te2, _te1).normalize();
+  if (out.y < 0) out.negate();
+  if (!isFinite(out.x)) out.set(0, 1, 0);
+  return out;
+}
+
+const UP = new THREE.Vector3(0, 1, 0);
+const _pq = new THREE.Quaternion();
+const _pq2 = new THREE.Quaternion();
+const _pv = new THREE.Vector3();
+const _paxis = new THREE.Vector3();
+
+/**
+ * Instance transform: slope alignment, then a lean, then yaw.
+ * `align` is a blend so a tree can take a fraction of the slope (trees grow
+ * toward the light, boulders sit flat) rather than an all-or-nothing choice.
+ */
+export function poseMatrix(pos, opts = {}, out = new THREE.Matrix4()) {
+  const { yaw = 0, normal = null, align = 0, lean = 0, leanDir = 0, scale = 1 } = opts;
+  _pq.identity();
+  if (normal && align > 0) {
+    _pq2.setFromUnitVectors(UP, normal);
+    _pq.slerp(_pq2, clamp01(align));
+  }
+  if (lean !== 0) {
+    _paxis.set(Math.cos(leanDir), 0, Math.sin(leanDir));
+    _pq2.setFromAxisAngle(_paxis, lean);
+    _pq.multiply(_pq2);
+  }
+  if (yaw !== 0) {
+    _pq2.setFromAxisAngle(UP, yaw);
+    _pq.multiply(_pq2);
+  }
+  const s = typeof scale === 'number' ? _pv.set(scale, scale, scale) : _pv.set(scale[0], scale[1], scale[2]);
+  return out.compose(pos, _pq, s);
+}
+
+// ---------------------------------------------------------------------------
+// Contact shadows
+// ---------------------------------------------------------------------------
+
+/**
+ * A soft dark disc, falloff baked into vertex colours so it needs no texture
+ * and no alpha sorting — it is multiplied straight onto whatever is behind it.
+ */
+export function blobGeometry(segments = 14) {
+  const positions = [0, 0, 0];
+  const colors = [1, 1, 1];
+  const uvs = [0.5, 0.5];
+  const rings = [[0.0, 0.45], [0.52, 0.62], [1.0, 1.0]];
+  const idx = [];
+  for (const [r, shade] of rings) {
+    if (r === 0) { colors[0] = colors[1] = colors[2] = shade; continue; }
+    for (let j = 0; j <= segments; j++) {
+      const th = (j / segments) * TAU;
+      positions.push(Math.cos(th) * r, 0, Math.sin(th) * r);
+      colors.push(shade, shade, shade);
+      uvs.push(0.5 + Math.cos(th) * 0.5 * r, 0.5 + Math.sin(th) * 0.5 * r);
+    }
+  }
+  const m = segments + 1;
+  for (let j = 0; j < segments; j++) idx.push(0, 1 + j + 1, 1 + j);
+  for (let j = 0; j < segments; j++) {
+    const a = 1 + j, b = 1 + m + j;
+    idx.push(a, b + 1, b, a, a + 1, b + 1);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(positions.map((_, i) => (i % 3 === 1 ? 1 : 0)), 3));
+  geo.setIndex(idx);
+  geo.computeBoundingSphere();
+  return geo;
+}
+
+/**
+ * Multiply-blended ambient occlusion under props.
+ *
+ * The shadow map only covers a box around the player, so anything past ~80 m
+ * has no grounding cue at all and floats. This supplies the ambient-occlusion
+ * half of the contact — the part that exists whether or not the sun is out.
+ * Fog has to be undone by hand: a multiplier faded toward the fog colour is
+ * still a multiplier, so without this the far props stamp hard dark discs onto
+ * a wall of haze.
+ */
+export function blobMaterial(fogDensity = 0) {
+  const mat = new THREE.MeshBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+    blending: THREE.MultiplyBlending,
+    // Three's blend-func table for MultiplyBlending is (ZERO, SRC_COLOR),
+    // which is only correct for premultiplied source; it warns otherwise.
+    premultipliedAlpha: true,
+    depthWrite: false,
+    toneMapped: false,
+    fog: false,
+  });
+  const dens = fogDensity.toFixed(6);
+  mat.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying float vClear;')
+      .replace('#include <project_vertex>', `#include <project_vertex>
+        { float fd = ${dens} * max(-mvPosition.z, 0.0); vClear = 1.0 - exp(-fd * fd); }`);
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying float vClear;')
+      .replace('#include <dithering_fragment>',
+        '#include <dithering_fragment>\ngl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(1.0), vClear);');
+  };
+  mat.customProgramCacheKey = () => `blob${dens}`;
+  return mat;
+}
+
+// ---------------------------------------------------------------------------
 // Geometry assembly
 // ---------------------------------------------------------------------------
 
@@ -171,6 +424,8 @@ export function T(pos = [0, 0, 0], rot = [0, 0, 0], scale = 1) {
 
 /**
  * Merge `[{ geo, color, m }]` into a single vertex-coloured geometry.
+ * Omitting `color` keeps whatever colours the source geometry already carries,
+ * so a part painted by `paintGeometry` can be merged without being flattened.
  * Source geometries are disposed unless `keep` is set — they are throwaway
  * primitives in every call site here.
  */
@@ -197,8 +452,10 @@ export function mergeParts(parts, { keep = false } = {}) {
     const srcN = g.attributes.normal;
     const srcUV = g.attributes.uv;
     if (p.m) nm.getNormalMatrix(p.m);
+    const srcC = p.color === undefined ? g.attributes.color : null;
     col.set(p.color === undefined ? 0xffffff : p.color);
     for (let i = 0; i < src.count; i++) {
+      if (srcC) col.setRGB(srcC.getX(i), srcC.getY(i), srcC.getZ(i));
       v.fromBufferAttribute(src, i);
       if (p.m) v.applyMatrix4(p.m);
       const k = (vOff + i) * 3;
@@ -410,6 +667,140 @@ export function paintGeometry(geo, fn) {
   return geo;
 }
 
+/**
+ * Multiply a merged geometry's vertex colours toward black near its base.
+ *
+ * Every prop here is instanced, so it gets no baked lightmap and no
+ * screen-space AO. Darkening the last half-metre of a trunk or the underside
+ * of a boulder is what stops it reading as a decal pasted onto the ground —
+ * it costs nothing at runtime and it survives being seen from any angle.
+ */
+export function darkenBase(geo, { height = 0.8, amount = 0.42, y0 = 0 } = {}) {
+  const pos = geo.attributes.position;
+  const col = geo.attributes.color;
+  if (!col) return geo;
+  for (let i = 0; i < pos.count; i++) {
+    const k = clamp01((pos.getY(i) - y0) / height);
+    const f = lerp(1 - amount, 1, smoothstep(k));
+    col.setXYZ(i, col.getX(i) * f, col.getY(i) * f, col.getZ(i) * f);
+  }
+  col.needsUpdate = true;
+  return geo;
+}
+
+/**
+ * A grass/scrub tuft: blades splayed out of one point, each a tapered strip
+ * that curves over. Two-sided, so four blades give eight readable silhouettes
+ * for sixteen triangles — the cheapest ground cover that still moves.
+ */
+export function tuftGeometry(rng, { blades = 4, height = 0.8, width = 0.13, segs = 2, spread = 0.55, curl = 0.5 } = {}) {
+  const positions = [], uvs = [], idx = [];
+  for (let b = 0; b < blades; b++) {
+    const th = (b / blades) * TAU + rng() * 0.9;
+    const dx = Math.cos(th), dz = Math.sin(th);
+    const h = height * (0.55 + rng() * 0.75);
+    const lean = spread * (0.5 + rng());
+    const base = positions.length / 3;
+    for (let i = 0; i <= segs; i++) {
+      const t = i / segs;
+      // Rises, then falls away outward — a blade that only rises reads as a spike.
+      const out = h * lean * (t * 0.55 + curl * t * t);
+      const y = h * (t - curl * 0.42 * t * t);
+      const w = width * (1 - t * 0.92);
+      positions.push(dx * out - dz * w, y, dz * out + dx * w); uvs.push(0, t);
+      positions.push(dx * out + dz * w, y, dz * out - dx * w); uvs.push(1, t);
+    }
+    for (let i = 0; i < segs; i++) {
+      const a = base + i * 2;
+      idx.push(a, a + 1, a + 3, a, a + 3, a + 2);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+/** A shrub: two or three squashed deformed spheres, which reads as foliage mass. */
+export function blobClusterGeometry(rng, { lobes = 3, detail = 0, spread = 0.5, squash = 0.72 } = {}) {
+  const parts = [];
+  for (let i = 0; i < lobes; i++) {
+    const r = 0.55 + rng() * 0.5;
+    const th = rng() * TAU;
+    const rad = i === 0 ? 0 : spread * (0.4 + rng());
+    parts.push({
+      geo: rockGeometry(rng, { detail, rough: 0.30, squash }),
+      color: 0xffffff,
+      m: T([Math.cos(th) * rad, r * 0.55 + rng() * 0.18, Math.sin(th) * rad], [0, rng() * TAU, 0], r),
+    });
+  }
+  return mergeParts(parts);
+}
+
+/**
+ * A spectator: tapered body, ball head, and optionally raised arms.
+ * Deliberately crude — at grandstand distance a crowd is a shimmering colour
+ * field, and the only two things that read are silhouette variety and motion.
+ */
+export function personGeometry(rng, { armsUp = false, skin = 0xe8c6a8 } = {}) {
+  // One unit tall from sole to crown, so a caller scales by the height it
+  // wants in metres. Proportions matter more than detail: at any distance a
+  // figure that is too wide for its height reads as a bollard, not a person.
+  // Hips narrower than shoulders, in one five-sided sweep. A straight cylinder
+  // at human proportions reads as a candle, and the taper is most of what
+  // makes it read as a torso — but a grandstand holds a thousand of these, so
+  // it buys that silhouette in one sweep and an octahedron head, not four
+  // primitives. Under forty triangles each.
+  const parts = [
+    {
+      geo: sweepStack([
+        { p: new THREE.Vector3(0, 0.02, 0), r: 0.115 },
+        { p: new THREE.Vector3(0, 0.46, 0), r: 0.168 },
+        { p: new THREE.Vector3(0, 0.76, 0), r: 0.130 },
+      ], 5, { capStart: true, capEnd: true }),
+      color: 0xffffff,
+    },
+    { geo: new THREE.OctahedronGeometry(0.115, 0), color: skin, m: T([0, 0.89, 0], [0, 0.4, 0], [1, 0.9, 1]) },
+  ];
+  if (armsUp) {
+    for (const s of [-1, 1]) {
+      parts.push({
+        geo: columnGeometry(0.32, 0.045, 0.036, { segs: 1, sides: 3, curve: 1 }),
+        color: skin,
+        m: T([s * 0.15, 0.50, 0], [0, 0, s * -0.34]),
+      });
+    }
+  }
+  return mergeParts(parts);
+}
+
+/**
+ * A pennant/flag along +X, subdivided so `applyFlag` has something to wave.
+ * Built as a single-sided sheet rendered DoubleSide — a flag with thickness is
+ * geometry spent on something nobody can see.
+ */
+export function pennantGeometry(span = 1.6, drop = 0.9, { segs = 6, taper = 0.45 } = {}) {
+  const positions = [], uvs = [], idx = [];
+  for (let i = 0; i <= segs; i++) {
+    const t = i / segs;
+    const hh = drop * lerp(1, taper, t);
+    positions.push(span * t, 0, 0); uvs.push(t, 1);
+    positions.push(span * t, -hh, 0); uvs.push(t, 0);
+  }
+  for (let i = 0; i < segs; i++) {
+    const a = i * 2;
+    idx.push(a, a + 1, a + 3, a, a + 3, a + 2);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  return geo;
+}
+
 // ---------------------------------------------------------------------------
 // Materials & shader animation
 // ---------------------------------------------------------------------------
@@ -501,6 +892,21 @@ export function applyFlap(mat, { amp = 0.55, freq = 7.0 } = {}) {
     ${INSTANCE_ORIGIN}
     float f = sin(uTime * ${freq.toFixed(2)} + iPhase * 5.0);
     transformed.y += abs(transformed.x) * f * ${amp.toFixed(3)};
+  `);
+}
+
+/**
+ * Flags and banners: a travelling wave whose amplitude grows away from the
+ * hoist, so the fixed edge stays pinned to its pole instead of swimming.
+ */
+export function applyFlag(mat, { amp = 0.3, freq = 3.2, span = 1.6 } = {}) {
+  return inject(mat, `|flag${amp}${freq}${span}`, '', `
+    ${INSTANCE_ORIGIN}
+    float ft = clamp(transformed.x / ${span.toFixed(3)}, 0.0, 1.0);
+    float fw = sin(uTime * ${freq.toFixed(3)} + iPhase * 4.1 - ft * 6.2);
+    transformed.z += fw * ${amp.toFixed(3)} * ft * ft;
+    transformed.y += cos(uTime * ${(freq * 0.77).toFixed(3)} + iPhase * 2.7 - ft * 4.4)
+                   * ${(amp * 0.30).toFixed(3)} * ft;
   `);
 }
 
