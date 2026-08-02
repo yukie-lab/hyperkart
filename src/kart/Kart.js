@@ -51,6 +51,8 @@ export class Kart {
     this.boostStrength = 0;
     this.boostActive = false;
     this.boostKind = null;
+    // Rising-edge latch for boost-pad contact — see the surface block in `update`.
+    this._onPad = false;
 
     this.trick = { armed: false, playing: false, t: 0, kind: 0 };
     this.draft = { t: 0, active: false };
@@ -113,6 +115,7 @@ export class Kart {
     this.lap = 0;
     this.finished = false;
     this.boosts.length = 0;
+    this._onPad = false;
     this.drift.active = false;
     this.drift.charge = 0;
     this.drift.stage = -1;
@@ -184,6 +187,10 @@ export class Kart {
     this.speed = 0;
     this.vy = 0;
     this.boosts.length = 0;
+    // `update` early-returns while respawning, so the pad latch would otherwise
+    // stay stuck at whatever it was when the kart left the road and swallow the
+    // first pad it is dropped onto.
+    this._onPad = false;
     this.drift.active = false;
     this.drift.charge = 0;
     this.onRespawn?.();
@@ -244,9 +251,17 @@ export class Kart {
 
     // Surface -------------------------------------------------------------
     this.surface = this.grounded ? g.surface : SURFACE.ROAD;
-    if (this.grounded && g.surface === SURFACE.BOOST) {
-      if (this.boostKind !== 'pad' || !this.boostActive) this.applyBoost('pad');
-    }
+    // A pad grants on contact, not once per frame of contact. The guard here
+    // used to ask whether the *strongest* live boost was the pad, which is a
+    // different question: `boostKind` reports the winner of `_updateSpeed`'s
+    // resolve, so any stronger boost — a purple mini-turbo at 0.52, a mushroom,
+    // a bullet — hid the pad and let it re-fire every step. One crossing then
+    // produced ~55 stacked entries, ~55 `onBoostStart` callbacks at 120 Hz, and
+    // an O(n) resolve over an array that only grew. Edge-detecting the contact
+    // itself cannot be fooled by what else is running.
+    const onPad = this.grounded && g.surface === SURFACE.BOOST;
+    if (onPad && !this._onPad) this.applyBoost('pad');
+    this._onPad = onPad;
 
     // Drift ---------------------------------------------------------------
     this._updateDrift(dt, ctrl, g);

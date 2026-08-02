@@ -800,7 +800,8 @@ export class ItemSystem {
         if (k.pos.distanceToSquared(p.mesh.position) > 2.4 * 2.4) continue;
         if (k.star > 0 || k.invuln > 0) { continue; }
         if (k.spinout(p.type === 'redShell' ? 1.35 : 1.15, p.type)) {
-          this.events.push({ type: 'hit', kart: k, by: p.type, pos: k.pos.clone() });
+          // No `hit` event here: `spinout` already raised one through the kart,
+          // carrying the same cause. See `Race._wireEvents`.
           hit = true;
           break;
         }
@@ -836,7 +837,7 @@ export class ItemSystem {
         if (k.star > 0 || k.invuln > 0) continue;
         if (k.pos.distanceToSquared(h.mesh.position) > 2.0 * 2.0) continue;
         if (k.spinout(1.0, 'banana')) {
-          this.events.push({ type: 'hit', kart: k, by: 'banana', pos: k.pos.clone() });
+          // `spinout` raised the `hit` event already — see `Race._wireEvents`.
           this.fx?.burst(h.mesh.position, 0xf5d02a, {
             count: 20, speed: 7, size: 0.5, life: 0.5, alpha: 0.8, ring: 1.1, gravity: 12,
           });

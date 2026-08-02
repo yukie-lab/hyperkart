@@ -190,7 +190,12 @@ function handleEvents(events) {
         break;
       case 'hit':
         if (e.kart === race.player) { shakeImpulse = 0.55; hitFlash = 1; }
-        race.fx.impact(e.kart.pos, e.by === 'banana' ? 0xf5d02a : 0xff7744, 30);
+        // `e.cause` is the one key every hit carries — this used to read `e.by`,
+        // which only the item system's (now removed) duplicate event set, so the
+        // banana branch was unreachable and every hit came out orange. The cause
+        // goes to the FX layer too: a peel, a shell and a thunder are three
+        // different events and should not share one burst.
+        race.fx.impact(e.kart.pos, e.cause === 'banana' ? 0xf5d02a : 0xff7744, 30, e.cause);
         break;
       case 'wallHit':
         if (e.kart === race.player) shakeImpulse = Math.min(0.5, e.force * 0.5);
@@ -211,8 +216,8 @@ function handleEvents(events) {
       case 'finish':
         if (e.kart === race.player) hud.toast(`FINISH — ${e.place}${ordinalSuffix(e.place)}`, '#ffd75e');
         break;
-      case 'itemGet':
-        break;
+      // `itemGet` has no case: the HUD locks the slot off its own state diff in
+      // `HUD.update`, and `audio.handleEvent` above sees every event regardless.
     }
   }
 }

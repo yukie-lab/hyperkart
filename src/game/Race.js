@@ -103,7 +103,12 @@ export class Race {
   }
 
   _wireEvents(kart) {
-    kart.onHit = (kind) => this.events.push({ type: 'hit', kart, kind });
+    // The kart is the sole producer of hit events. Every cause funnels through
+    // `spinout`/`flatten` — shells and bananas from the item system, star rams
+    // from `_resolveKartCollisions`, thunder from `flatten` — so anything that
+    // pushes its own alongside this one double-reports the same collision, and
+    // the two payloads then disagree about which key names the cause.
+    kart.onHit = (cause) => this.events.push({ type: 'hit', kart, cause });
     kart.onBoostStart = (kind, stage) => this.events.push({ type: 'boost', kart, kind, stage });
     kart.onDriftStage = (stage) => this.events.push({ type: 'driftStage', kart, stage });
     kart.onHop = () => this.events.push({ type: 'hop', kart });
