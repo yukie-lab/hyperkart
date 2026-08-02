@@ -189,16 +189,36 @@ function meanLinearColor(canvasEl) {
  * Macro-scale storytelling — racing line, patch repairs, kerb grime — is not
  * baked here on purpose: it belongs in road space, not in a 6 m tile that
  * repeats five times a second at racing speed. TrackBuilder layers it on.
+ *
+ * What this pass changed, and why, measured rather than guessed. Two captures
+ * one 8.3 ms simulation step apart, karts and particles hidden, on a band of
+ * tarmac 30-45 m out where 25 cm of travel is well under a pixel: 76% of those
+ * pixels moved by more than 4/255 and 21% by more than 16/255, against 30% and
+ * 2.4% for the sky. Nulling the roughness map changed nothing. Nulling the
+ * *normal* map took it to 37% and 0.9% — sky level. All of it was here, and
+ * nearly all of that was the crack field: ridged noise raised to the ninth
+ * power leaves crests one or two texels wide, and a one-texel ridge in a height
+ * map is a normal spike that no mip chain and no anisotropic tap count can
+ * average away. It also read, at 2x, as a crazed reptile-skin net over the
+ * whole surface — the "crumb noise with irregular dark blotches" in the review.
+ * So the fissures are now broad and sparse, they carry a fifth of the relief
+ * they did, and the aggregate is graded so the read at distance comes from the
+ * binder rather than from the chippings.
  */
 export function asphalt({ size = 1024, seed = 7, tint = 0x3a3d44 } = {}) {
   const key = `asphalt_${size}_${seed}_${tint}`;
   if (_textureCache.has(key)) return _textureCache.get(key);
 
-  // Three scales, in texels of the 6 m road tile: ~2 cm grain, ~40 cm binder
-  // mottling, ~20 cm crack cells that fbm grows into metre-long fissures.
+  // Four scales, in texels of the 6 m road tile: ~2 cm grain, ~40 cm binder
+  // mottling, ~75 cm crack cells that fbm grows into long single fissures
+  // rather than a net, and the paver's screed streak along the direction of
+  // travel. That last one matters out of proportion to its amplitude: it is the
+  // only thing in the tile with a *direction*, and a road surface whose grain
+  // runs across it reads as concrete slab, not as laid asphalt.
   const grainN = tiling(seed, size, 4);
   const binderN = tiling(seed + 91, size, 64);
-  const crackN = tiling(seed + 311, size, 32);
+  const crackN = tiling(seed + 311, size, 128);
+  const screedN = tiling(seed + 419, size, 48);
   const rng = makeRng(seed + 5);
 
   // Jittered-grid aggregate at ~3.5 cm on the 6 m road tile. Real chippings are
@@ -251,21 +271,31 @@ export function asphalt({ size = 1024, seed = 7, tint = 0x3a3d44 } = {}) {
   const crackBuf = new Float32Array(size * size);
   const binderBuf = new Float32Array(size * size);
   const grainBuf = new Float32Array(size * size);
+  const screedBuf = new Float32Array(size * size);
   for (let y = 0; y < size; y++) {
     for (let x = 0; x < size; x++) {
       const i = y * size + x;
-      // Ridged noise raised to a high power leaves only the thin crests, which
-      // read as the hairline shrinkage cracks tarmac develops as it ages.
-      const ridge = 1 - Math.abs(fbm2D(crackN.n, x / crackN.k, y / crackN.k, 3) * 2 - 1);
-      const crack = Math.pow(clamp01(ridge), 9);
+      // Two octaves on a 75 cm cell, and a fifth power rather than a ninth.
+      // That widens each crest from one or two texels to eight or ten — above
+      // the Nyquist limit of the mips this surface is actually drawn at — and
+      // leaves a handful of long fissures instead of a net over every square
+      // metre. The net was the single loudest thing on the road.
+      const ridge = 1 - Math.abs(fbm2D(crackN.n, x / crackN.k, y / crackN.k, 2) * 2 - 1);
+      const crack = Math.pow(clamp01(ridge), 5);
       const binder = fbm2D(binderN.n, x / binderN.k, y / binderN.k, 3);
       const grain = fbm2D(grainN.n, x / grainN.k, y / grainN.k, 2);
+      // Stretched four to one along V, which is the direction of travel: the
+      // screed drags the mix as the paver moves, and that is why a real road
+      // has a grain running down it.
+      const screed = fbm2D(screedN.n, x / screedN.k, y / (screedN.k * 4), 3);
       crackBuf[i] = crack;
       binderBuf[i] = binder;
       grainBuf[i] = grain;
+      screedBuf[i] = screed;
       // Stones dominate the relief; the grain contributes barely enough to
-      // break the stone silhouettes without becoming a normal-map carpet.
-      height[i] = cov[i] * 0.70 + grain * 0.14 + binder * 0.10 - crack * 0.32 + 0.10;
+      // break the stone silhouettes without becoming a normal-map carpet, and
+      // the cracks now barely dent it at all.
+      height[i] = cov[i] * 0.58 + grain * 0.12 + binder * 0.12 + screed * 0.08 - crack * 0.10 + 0.12;
     }
   }
 
@@ -276,13 +306,20 @@ export function asphalt({ size = 1024, seed = 7, tint = 0x3a3d44 } = {}) {
     // Bitumen mottling is the *visible* texture of tarmac at any distance you
     // actually drive it from: 40 cm patches where the binder pooled richer or
     // leaner during laying. It has to carry the read, because it is the only
-    // scale here that survives two mip levels intact.
-    const binderL = lerp(0.89, 1.06, binderBuf[i]) * lerp(0.97, 1.03, grainBuf[i]);
-    // Per-stone albedo lottery, held to a whisper — the stones are relief, not
-    // spots. A wide spread here is what turned the road into pebbledash.
-    const stoneL = binderL * lerp(0.95, 1.14, Math.pow(who[i], 1.25));
+    // scale here that survives two mip levels intact — so it is now given the
+    // range the cracks used to take.
+    const binderL = lerp(0.90, 1.07, binderBuf[i]) * lerp(0.97, 1.03, grainBuf[i])
+      * lerp(0.965, 1.035, screedBuf[i]);
+    // Per-stone albedo lottery. This used to be held to a whisper on the theory
+    // that a wide spread turns the road into pebbledash — true when the stones
+    // also carried most of the relief, but the relief has since been cut by a
+    // third and the tile now fades to its own mean before the stones can alias.
+    // Which leaves albedo as the only place graded aggregate can show at all,
+    // and a road with no visible chippings at two metres is the other half of
+    // "one crumb noise".
+    const stoneL = binderL * lerp(0.90, 1.22, Math.pow(who[i], 1.25));
     let l = lerp(binderL, stoneL, smoothstep(c));
-    l *= 1 - crackBuf[i] * 0.34;
+    l *= 1 - crackBuf[i] * 0.20;
     // Stones scatter more short-wavelength light than the binder they sit in,
     // so the aggregate reads a touch cooler as it gets lighter. Kept small:
     // enough of this and tarmac turns navy the moment the sun drops.
@@ -305,13 +342,19 @@ export function asphalt({ size = 1024, seed = 7, tint = 0x3a3d44 } = {}) {
 
   const result = {
     map: makeTexture(mapC, { srgb: true }),
-    // Deliberately gentle. Tarmac relief is millimetres; drive it harder and a
-    // low sun rakes the chippings into a sandpaper glare that reads as gravel.
-    normalMap: makeTexture(heightToNormal(height, size, 1.8)),
+    // Deliberately gentle, and gentler than it was. Tarmac relief is
+    // millimetres; drive it harder and a low sun rakes the chippings into a
+    // sandpaper glare that reads as gravel — and, measurably, into per-pixel
+    // specular that is 100% of this surface's temporal instability.
+    normalMap: makeTexture(heightToNormal(height, size, 1.35)),
     roughnessMap: makeTexture(roughC),
-    normalScale: 0.44,
+    normalScale: 0.34,
     // Pivot for the second-scale sample TrackBuilder layers on; see meanLinearLuma.
     meanLuma: meanLinearLuma(mapC),
+    // What the tile converges to under minification, and therefore what it has
+    // to be faded towards before its features drop under a pixel. Same fix, and
+    // the same reasoning, as the kerb's.
+    meanColor: meanLinearColor(mapC),
   };
   _textureCache.set(key, result);
   return result;

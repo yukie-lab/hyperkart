@@ -16,15 +16,50 @@ const ROAD_COLS = 10;         // subdivisions across the driving surface
 const TERRAIN_STEP = 6.4;     // terrain rings are coarser than road rings
 const TERRAIN_COLS = 22;
 const TERRAIN_REACH = 260;    // how far the surrounding land extends
+// How much of the distance from the barrier to a corner's centre of curvature
+// the offset grid may use. At 1.0 the innermost column lands exactly on the
+// centre and every quad around it is degenerate; past 1.0 the surface passes
+// through the centre, the winding inverts, the triangles are back-face culled
+// and the run-off simply stops in mid-air. This is the whole of that bug.
+const FOLD_SAFETY = 0.86;
+// Metres of clearance the innermost column keeps from that centre regardless.
+const FOLD_CLEAR = 4;
+// Metres the terrain's first column tucks *under* the run-off, on top of the
+// per-ring chord allowance computed in `fitCorner`. The two surfaces are built
+// at different arc resolutions, so they can only be joined by overlapping them.
+const TERRAIN_LAP = 0.5;
+// How far below the run-off's outer lip that tucked-under column sits. Big
+// enough that the terrain's 6.4 m chord can never rise through the run-off's
+// 1.6 m one, small enough to disappear behind a 1.6 m barrier.
+const TERRAIN_SILL = 0.20;
+// Rings of erosion-then-blur applied to the reach. Five rings is 32 m of arc,
+// which is enough to bring the outer columns' sideways travel per ring under
+// the ring spacing itself.
+const REACH_SMOOTH = 5;
+// The infield cap: a world-space grid, its cell size, and how far it is sunk
+// below the road-space sheets so those win wherever they exist. 9 m is about
+// the largest cell that still resolves the dune field it has to match.
+const CAP_CELL = 9;
+const CAP_SINK = 0.22;
+// How far past the circuit's own bounding box the cap is generated. Only the
+// *inside* of corners is ever short of ground — the outside always gets the
+// full reach — so this only has to cover a hairpin's infield.
+const CAP_MARGIN = 150;
 const CURB_COLS = 6;          // enough columns to shape a crown and an outer lip
 // Metres of kerb per texture tile, and stripes per tile. The product is the
-// stripe length, which stays at the 1 m every circuit uses; splitting it this
-// way is what makes the tile's texel density nearly square in world space.
-// See the note on `Tex.curb` — an 8 m tile put the sampling footprint's long
-// axis across the kerb, where there is nothing to resolve, and that is what
-// made the stripes crawl.
+// stripe length; splitting it this way is what makes the tile's texel density
+// nearly square in world space. See the note on `Tex.curb` — an 8 m tile put
+// the sampling footprint's long axis across the kerb, where there is nothing to
+// resolve, and that is what made the stripes crawl.
+//
+// Two stripes to a 2 m tile made them a metre long on a strip 1.35 m wide, so
+// each block was very nearly square and the kerb read as a barber's pole
+// sixty pixels across — loud enough, at speed, to pull the eye off the racing
+// line it is supposed to frame. Real rumble strips, and every kart game that
+// has ever shipped, run half-metre blocks: three to one against the kerb's own
+// width, which is what makes them read as a *rhythm* rather than as chequers.
 const CURB_TILE = 2;
-const CURB_STRIPES = 2;
+const CURB_STRIPES = 4;
 
 // -- boost strips ------------------------------------------------------------
 // Metres of road per chevron. At 3 m a 12 m pad carries four arrows, which is
@@ -143,10 +178,25 @@ export class TrackMesh {
    *        Optional custom vertex attribute. Surfaces that need to know where
    *        they sit *on the circuit* (rather than in tile space) get it here —
    *        macro wear has to live in road space or it repeats with the tile.
+   * @param {{facing?:'up'|'down'}} [opts] Which way the finished surface faces.
    */
-  _strip(sList, latA, latB, cols, uvFn, yOffset = null, extra = null) {
+  _strip(sList, latA, latB, cols, uvFn, yOffset = null, extra = null, opts = {}) {
     const n = sList.length;
     const m = cols + 1;
+    // Which way the triangles come out depends on whether `u` runs along +right
+    // or -right, and every strip on this circuit is built twice — once per side
+    // — with `lat = side * something`. So on the negative side `u` runs
+    // backwards and the whole surface is generated inside out. Both the left
+    // kerb and the *entire left run-off* were built that way and were being
+    // back-face culled: measured 0 of 7104 shoulder triangles facing up, which
+    // is why hiding them changed nothing a critic could attribute and why the
+    // kerb at sunsetCoast photographed as a ribbon of zero thickness with open
+    // sea on both sides. There was no ground beside it, on that side, anywhere.
+    const h0 = this.track.halfWidthAt(sList[0]);
+    // A strip with no lateral span at all is the barrier: vertical, two-sided,
+    // and with no "up" to get wrong. Left exactly as it was.
+    const span = latB(sList[0], h0) - latA(sList[0], h0);
+    const flip = span !== 0 && (span > 0) !== (opts.facing !== 'down');
     const positions = new Float32Array(n * m * 3);
     const uvs = new Float32Array(n * m * 2);
     const extras = extra ? new Float32Array(n * m * extra.size) : null;
@@ -163,7 +213,7 @@ export class TrackMesh {
         if (yOffset) p.y += yOffset(s, lat, u);
         const k = (i * m + j) * 3;
         positions[k] = p.x; positions[k + 1] = p.y; positions[k + 2] = p.z;
-        const [uu, vv] = uvFn(u, s, lat, half);
+        const [uu, vv] = uvFn(u, s, lat, half, p);
         const t = (i * m + j) * 2;
         uvs[t] = uu; uvs[t + 1] = vv;
         if (extras) {
@@ -178,8 +228,14 @@ export class TrackMesh {
     for (let i = 0; i < n; i++) {
       const i0 = i * m, i1 = ((i + 1) % n) * m;
       for (let j = 0; j < cols; j++) {
-        indices[ptr++] = i0 + j; indices[ptr++] = i1 + j; indices[ptr++] = i1 + j + 1;
-        indices[ptr++] = i0 + j; indices[ptr++] = i1 + j + 1; indices[ptr++] = i0 + j + 1;
+        const a = i0 + j, b = i1 + j, c = i1 + j + 1, d = i0 + j + 1;
+        if (flip) {
+          indices[ptr++] = a; indices[ptr++] = c; indices[ptr++] = b;
+          indices[ptr++] = a; indices[ptr++] = d; indices[ptr++] = c;
+        } else {
+          indices[ptr++] = a; indices[ptr++] = b; indices[ptr++] = c;
+          indices[ptr++] = a; indices[ptr++] = c; indices[ptr++] = d;
+        }
       }
     }
 
@@ -306,6 +362,7 @@ export class TrackMesh {
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uBaseLuma = { value: Math.max(tex.meanLuma ?? 0.05, 1e-3) };
       shader.uniforms.uGrime = { value: grime };
+      shader.uniforms.uRoadFar = { value: tex.meanColor ?? new THREE.Color(0.07, 0.07, 0.08) };
 
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', `#include <common>
@@ -319,6 +376,7 @@ vRoad = aRoad;`);
 varying vec3 vRoad;
 uniform float uBaseLuma;
 uniform vec3 uGrime;
+uniform vec3 uRoadFar;
 
 float hkHash( vec2 p ) {
   p = fract( p * vec2( 0.3183099, 0.3678794 ) );
@@ -337,23 +395,25 @@ float rLane = vRoad.x;            // -1 at the left kerb, +1 at the right
 float rArc  = vRoad.y;            // metres travelled along the lap
 float rLat  = vRoad.z;            // metres from the crown
 
-// Rubber only lays down where the cars actually drive, and that band wanders
-// across the road with the corners instead of sitting dead centre.
-float rLineC  = 0.30 * sin( rArc * 0.0295 ) + 0.16 * sin( rArc * 0.0113 + 1.9 );
-float rRacing = 1.0 - smoothstep( 0.16, 0.72, abs( rLane - rLineC ) );
-rRacing *= 0.70 + 0.30 * hkNoise( vec2( rArc * 0.05, 0.0 ) );
-
-// The last metre before the kerb never gets driven on: bleached, open
-// aggregate, with dust and marbles swept into the very edge. Kept to the
-// last metre — any wider and it reads as a concrete gutter, not as wear.
-float rEdge  = smoothstep( 0.76, 1.0, abs( rLane ) );
-float rDirt  = smoothstep( 0.86, 1.0, abs( rLane ) );
+// How much of the 6 m tile is still worth showing. A 3.5 cm chipping is worth
+// about a pixel at thirty metres, and a pattern crossing that line at full
+// contrast is what boiling *is* — measured at 21% of far-road pixels swinging
+// past 16/255 in one 8.3 ms step, against 2.4% for the sky. Converging to the
+// tile's own mean before it gets there is what a perfect filter would have
+// produced anyway. A quarter of the tile is left in: two mips down it is
+// already smooth, and taking it to nothing turns the far road into a plane.
+// Everything below this point is authored in *road* space and is
+// low-frequency in world space, so none of it can alias however far away it is
+// — which is the whole reason the storytelling lives here and not in the tile.
+float rFine = 1.0 - smoothstep( 4.0, 30.0, rDist );
+diffuseColor.rgb = mix( uRoadFar, diffuseColor.rgb, 0.26 + 0.74 * rFine );
 
 // Resurfacing patches, as a warped cell grid so the repairs come out as
 // irregular quads with tarred seams rather than a checkerboard.
 vec2 rCell = vec2( rLat, rArc ) / 13.0;
 rCell += ( vec2( hkNoise( rCell * 1.7 ), hkNoise( rCell * 1.7 + 5.3 ) ) - 0.5 ) * 0.7;
-float rPatch = step( 0.70, hkHash( floor( rCell ) + 0.5 ) );
+vec2 rCellId = floor( rCell ) + 0.5;
+float rPatch = step( 0.68, hkHash( rCellId ) );
 vec2 rF = fract( rCell );
 float rSeamD = min( min( rF.x, 1.0 - rF.x ), min( rF.y, 1.0 - rF.y ) );
 // A 15 cm seam is sub-pixel well before it is out of sight, so widen it in
@@ -363,32 +423,78 @@ rPatch *= smoothstep( 0.0, 0.05, rSeamD );
 
 // Second sample of the same tile six times larger, pivoted on the tile's own
 // mean so it adds 35 m of tonal drift without moving the road's brightness.
-float rMacro = dot( texture2D( map, vMapUv * 0.17 ).rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
-diffuseColor.rgb *= mix( 1.0, rMacro / uBaseLuma, 0.34 );
+// A repair is a different batch of asphalt, not the same batch a shade darker,
+// so inside a patch that large sample is taken from somewhere else entirely —
+// which is what makes a seam read as two surfaces meeting rather than as a
+// line drawn on one.
+vec2 rMacroUv = vMapUv * 0.17
+  + rPatch * ( vec2( hkHash( rCellId + 11.0 ), hkHash( rCellId + 23.0 ) ) - 0.5 ) * 2.6;
+// Held to half of what it was. At full strength this is a cloud field metres
+// across with no cause behind it — the "irregular dark blotches" of the
+// review — and cloud with no cause is the oldest procedural-texture tell there
+// is. Large-scale tone on a circuit comes from things that *happened* to it,
+// which is what everything below this line is.
+float rMacro = dot( texture2D( map, rMacroUv ).rgb, vec3( 0.2126, 0.7152, 0.0722 ) );
+diffuseColor.rgb *= mix( 1.0, rMacro / uBaseLuma, 0.17 );
 
-diffuseColor.rgb *= mix( 1.0, 0.74, rRacing );
-diffuseColor.rgb *= mix( 1.0, 1.12, rEdge );
-diffuseColor.rgb  = mix( diffuseColor.rgb, diffuseColor.rgb * 0.94 + uGrime * 0.055, rDirt );
+// The circuit was laid in screeds a paver wide. Every joint between two of them
+// is a cold joint that has opened a little and collected dirt, and it runs
+// *along* the road — the one direction almost nothing else on this surface
+// runs in, and the reason tyre wear on a real circuit never reads as crosswise
+// noise. The lane boundaries wander slowly so they never look ruled.
+float rScreed = rLat / 3.6 + 0.22 * hkNoise( vec2( rArc * 0.012, 0.0 ) );
+float rScreedF = fract( rScreed );
+float rJointD = min( rScreedF, 1.0 - rScreedF );
+float rJoint = 1.0 - smoothstep( 0.0, max( 0.014, fwidth( rJointD ) * 1.6 ), rJointD );
+float rBatch = hkHash( vec2( floor( rScreed ), 0.5 ) );
+
+// Rubber only lays down where the cars actually drive, and that band wanders
+// across the road with the corners instead of sitting dead centre.
+float rLineC  = 0.30 * sin( rArc * 0.0295 ) + 0.16 * sin( rArc * 0.0113 + 1.9 );
+float rWander = abs( rLane - rLineC );
+float rRacing = 1.0 - smoothstep( 0.14, 0.76, rWander );
+rRacing *= 0.70 + 0.30 * hkNoise( vec2( rArc * 0.05, 0.0 ) );
+// The core of that band is *polished*, not merely dirty: a season of traffic
+// fills the voids between the chippings and leaves a strip you can see the sun
+// in. It is the single feature every photograph of a circuit has and this road
+// did not, and it costs one smoothstep.
+float rPolish = ( 1.0 - smoothstep( 0.0, 0.32, rWander ) ) * rRacing;
+
+// The last metre before the kerb never gets driven on: bleached, open
+// aggregate, with dust and marbles swept into the very edge. Kept to the
+// last metre — any wider and it reads as a concrete gutter, not as wear.
+float rEdge  = smoothstep( 0.74, 1.0, abs( rLane ) );
+float rDirt  = smoothstep( 0.86, 1.0, abs( rLane ) );
+
+diffuseColor.rgb *= mix( 0.975, 1.025, rBatch );
+diffuseColor.rgb *= mix( 1.0, 0.72, rRacing );
+diffuseColor.rgb *= mix( 1.0, 0.86, rPolish );
+diffuseColor.rgb *= mix( 1.0, 1.15, rEdge );
+diffuseColor.rgb  = mix( diffuseColor.rgb, diffuseColor.rgb * 0.94 + uGrime * 0.06, rDirt );
 diffuseColor.rgb *= mix( 1.0, 0.90, rPatch );
-diffuseColor.rgb *= mix( 1.0, 0.58, rSeam );`)
+diffuseColor.rgb *= mix( 1.0, 0.58, rSeam );
+diffuseColor.rgb *= mix( 1.0, 0.74, rJoint );`)
         .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
-float rFine = 1.0 - smoothstep( 8.0, 44.0, rDist );
-// Relief that has fallen off the end of the mip chain still scatters light.
-// Widening the lobe to stand in for it is what stops the far road flattening
-// into plastic once the chippings stop resolving — but only part way: pushing
-// it all the way to 1.0 also kills the long sun sheen that sells dry tarmac.
-roughnessFactor = mix( roughnessFactor, 0.90, ( 1.0 - rFine ) * 0.30 );
+// Relief that has fallen off the end of the mip chain still scatters light, and
+// with the fine normal now retired by thirty metres this is where that energy
+// has to go instead. Not all the way to 1.0: that also kills the long sun sheen
+// that sells dry tarmac.
+roughnessFactor = mix( roughnessFactor, 0.94, ( 1.0 - rFine ) * 0.55 );
 roughnessFactor = mix( roughnessFactor, 0.56, rRacing * 0.80 );
+roughnessFactor = mix( roughnessFactor, 0.44, rPolish * 0.75 );
 roughnessFactor = mix( roughnessFactor, 0.98, rEdge * 0.35 );
 roughnessFactor = mix( roughnessFactor, 0.52, rSeam );
+roughnessFactor = mix( roughnessFactor, 0.88, rJoint * 0.6 );
 roughnessFactor = clamp( roughnessFactor, 0.05, 1.0 );`)
         .replace('#include <normal_fragment_maps>', `vec3 rMapN = texture2D( normalMap, vNormalMapUv ).xyz * 2.0 - 1.0;
 vec3 rMacN = texture2D( normalMap, vNormalMapUv * 0.17 ).xyz * 2.0 - 1.0;
 // Two scales: the 35 m sample carries settlement and rutting and can never
-// alias, the 6 m sample carries the chippings and is faded out where its
-// footprint drops below a texel. Rubber fills the voids on the racing line,
-// so the relief there is flattened too.
-vec2 rN = rMacN.xy * 0.30 + rMapN.xy * rFine * mix( 1.0, 0.45, rRacing );
+// alias, the 6 m sample carries the chippings and is gone by thirty metres,
+// where a chipping is worth a pixel. This fade used to run 8-44 m, and 44 m is
+// well past the distance at which the chippings stop being resolvable — which
+// is exactly why the far road was the least stable thing in the frame. Rubber
+// fills the voids on the racing line, so the relief there is flattened too.
+vec2 rN = rMacN.xy * 0.34 + rMapN.xy * rFine * mix( 1.0, 0.35, rRacing );
 normal = normalize( tbn * vec3( rN * normalScale, 1.0 ) );`);
     };
   }
@@ -473,8 +579,13 @@ float kDist = length( vViewPosition );
 
 // The stripes are resolved, then they are not. Crossing that line with the
 // pattern still at full contrast is the crawl; crossing it having already
-// converged to the average is just a kerb going soft with distance.
-float kFar = smoothstep( 42.0, 105.0, kDist );
+// converged to the average is just a kerb going soft with distance. Half-metre
+// blocks reach that line sooner than metre-long ones did, so the fade comes in
+// earlier — but only somewhat. Scaling it strictly with the stripe length put
+// the start at 24 m, and a kerb that has gone pink by the time it is thirty
+// metres away is a worse defect than the crawl: measured by orbiting a corner
+// at 30 m, which is inside a normal chase camera's view of the next apex.
+float kFar = smoothstep( 38.0, 92.0, kDist );
 diffuseColor.rgb = mix( diffuseColor.rgb, uCurbFar, kFar );
 
 // Two incommensurate periods, neither of them a multiple of the tile, so no
@@ -549,7 +660,7 @@ normal = normalize( tbn * vec3( kMapN.xy * normalScale * ( 1.0 - kFar ), 1.0 ) )
       roughness: 1.0,
       envMapIntensity: 0.5,
     });
-    this._groundWear(mat, t, { tile: 5, cacheKey: 'shoulder' });
+    this._groundWear(mat, t, { tile: 14, cacheKey: 'shoulder' });
 
     for (const side of [-1, 1]) {
       const geo = this._strip(
@@ -557,7 +668,17 @@ normal = normalize( tbn * vec3( kMapN.xy * normalScale * ( 1.0 - kFar ), 1.0 ) )
         (s, half) => side * half,
         (s, half) => side * (half + shoulderW),
         4,
-        (u, s, lat) => [lat / 5, s / 5],
+        // World XZ at the terrain's own tile, not road space at a tile of its
+        // own. The run-off and the land past the barrier are the same sand or
+        // the same dirt — the *same cached texture object* — yet the apron was
+        // laid out in road space at a 5 m tile, so its grain ran with the
+        // circuit instead of with the ground and its macro re-sample took one
+        // fixed slice of the map for the entire lap. That is why a strip of
+        // beach immediately beside the road read as a separate grey material
+        // laid over it. Sharing the terrain's projection makes the join
+        // disappear, and it is also what `_groundWear`'s slope re-projection
+        // has assumed all along.
+        (u, s, lat, half, p) => [p.x / 14, p.z / 14],
         // The apron falls away from the road edge so it reads as a run-off.
         (s, lat, u) => -0.38 * smoothstep(u) - 0.02,
         // World height (for the waterline) and metres out from the tarmac.
@@ -702,6 +823,7 @@ normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
       this._add(geo, mat, { receive: false }).name = `voidTrim_${side}`;
     }
     // Underside so the road isn't paper-thin when seen from below or in air.
+    // The only surface here that is *meant* to face down.
     const under = this._strip(
       rings,
       (s, half) => half,
@@ -709,6 +831,8 @@ normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
       ROAD_COLS,
       (u, s, lat) => [lat / 6, s / 6],
       () => -0.55,
+      null,
+      { facing: 'down' },
     );
     const underMat = this._mat({
       color: 0x1b1440, metalness: 0.7, roughness: 0.35,
@@ -949,15 +1073,25 @@ normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
 
   // -- surroundings ---------------------------------------------------------
 
+  /**
+   * Everything outside the barrier, as two road-space sheets plus a cap.
+   *
+   * The sheets are offset grids: each ring steps sideways from the road's own
+   * frame, which is what makes the run-off follow the circuit. That construction
+   * has one hard limit — an offset curve folds through itself as soon as it is
+   * pushed past the centre of curvature — and the limit bites on most of this
+   * lap, not at some pathological corner. So the sheets are clamped short of
+   * the centre, and what they can no longer cover is closed by a cap built in
+   * world space, which has no centre of curvature to fold through.
+   */
   _buildTerrain() {
     const n = Math.max(48, Math.round(this.track.length / TERRAIN_STEP));
-    const sList = new Float64Array(n);
-    for (let i = 0; i < n; i++) sList[i] = (i / n) * this.track.length;
-
     const noise = makeValueNoise2D(this.theme.key === 'coast' ? 1201 : 3307, 256);
     const isCoast = this.theme.key === 'coast';
     // Sea level follows the circuit's lowest point, never a fixed constant.
     const waterLevel = this.track.waterLevel;
+    const wallOffset = TRACK_LAYOUT.shoulderWidth;
+    const sp = this.track.spline;
 
     /**
      * Height of the land at a given distance beyond the barrier.
@@ -983,21 +1117,112 @@ normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
       return edgeY + dip + rise + detail * 1.4;
     };
 
-    const wallOffset = TRACK_LAYOUT.shoulderWidth;
-    const cols = TERRAIN_COLS;
+    /**
+     * The one height field both the sheets and the cap sample.
+     *
+     * `profile` on its own starts a metre below the barrier's foot on the
+     * canyon and a metre *above* it on the coast, so joining it straight onto
+     * the run-off leaves a step. The first metre and a half is therefore blended
+     * back to the run-off's own outer lip, and under the run-off (d <= 0) it is
+     * that lip dropped by a sill. Two meshes agreeing on one function is what
+     * lets the cap close the sheets' gaps without drawing a seam.
+     */
+    const groundY = (d, worldX, worldZ, edgeY) => {
+      const t = smoothstep(d / 1.5);
+      const lip = edgeY - 0.42 - TERRAIN_SILL * (1 - t);
+      return t <= 0 ? lip : lerp(lip, profile(d, worldX, worldZ, edgeY), t);
+    };
+
+    /**
+     * What a corner allows: how far this side may reach, and how far its first
+     * column has to tuck under the run-off.
+     *
+     * `side * curvature` is positive on the inside of the corner and negative
+     * on the outside, and passes through zero on a straight — so deriving both
+     * numbers from it is continuous, where testing which side is "the inside"
+     * is not. That test flips at every corner exit, and a side that jumps from
+     * a short reach to a long one between two rings 6.4 m apart draws a sliver
+     * of terrain a hundred metres into the sky.
+     *
+     * The reach is *rescaled*, not clipped: clipping stacks every outer column
+     * on the fold line and the quads between them span the whole infield as one
+     * flat sheet. The previous pass rescaled but then floored the result at
+     * 12 m, which put the fold straight back at every corner tighter than about
+     * 45 m radius — sunsetCoast gets down to 20 m and canyonRush to 36 — and
+     * that floor is what was still folding the sheet across the road.
+     */
+    const fitCorner = (curvature, half, side) => {
+      const kap = side * curvature;
+      if (kap <= 1e-5) return { reach: TERRAIN_REACH, inset: TERRAIN_LAP };
+      // Distance from the barrier line to the corner's centre of curvature.
+      const r = Math.max(1 / kap - (half + wallOffset), 0);
+      return {
+        // Two limits, because a proportional one alone is not enough: 14% of a
+        // 12 m radius leaves the outermost column orbiting the centre at 1.7 m,
+        // where the ring-to-ring step is 40 cm and any wobble in the width or
+        // the reach flips it. An absolute clearance takes over as soon as the
+        // corner is tight enough for that to matter.
+        reach: Math.min(TERRAIN_REACH, Math.max(0, Math.min(r * FOLD_SAFETY, r - FOLD_CLEAR))),
+        // Terrain rings are four times coarser than the run-off's, so on the
+        // inside of a corner the chord between two of them bows outward of the
+        // run-off's edge by L^2/8r — 0.6 m at sunsetCoast's tightest hairpin,
+        // which is a 0.6 m slot of open sky between two surfaces that are
+        // nominally coincident. Pulling the inner column in by that much plus a
+        // margin makes the two overlap at every radius instead.
+        inset: TERRAIN_LAP + (TERRAIN_STEP * TERRAIN_STEP) / (8 * Math.max(r, 1)),
+      };
+    };
+
+    // Reach is a hyperbola in curvature, so where a long corner opens onto a
+    // straight it swings by hundreds of metres over two or three rings — and the
+    // far columns then travel sideways faster than the rings travel forward,
+    // which shears the outer quads and at the extremes inverts them anyway.
+    // (Measured: 82 inverted triangles left on sunsetCoast with the fold itself
+    // already fixed, scattered out at 80-270 m where radii run into the
+    // thousands.) Eroding to the local minimum before blurring keeps the result
+    // at or below the fold-safe value at every single ring, which a blur alone
+    // would not, while making it a smooth function of arc length.
+    const frame = {};
+    const reach = [new Float32Array(n), new Float32Array(n)];
+    const inset = [new Float32Array(n), new Float32Array(n)];
+    for (let i = 0; i < n; i++) {
+      const f = sp.frameAt((i / n) * this.track.length, frame);
+      const half = f.width * 0.5;
+      for (let q = 0; q < 2; q++) {
+        const fit = fitCorner(f.curvature, half, q === 0 ? -1 : 1);
+        reach[q][i] = fit.reach;
+        inset[q][i] = fit.inset;
+      }
+    }
+    for (let q = 0; q < 2; q++) reach[q] = blurRing(erodeRing(reach[q], REACH_SMOOTH), REACH_SMOOTH);
+    // Sampled by the cap too, so both meshes agree on where the sheets stop.
+    const reachAt = (s, side) => {
+      const a = reach[side < 0 ? 0 : 1];
+      const fi = mod(s / this.track.length, 1) * n;
+      const i0 = Math.floor(fi);
+      return lerp(a[i0 % n], a[(i0 + 1) % n], fi - i0);
+    };
+
+    // -- the two road-space sheets -------------------------------------------
+    // One block of columns per side, with no quad spanning the road. The old
+    // grid ran one column set straight across the circuit and dropped the two
+    // quads over the tarmac, which left its innermost land 4.4 m clear of the
+    // barrier: a 4.4 m slot of missing ground running the entire lap on both
+    // sides, and the hole the wall was photographed floating over.
+    const cols = TERRAIN_COLS / 2;
     const m = cols + 1;
-    const positions = new Float32Array(n * m * 3);
-    const uvs = new Float32Array(n * m * 2);
-    const ground = new Float32Array(n * m * 2);
+    const ring = m * 2;
+    const positions = new Float32Array(n * ring * 3);
+    const uvs = new Float32Array(n * ring * 2);
+    const ground = new Float32Array(n * ring * 2);
     const p = new THREE.Vector3();
     const edge = new THREE.Vector3();
-    const frame = {};
     const outward = new THREE.Vector3();
 
     for (let i = 0; i < n; i++) {
-      const s = sList[i];
+      const s = (i / n) * this.track.length;
       const half = this.track.halfWidthAt(s);
-      const f = this.track.spline.frameAt(s, frame);
+      const f = sp.frameAt(s, frame);
       // The road's own right vector is *banked* — up to 0.30 rad of roll on
       // this circuit. Riding it out to the far columns tilts the whole
       // landscape with the corner, and 260 m of lever arm turns 0.30 rad into a
@@ -1010,69 +1235,50 @@ normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
       outward.set(f.right.x, 0, f.right.z);
       if (outward.lengthSq() < 1e-8) outward.set(1, 0, 0);
       outward.normalize();
-      // How far the inside of this corner can be offset before the surface
-      // passes through the centre of curvature and turns itself inside out.
-      // Corners here get down to a 36 m radius against a 260 m reach, so this
-      // is not a corner case, it is most of the lap. Past the fold the winding
-      // inverts and the triangles are culled, which is why the run-off simply
-      // stopped and left the road ribbon hanging over the sea at sunsetCoast
-      // and over open sky at canyonRush. The reach is *rescaled* rather than
-      // clipped: clipping stacks every outer column on the fold line and the
-      // quads between them span the whole infield as one flat sheet.
-      // `side * curvature` is positive on the inside of the corner and negative
-      // on the outside, and it passes through zero on a straight — so deriving
-      // the reach from it directly is continuous, where testing which side is
-      // "the inside" is not. That test flips at every corner exit, and a side
-      // that jumps from a 12 m reach to a 260 m one between two rings 6.4 m
-      // apart draws a sliver of terrain a hundred metres into the sky.
-      // Verified against ring spacing: at canyonRush s=304 (R=36 m) consecutive
-      // rings 30 m to the negative side are 1.04 m apart where the centreline
-      // gives 6.4 m, so negative is the inside there and curvature is negative.
-      const reachFor = (side) => {
-        const kap = side * f.curvature;
-        if (kap <= 1e-5) return TERRAIN_REACH;
-        return Math.max(12, Math.min(TERRAIN_REACH, 0.86 / kap - wallOffset - half));
-      };
-      const reachL = reachFor(-1), reachR = reachFor(1);
 
-      for (let j = 0; j < m; j++) {
-        // Two-sided: columns run from far-left, across the track, to far-right.
-        const u = j / cols;
-        const side = u < 0.5 ? -1 : 1;
-        const k01 = Math.abs(u - 0.5) * 2;                     // 0 at track, 1 far out
-        const d = Math.pow(k01, 1.7) * (side < 0 ? reachL : reachR);
+      for (let q = 0; q < 2; q++) {
+        const side = q === 0 ? -1 : 1;
         this._point(s, side * (half + wallOffset), edge);
         const edgeY = edge.y;
-        p.copy(edge).addScaledVector(outward, side * d);
-        if (d > 0.5) p.y = profile(d, p.x, p.z, edgeY);
-        else p.y = edgeY - 0.42;
-        const kk = (i * m + j) * 3;
-        positions[kk] = p.x; positions[kk + 1] = p.y; positions[kk + 2] = p.z;
-        const t = (i * m + j) * 2;
-        uvs[t] = p.x / 14; uvs[t + 1] = p.z / 14;
-        // World height drives the damp band; the terrain starts a shoulder's
-        // width out, so its "distance from the tarmac" carries that offset.
-        ground[t] = p.y; ground[t + 1] = wallOffset + d;
+        for (let k = 0; k <= cols; k++) {
+          const d = k === 0 ? -inset[q][i] : Math.pow(k / cols, 1.7) * reach[q][i];
+          p.copy(edge).addScaledVector(outward, side * d);
+          p.y = groundY(d, p.x, p.z, edgeY);
+          // The left block is stored outermost-first so that both blocks wind
+          // the same way round — otherwise the left half renders back-facing.
+          const j = side < 0 ? cols - k : m + k;
+          const kk = (i * ring + j) * 3;
+          positions[kk] = p.x; positions[kk + 1] = p.y; positions[kk + 2] = p.z;
+          const t = (i * ring + j) * 2;
+          uvs[t] = p.x / 14; uvs[t + 1] = p.z / 14;
+          // World height drives the damp band; the terrain starts a shoulder's
+          // width out, so its "distance from the tarmac" carries that offset.
+          ground[t] = p.y; ground[t + 1] = wallOffset + Math.max(d, 0);
+        }
       }
     }
 
-    const idx = new Uint32Array(n * cols * 6);
-    let ptr = 0;
+    const idx = [];
     for (let i = 0; i < n; i++) {
-      const i0 = i * m, i1 = ((i + 1) % n) * m;
-      for (let j = 0; j < cols; j++) {
-        // Skip the two columns straddling the road itself.
-        if (j === Math.floor(cols / 2) - 1 || j === Math.floor(cols / 2)) continue;
-        idx[ptr++] = i0 + j; idx[ptr++] = i1 + j; idx[ptr++] = i1 + j + 1;
-        idx[ptr++] = i0 + j; idx[ptr++] = i1 + j + 1; idx[ptr++] = i0 + j + 1;
+      const i0 = i * ring, i1 = ((i + 1) % n) * ring;
+      for (let block = 0; block < 2; block++) {
+        const b = block * m;
+        for (let j = b; j < b + cols; j++) {
+          idx.push(i0 + j, i1 + j, i1 + j + 1, i0 + j, i1 + j + 1, i0 + j + 1);
+        }
       }
     }
 
+    const cap = this._infieldCap(groundY, reachAt, wallOffset);
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-    geo.setAttribute('aGround', new THREE.BufferAttribute(ground, 2));
-    geo.setIndex(new THREE.BufferAttribute(idx.slice(0, ptr), 1));
+    geo.setAttribute('position', new THREE.BufferAttribute(concatF32(positions, cap.positions), 3));
+    geo.setAttribute('uv', new THREE.BufferAttribute(concatF32(uvs, cap.uvs), 2));
+    geo.setAttribute('aGround', new THREE.BufferAttribute(concatF32(ground, cap.ground), 2));
+    const base = positions.length / 3;
+    const index = new Uint32Array(idx.length + cap.index.length);
+    index.set(idx, 0);
+    for (let i = 0; i < cap.index.length; i++) index[idx.length + i] = cap.index[i] + base;
+    geo.setIndex(new THREE.BufferAttribute(index, 1));
     geo.computeVertexNormals();
     geo.computeBoundingSphere();
 
@@ -1091,6 +1297,135 @@ normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
     this._add(geo, mat, { receive: true }).name = 'terrain';
 
     if (isCoast && this.theme.water?.enabled) this._buildWater(waterLevel);
+  }
+
+  /**
+   * Ground for everywhere the offset sheets structurally cannot reach.
+   *
+   * A road-space grid tiles a band either side of the circuit. Inside a corner
+   * tighter than that band is wide there is simply no way to lay one down — the
+   * columns would have to pass through the centre of curvature and come back
+   * out the far side — so the infield of every hairpin is bare, and clamping
+   * the sheets (which is the only correct thing to do about the fold) makes
+   * more of it bare, not less. The fix cannot be another road-space surface.
+   *
+   * So: a plain axis-aligned grid in world space. It samples the same height
+   * field the sheets do, so the two surfaces agree wherever they meet; it is
+   * dropped a hand's width so the sheets — which are four times finer near the
+   * road — win every overlap; and it is only emitted where the sheets fall
+   * short, which on these two circuits is a few hundred quads rather than a
+   * second terrain.
+   */
+  _infieldCap(groundY, reachAt, wallOffset) {
+    const sp = this.track.spline;
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (let i = 0; i < sp.count; i++) {
+      const x = sp.pos[i * 3], z = sp.pos[i * 3 + 2];
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+    }
+    const x0 = Math.floor((minX - CAP_MARGIN) / CAP_CELL) * CAP_CELL;
+    const z0 = Math.floor((minZ - CAP_MARGIN) / CAP_CELL) * CAP_CELL;
+    const nx = Math.ceil((maxX + CAP_MARGIN - x0) / CAP_CELL) + 1;
+    const nz = Math.ceil((maxZ + CAP_MARGIN - z0) / CAP_CELL) + 1;
+
+    /**
+     * Nearest centreline sample in *plan* view.
+     *
+     * `spline.project` weights vertical distance, which is right for a kart and
+     * wrong for a column of air over a circuit that climbs 25 m — it would
+     * happily match a point to a piece of road running 20 m underneath it.
+     */
+    const nearestIndex = (x, z) => {
+      let best = 0, bestD = Infinity;
+      for (let i = 0; i < sp.count; i += 3) {
+        const dx = x - sp.pos[i * 3], dz = z - sp.pos[i * 3 + 2];
+        const dd = dx * dx + dz * dz;
+        if (dd < bestD) { bestD = dd; best = i; }
+      }
+      for (let i = best - 3; i <= best + 3; i++) {
+        const j = mod(i, sp.count);
+        const dx = x - sp.pos[j * 3], dz = z - sp.pos[j * 3 + 2];
+        const dd = dx * dx + dz * dz;
+        if (dd < bestD) { bestD = dd; best = j; }
+      }
+      return best;
+    };
+
+    const count = nx * nz;
+    const y = new Float32Array(count);
+    const out = new Float32Array(count);
+    const need = new Uint8Array(count);
+    const inside = new Uint8Array(count);
+    const frame = {};
+    const edge = new THREE.Vector3();
+
+    for (let iz = 0; iz < nz; iz++) {
+      for (let ix = 0; ix < nx; ix++) {
+        const x = x0 + ix * CAP_CELL, z = z0 + iz * CAP_CELL;
+        const s = nearestIndex(x, z) * sp.ds;
+        const f = sp.frameAt(s, frame);
+        const half = f.width * 0.5;
+        let rx = f.right.x, rz = f.right.z;
+        const rl = Math.hypot(rx, rz) || 1;
+        rx /= rl; rz /= rl;
+        const lateral = (x - f.pos.x) * rx + (z - f.pos.z) * rz;
+        const side = lateral < 0 ? -1 : 1;
+        const d = Math.abs(lateral) - (half + wallOffset);
+        this._point(s, side * (half + wallOffset), edge);
+        let gy = groundY(d, x, z, edge.y);
+        if (d < 0) {
+          // This cell is over the circuit itself. The height field is anchored
+          // on the barrier's foot, and on a 0.30 rad banked corner that foot
+          // stands nearly four metres above the road beside it — so following
+          // the field inward drives the cap up through the tarmac and paints a
+          // wedge of sand across the racing line. Under the circuit the cap
+          // follows the road's own banked plane and stays beneath it.
+          gy = Math.min(gy, this._point(s, lateral, edge).y - 0.62);
+        }
+        const k = iz * nx + ix;
+        y[k] = gy - CAP_SINK;
+        out[k] = wallOffset + Math.max(d, 0);
+        // A cell and a half of slack on both tests, so the cap always starts
+        // *under* the sheet rather than butting against its edge.
+        need[k] = d > reachAt(s, side) - CAP_CELL * 1.5 ? 1 : 0;
+        inside[k] = d < TERRAIN_REACH - CAP_CELL * 1.5 ? 1 : 0;
+      }
+    }
+
+    const remap = new Int32Array(count).fill(-1);
+    const positions = [], uvs = [], groundAttr = [], index = [];
+    const emit = (k) => {
+      if (remap[k] >= 0) return remap[k];
+      const ix = k % nx, iz = (k - ix) / nx;
+      const x = x0 + ix * CAP_CELL, z = z0 + iz * CAP_CELL;
+      const v = positions.length / 3;
+      positions.push(x, y[k], z);
+      uvs.push(x / 14, z / 14);
+      groundAttr.push(y[k], out[k]);
+      remap[k] = v;
+      return v;
+    };
+
+    for (let iz = 0; iz < nz - 1; iz++) {
+      for (let ix = 0; ix < nx - 1; ix++) {
+        const a = iz * nx + ix, b = (iz + 1) * nx + ix;
+        const c = (iz + 1) * nx + ix + 1, e = iz * nx + ix + 1;
+        if (!(need[a] || need[b] || need[c] || need[e])) continue;
+        if (!(inside[a] && inside[b] && inside[c] && inside[e])) continue;
+        const va = emit(a), vb = emit(b), vc = emit(c), ve = emit(e);
+        // Wound so the face normal comes out +Y, matching every other ground
+        // surface here; the reverse order renders the cap only from below.
+        index.push(va, vb, vc, va, vc, ve);
+      }
+    }
+
+    return {
+      positions: new Float32Array(positions),
+      uvs: new Float32Array(uvs),
+      ground: new Float32Array(groundAttr),
+      index,
+    };
   }
 
   _buildWater(level) {
@@ -1205,6 +1540,38 @@ function mergeStrips(parts) {
   geo.computeVertexNormals();
   geo.computeBoundingSphere();
   return geo;
+}
+
+/** Ring-buffer minimum filter: never returns more than the input allowed. */
+function erodeRing(src, r) {
+  const n = src.length, out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    let lo = Infinity;
+    for (let k = -r; k <= r; k++) lo = Math.min(lo, src[mod(i + k, n)]);
+    out[i] = lo;
+  }
+  return out;
+}
+
+/** Ring-buffer box blur. Radius must not exceed the erosion's, or the result
+ *  can rise back above the input at a local minimum. */
+function blurRing(src, r) {
+  const n = src.length, out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    let sum = 0;
+    for (let k = -r; k <= r; k++) sum += src[mod(i + k, n)];
+    out[i] = sum / (2 * r + 1);
+  }
+  return out;
+}
+
+/** Join two vertex buffers of the same item size into one. */
+function concatF32(a, b) {
+  if (!b || !b.length) return a;
+  const out = new Float32Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
 }
 
 /** Rewrite the U channel of a road strip as a 0..1 span across the road. */
