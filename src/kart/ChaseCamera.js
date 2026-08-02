@@ -15,7 +15,11 @@ const MODES = {
   chase:   { dist: 7.4, height: 2.95, look: 5.2, fov: 62 },
   near:    { dist: 5.4, height: 2.35, look: 4.6, fov: 66 },
   far:     { dist: 9.6, height: 3.9,  look: 6.4, fov: 58 },
-  bumper:  { dist: 0.4, height: 1.15, look: 9.0, fov: 74 },
+  // `dist` is measured *backwards* from the kart's origin, so a positive value
+  // put the bumper camera behind the driver's head — filling the bottom 40% of
+  // the frame with a helmet and blocking the apex. The nose anchor sits at
+  // z = +1.45, so the camera belongs ahead of the origin, and low.
+  bumper:  { dist: -1.35, height: 0.62, look: 9.0, fov: 78 },
 };
 
 export class ChaseCamera {

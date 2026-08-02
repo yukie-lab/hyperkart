@@ -299,9 +299,20 @@ export const TRACKS = {
       sunAzimuth: -2.0,
       sunElevation: 0.30,
       sunColor: 0xc8d8ff,
-      sunStrength: 3.00,
+      // A dark *sky* is the point of setting a race in space. Dark *objects*
+      // are not, and this track had both: the key ran at a third of the other
+      // circuits and the ambient at half, so on-track frames measured a frame
+      // luma of 0.19-0.24 with saturation at 0.69-0.89. That combination gives
+      // hue-only separation and no value separation at all — a pink kart sat
+      // at nearly the same luminance as the magenta stripe under it, and no
+      // amount of exposure recovers that, because exposure moves both.
+      //
+      // A lit object against a black sky is exactly what space looks like, so
+      // the key now lands where the daylight circuits do while the dome stays
+      // unmetered and dark.
+      sunStrength: 5.20,
       exposureTarget: 0.90,
-      envIntensity: 0.50,
+      envIntensity: 0.85,
       // A dark sky must not be metered: auto-exposure would open right up and
       // there would be no point setting a race in space.
       meterSky: false,
