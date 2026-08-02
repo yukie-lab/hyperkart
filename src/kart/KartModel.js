@@ -416,6 +416,31 @@ function drawLivery(c, m, ch, U, V, base, acc, dark) {
 let _tyreTex = null;
 
 /**
+ * Where the tyre's bands sit in v — which is section *arc length*, see
+ * `arcLengthV`, and was not before.
+ *
+ * `LatheGeometry` writes v = profile index / (points - 1). On this eight-point
+ * section that handed the same 14% of the canvas to the 18 mm shoulder ramp and
+ * to the 134 mm tread crown, so the crown arrived at half the texel density it
+ * was drawn at and a whole block row of tread landed on the ramp — a surface
+ * that faces the camera square-on from three-quarters, and the thing that read
+ * as tread crosshatch mapped onto the sidewall.
+ *
+ * These boundaries are the section's own cumulative arc length, measured off
+ * the built geometry: crown 0.352-0.648, ramp either side of it out to 0.276,
+ * sidewall in to 0.139, bead face inboard of that. Front and rear tyres have
+ * slightly different width-to-radius ratios and disagree about them by 0.003 —
+ * a pixel and a half on a 512 canvas, which is why one table serves both.
+ * Everything is mirrored about v = 0.5, so only the lower half is named.
+ */
+const TYRE_V = {
+  crown: 0.352,     // crown starts (tread pattern lives inside this)
+  shoulder: 0.276,  // shoulder ramp starts
+  rib: 0.262,       // rim-protector rib, just inboard of the ramp
+  letter: 0.205,    // moulded sidewall lettering, centred in the sidewall band
+};
+
+/**
  * Tyre surface.
  *
  * The lathe's own UVs run around the circumference in u and across the section
@@ -435,7 +460,7 @@ function tyreTextures() {
   lx.textAlign = 'center'; lx.textBaseline = 'middle';
   lx.font = 'bold 23px "Arial Black", Impact, sans-serif';
   for (let side = 0; side < 2; side++) {
-    const y = (1 - (side === 0 ? 0.185 : 0.815)) * S;
+    const y = (1 - (side === 0 ? TYRE_V.letter : 1 - TYRE_V.letter)) * S;
     for (let k = 0; k < 3; k++) {
       lx.save();
       lx.translate(((k + 0.5) / 3) * S, y);
@@ -454,21 +479,22 @@ function tyreTextures() {
       const i = y * S + x;
       const u = x / S;
       let hh = fbm2D(n, x / 2.5, y / 2.5, 3) * 0.14;
-      if (v > 0.40 && v < 0.60) {
-        const t = (v - 0.40) / 0.20;
+      const C = TYRE_V.crown, SH = TYRE_V.shoulder;
+      if (v > C && v < 1 - C) {
+        const t = (v - C) / (1 - 2 * C);
         hh += 0.60;
         const groove = Math.min(Math.abs(t - 0.22), Math.abs(t - 0.50), Math.abs(t - 0.78));
         if (groove < 0.058) hh -= 0.66;
         // Lateral sipes, skewed so the blocks are not a marching grid.
         const sipe = Math.abs((((u * 44 + t * 2.6) % 1) + 1) % 1 - 0.5);
         if (sipe > 0.415) hh -= 0.30;
-      } else if ((v > 0.33 && v <= 0.40) || (v >= 0.60 && v < 0.67)) {
+      } else if ((v > SH && v <= C) || (v >= 1 - C && v < 1 - SH)) {
         hh += 0.44;
         const gap = Math.abs((((u * 22) % 1) + 1) % 1 - 0.5);
         if (gap > 0.40) hh -= 0.42;
       } else {
-        const ridgeV = v > 0.5 ? 0.695 : 0.305;
-        const ridge = 1 - Math.min(1, Math.abs(v - ridgeV) / 0.026);
+        const ridgeV = v > 0.5 ? 1 - TYRE_V.rib : TYRE_V.rib;
+        const ridge = 1 - Math.min(1, Math.abs(v - ridgeV) / 0.022);
         hh += 0.18 + ridge * 0.34 + (letters[i * 4] / 255) * 0.62;
       }
       h[i] = hh;
@@ -565,6 +591,42 @@ const _chassisCache = new Map();
 const _headCache = new Map();
 const _wheelCache = new Map();
 let _driverGeo = null;
+
+/**
+ * Re-space a lathe's v coordinate by how far along its section each ring sits.
+ *
+ * `LatheGeometry` writes v = j / (points - 1), the profile *index*, which is
+ * only the same thing as position along the section if every profile segment
+ * happens to be the same length. On the tyre they differ by 3.7x, so a band
+ * drawn at a given v in `tyreTextures` did not land on the piece of rubber it
+ * was drawn for — see `TYRE_V`.
+ *
+ * The section is recovered from the built buffer rather than passed in, so this
+ * cannot drift out of step with whatever profile `tyreGeometry` is using: every
+ * vertex of ring j shares one exact v (they are all `j / (points - 1)`, the
+ * same division), and the tyre is lathed about X, so a ring's place in the
+ * section is (hypot(y, z), x).
+ */
+function arcLengthV(geo) {
+  const p = geo.attributes.position;
+  const uv = geo.attributes.uv;
+  const ring = new Map();
+  for (let i = 0; i < p.count; i++) {
+    const v = uv.getY(i);
+    if (!ring.has(v)) ring.set(v, [Math.hypot(p.getY(i), p.getZ(i)), p.getX(i)]);
+  }
+  const keys = [...ring.keys()].sort((a, b) => a - b);
+  const cum = [0];
+  for (let k = 1; k < keys.length; k++) {
+    const a = ring.get(keys[k - 1]), b = ring.get(keys[k]);
+    cum.push(cum[k - 1] + Math.hypot(b[0] - a[0], b[1] - a[1]));
+  }
+  const total = cum[cum.length - 1] || 1;
+  const remap = new Map(keys.map((v, k) => [v, cum[k] / total]));
+  for (let i = 0; i < p.count; i++) uv.setY(i, remap.get(uv.getY(i)));
+  uv.needsUpdate = true;
+  return geo;
+}
 
 /**
  * Group parts by material slot and merge each group into one geometry.
@@ -858,26 +920,79 @@ function uprightParts(r, w, inboard) {
 }
 
 /**
- * Tone the merged hub buffer: rim down to a machined near-black, damper up to
- * bright steel, spring warmer still so the one part that says "suspension"
- * separates from the strut it is wound around.
+ * Tone the merged hub buffer.
+ *
+ * One mesh has to carry the rim, the upright and the coilover, because the
+ * draw-call budget says so. So the material is bright steel and the vertices
+ * pull themselves where they need to be: the flange and the centre cap stay up
+ * at steel, the well and the spider floor drop into shadow so the accent spokes
+ * standing in front of them have something to be seen against, and the spring
+ * goes warm so the one part that says "suspension" separates from the strut it
+ * is wound around.
+ *
+ * `spans` is one entry per merged part, in the order handed to `mergeBySlot`,
+ * because the parts overlap in every axis and no position predicate can tell
+ * them apart. A span's `tone` is either one colour or a function of the vertex
+ * index inside it — which is how the rim gets a different value per profile
+ * ring off a single lathe.
  */
-function paintHub(geo, rimVerts, upright) {
+function paintHub(geo, spans) {
   const n = geo.attributes.position.count;
   const col = new Float32Array(n * 3);
-  // Everything before `rimVerts` is the rim; after it, one span per part in the
-  // order `uprightParts` built them — the last of which is the coil.
-  const coilStart = n - upright[upright.length - 1].geo.attributes.position.count;
-  for (let i = 0; i < n; i++) {
-    let r, g, b;
-    if (i < rimVerts) { r = 0.19; g = 0.20; b = 0.23; }
-    else if (i >= coilStart) { r = 1.00; g = 0.78; b = 0.52; }
-    else { r = 0.86; g = 0.88; b = 0.92; }
-    col[i * 3] = r; col[i * 3 + 1] = g; col[i * 3 + 2] = b;
+  let o = 0;
+  for (const { verts, tone } of spans) {
+    for (let i = 0; i < verts && o + i < n; i++) {
+      const c = typeof tone === 'function' ? tone(i) : tone;
+      col[(o + i) * 3] = c[0]; col[(o + i) * 3 + 1] = c[1]; col[(o + i) * 3 + 2] = c[2];
+    }
+    o += verts;
   }
   geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
   return geo;
 }
+
+/**
+ * The rim section, as [radius x wheel radius, distance outboard x wheel width,
+ * tone], running from the inboard apex to the outboard cap.
+ *
+ * What was here before was a lens: a closed dish whose outboard face was one
+ * smooth cone from the axis out to 0.51r, painted 0.19 grey. That is the "black
+ * void" — four of them, and they are 30% of what a kart projects at racing
+ * distance. Worse, the five accent spokes drawn to break it up were 5.5 cm
+ * thick about the centre plane, and the dish closes over the axis 7.7 cm out
+ * from it, so every spoke was sealed *inside* the rim: dead geometry, 240
+ * triangles per wheel that no camera position in this game could ever see a
+ * pixel of. Read back off the built buffer, not inferred — the spokes measure
+ * x in [-0.0275, 0.0275] against a rim whose apexes are at +/-0.0774.
+ *
+ * So the section is turned inside out. The bore is a deep well now, its floor
+ * dropped back near the centre plane and toned down into shadow; the spokes
+ * stand three-quarters of the way back out of it, where they catch the same
+ * light the bodywork does; and the flange is a bright ring at the very outside
+ * that separates the wheel from the tyre exactly where the eye looks for the
+ * edge. Value, not colour, is what has to survive thirty metres.
+ *
+ * The outer radius also grew from 0.51r to 0.575r, past the tyre's 0.56r bead.
+ * The old rim stopped *short* of the bead, and a tyre is an open shell with no
+ * inner wall, so there was a 15 mm annular slot straight through every wheel —
+ * plainly visible in a close orbit as a bright ring of road inside the tyre.
+ * The section is a closed surface of revolution reaching past the bead, so the
+ * bore is now sealed by construction rather than by luck.
+ */
+const RIM_SECTION = [
+  [0.000, -0.240, 0.34],
+  [0.170, -0.280, 0.34],
+  [0.500, -0.420, 0.52],
+  [0.575, -0.475, 0.88],  // inboard flange, buried in the tyre's bead
+  [0.575, 0.475, 0.88],   // barrel: spans the whole bore, so nothing sees through
+  [0.548, 0.440, 1.00],   // outboard flange — the bright ring against the tyre
+  [0.525, 0.280, 0.24],   // well wall, falling away into shadow
+  [0.480, 0.100, 0.16],   // spider floor: the backdrop the spokes read against
+  [0.200, 0.115, 0.16],
+  [0.150, 0.290, 0.70],   // centre boss, standing back out of the well
+  [0.105, 0.345, 0.86],
+  [0.000, 0.360, 0.86],   // nut cap
+];
 
 /** A helical spring: a hexagonal tube swept along a helix. */
 function coilGeometry(radius, height, turns, sides, wire) {
@@ -915,27 +1030,38 @@ function buildWheels(scale) {
   if (hit) return hit;
 
   const make = (r, w, seg, inboard) => {
-    const tyre = tyreGeometry(r, r * 0.56, w, seg);
-    // Rim and hub in one lathe: the hub was its own draw call for a part that
-    // lives entirely inside the rim's silhouette.
-    const rim = lathe([
-      [0.0, -w * 0.30], [r * 0.15, -w * 0.32], [r * 0.19, -w * 0.44],
-      [r * 0.48, -w * 0.46], [r * 0.51, -w * 0.30], [r * 0.51, w * 0.30],
-      [r * 0.48, w * 0.46], [r * 0.19, w * 0.44], [r * 0.15, w * 0.32], [0.0, w * 0.30],
-    ], 20);
+    const tyre = arcLengthV(tyreGeometry(r, r * 0.56, w, seg));
+    // Rim, well and centre cap in one lathe: each was a candidate for its own
+    // draw call, and all of them live inside the tyre's silhouette.
+    //
+    // `lathe` spins about Y and the result is rotated onto X, where +Y lands on
+    // -X — so the outboard side of a wheel whose chassis is at +x is the profile's
+    // +y. The section is *reversed* rather than negated for the other side,
+    // because three builds its faces off the profile's traversal direction and a
+    // negated section comes out inside-out.
+    const face = RIM_SECTION.map(([rr, ax, tone]) => [rr * r, ax * w * inboard, tone]);
+    if (inboard < 0) face.reverse();
+    const rim = lathe(face.map(([rr, ax]) => [rr, ax]), 20);
     rim.rotateZ(Math.PI / 2);
 
     // Spokes are offset before they are rotated, so each one actually spans
-    // hub to rim instead of being a bar through the centre.
-    const spoke = roundedBox(0.055, 0.038, r * 0.38, 0.016, 2);
-    spoke.translate(0, 0, r * 0.32);
+    // hub to rim instead of being a bar through the centre — and they now sit
+    // three-quarters of the way out of the well, on the outboard side only.
+    // The inboard face is where the upright and the coilover live; a wheel is
+    // not symmetric and pretending it is bought nothing but triangles.
+    const spoke = roundedBox(w * 0.24, r * 0.17, r * 0.40, r * 0.030, 2);
+    {
+      // Tapered: narrow at the boss, full width where it meets the rim. A
+      // constant-section bar reads as a strut, not as a wheel.
+      const p = spoke.attributes.position;
+      for (let i = 0; i < p.count; i++) p.setY(i, p.getY(i) * lerp(0.58, 1.0, clamp01(p.getZ(i) / (r * 0.40) + 0.5)));
+      spoke.computeVertexNormals();
+    }
+    spoke.translate(-inboard * w * 0.28, 0, r * 0.345);
     const spokes = [];
     for (let i = 0; i < 5; i++) {
       spokes.push({ slot: 'accent', geo: spoke, matrix: xform([0, 0, 0], [(i / 5) * TAU, 0, 0]) });
     }
-    // A chrome dish this size reads as a white donut from any distance; a dark
-    // machined rim lets the accent spokes and the tyre carry the wheel.
-    //
     // The rim rides in the `hub` slot, which the model hangs off the steering
     // pivot rather than off the spinning group. It is a surface of revolution
     // about the axle, so rotating it was never doing anything anybody could
@@ -950,34 +1076,58 @@ function buildWheels(scale) {
       ...upright,
       ...spokes,
     ]);
-    // Two very different tones out of one mesh, because the draw-call budget
-    // says the rim and the suspension have to share one. The rim must stay
-    // dark — a chrome dish this size reads as a white donut from any distance —
-    // but a dark damper against a black tyre is a damper nobody can see, which
-    // is the whole reason it is being drawn. So the material carries the bright
-    // steel and the rim's own vertices multiply themselves back down.
-    //
-    // Index ranges rather than a position predicate: the parts overlap in every
-    // axis, and `mergeBySlot` appends in the order handed to it, which is the
-    // order below.
-    paintHub(parts.get('hub'), rim.attributes.position.count, upright);
+    // Per-part spans in the order handed to `mergeBySlot` above. The rim's own
+    // span is a function of the vertex index because `LatheGeometry` walks the
+    // profile fastest, so index modulo the section length *is* the section
+    // point, and one lathe can carry a bright flange, a shadowed well and a
+    // steel centre cap without costing a second buffer.
+    const rimTone = face.map(([, , tone]) => [tone, tone, tone]);
+    paintHub(parts.get('hub'), [
+      { verts: rim.attributes.position.count, tone: (i) => rimTone[i % rimTone.length] },
+      ...upright.map((u, i) => ({
+        verts: u.geo.attributes.position.count,
+        // Last part is the coil, and it goes warm.
+        tone: i === upright.length - 1 ? [1.00, 0.78, 0.52] : [0.86, 0.88, 0.92],
+      })),
+    ]);
     // What the *distant* kart uses for the same slot. At thirty metres a 2.6 cm
     // damper rod is a third of a pixel, but the shell bakes whatever the live
     // model is carrying — so without this the LOD that exists to make far karts
     // cheap would have inherited every triangle of the suspension eleven times
-    // over. The rim stays, because it is what closes the wheel's bore: drop it
-    // and a distant wheel is a ring you can see the far kerb through.
-    const hubShell = rim;
+    // over. Reduced to a plain drum at twelve sides, which is 72 triangles
+    // against the live rim's 440: what the distant wheel needs from this slot is
+    // not a rim, it is something opaque out past the tyre's bead, because a
+    // wheel you can see the far kerb through is the one artefact a cheap LOD
+    // must never produce.
+    const hubShell = lathe([
+      [0, -w * 0.20], [r * 0.575, -w * 0.42], [r * 0.575, w * 0.42], [0, w * 0.20],
+    ], 12);
+    hubShell.rotateZ(Math.PI / 2);
 
-    // Two thin discs, one per wheel face, stand in for the spokes above the
-    // speed at which five spokes strobe against a 60 Hz frame. Same mesh, same
-    // draw call — only the geometry and material are swapped.
-    const ring = new THREE.RingGeometry(r * 0.19, r * 0.60, 22, 2);
+    // A thin disc stands in for the spokes above the speed at which five spokes
+    // strobe against a 60 Hz frame. Same mesh, same draw call — only the
+    // geometry and material are swapped. It sits where the spokes sit, which is
+    // outboard now, and inside the well wall so it cannot poke through it.
+    const ring = new THREE.RingGeometry(r * 0.17, r * 0.520, 24, 1);
     const blur = mergeGeometries([
-      { geo: ring, matrix: xform([-w * 0.22, 0, 0], [0, Math.PI / 2, 0]) },
-      { geo: ring, matrix: xform([w * 0.22, 0, 0], [0, Math.PI / 2, 0]) },
+      { geo: ring, matrix: xform([-inboard * w * 0.30, 0, 0], [0, Math.PI / 2, 0]) },
     ]);
-    return { parts, blur, hubShell };
+    // And what the distant kart uses for the *spokes*. Five tapered spokes are
+    // 240 triangles resolving to nothing at thirty metres, where the wheel is
+    // 24 px across and its bore is 13. What has to survive that is one thing:
+    // a value break inside the tyre. So the shell gets a flat accent disc per
+    // face — 36 triangles, in the accent slot the shell already draws, which is
+    // both cheaper than what it replaced and the only reason a far kart's wheels
+    // stop being four holes. Set proud of the shell drum so it cannot z-fight.
+    // 0.54r, not 0.50r: it has to fill the bore the way the spokes and the
+    // flange together do up close, and it still clears both the drum's cone
+    // (which is at 0.407w where this disc is 0.44w) and the tyre's own bead.
+    const disc = new THREE.CircleGeometry(r * 0.54, 18);
+    const spokeShell = mergeGeometries([
+      { geo: disc, matrix: xform([-w * 0.44, 0, 0], [0, -Math.PI / 2, 0]) },
+      { geo: disc, matrix: xform([w * 0.44, 0, 0], [0, Math.PI / 2, 0]) },
+    ]);
+    return { parts, blur, hubShell, spokeShell };
   };
 
   // Four buffers, not two: the upright hangs off the inboard face, so a left
@@ -1014,13 +1164,16 @@ function buildHead(kind) {
   // fairing sized against an unscaled sphere reads as a detached cone.
   const S = HELMET_SCALE[kind] || HELMET_SCALE.dome;
   const parts = [];
-  // 30 x 20, not 18 x 12. The helmet is the one part of this model that is ever
-  // seen at 400 px across — the bumper camera puts the back of the player's own
-  // lid in the bottom third of the frame — and at 18 segments a 0.185 m sphere
-  // filling that much screen has quads over a hundred pixels wide, so it read
-  // as a faceted ball with visible polygon edges rather than as a gloss shell.
-  // The cost is paid once: heads are cached by kind and shared by every kart
-  // wearing one, and past LOD_DISTANCE the whole model is a baked shell anyway.
+  // 26 x 16, not 18 x 12, and the reason recorded here was wrong: it said the
+  // bumper camera puts the back of the player's own lid across 400 px of frame.
+  // It does not, and no longer can — `ChaseCamera.MODES.bumper` has negative
+  // `dist`, so the camera sits 1.35 m *ahead* of the kart's origin looking down
+  // the road, and the driver is behind it. Measured at 1080p, a 0.185 m shell is
+  // 57 px across in `near`, 45 in `chase`, and 120 in the inspector's 3.6 m
+  // orbit, which is the largest it is ever seen. 18 segments faceted visibly at
+  // 120 px, which is the real justification; 26 is comfortable there and the
+  // cost is paid once, because heads are cached by kind and past LOD_DISTANCE
+  // the whole model is a baked shell anyway.
   const shell = new THREE.SphereGeometry(0.185, 26, 16, 0, TAU, 0, Math.PI * 0.86);
   shell.scale(S[0], S[1], S[2]);
   parts.push({ slot: 'helmet', geo: shell });
@@ -1509,7 +1662,11 @@ export class KartModel {
         // draw calls. `hub` is everything that steers but does not roll.
         const mesh = add(geo, slot, slot === 'hub' ? pivot : spin, slot === 'rubber');
         if (slot === 'hub') mesh.userData.shellGeo = src.hubShell;
-        if (slot === 'accent') spokeMesh = mesh;
+        // The spokes hand the shell a flat disc instead. It also insulates the
+        // bake from the blur swap: this mesh's geometry is not constant, and a
+        // shell built on a frame where the wheels happened to be spinning would
+        // have baked the smear disc into every distant kart.
+        if (slot === 'accent') { spokeMesh = mesh; mesh.userData.shellGeo = src.spokeShell; }
       }
       this.wheels.push({
         pivot, spin, front: def.front, base: pivot.position.clone(),
