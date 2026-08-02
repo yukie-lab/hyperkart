@@ -250,6 +250,35 @@ const BOX_CORE_FRAG = /* glsl */`
   }`;
 
 /**
+ * The colour a given box is wearing at a given instant.
+ *
+ * A line-for-line copy of BOX_CORE_FRAG's tint — same position hash, same
+ * cosine palette, same warm-white mix — so that the burst which replaces a box
+ * is the colour of the box that was standing there. Every box on the circuit
+ * wears a different hue and each one cycles, so the alternative is a fixed
+ * gold pop that matches whatever it destroyed about a sixth of the time; that
+ * is a generic effect with a tint on it, which is most of what made a pickup
+ * indistinguishable from being hit.
+ *
+ * Duplicating six lines of shader arithmetic in JS is the cheap side of the
+ * trade: the honest alternative is a uniform readback per pickup.
+ */
+const _tint = new THREE.Color();
+function boxTint(pos, time) {
+  const off = pos.x * 0.037 + pos.y * 0.019 + pos.z * 0.029;
+  const h = (off - Math.floor(off)) + time * 0.13;
+  const c = (k) => 0.5 + 0.5 * Math.cos(TAU * (h + k));
+  // setRGB writes the working (linear) space directly, which is the space the
+  // shader's gl_FragColor lands in — going through setHex would sRGB-decode a
+  // number that was never encoded.
+  return _tint.setRGB(
+    lerp(1.0, c(0.0), 0.72),
+    lerp(0.92, c(0.33), 0.72),
+    lerp(0.72, c(0.67), 0.72),
+  );
+}
+
+/**
  * The pool of light a box lays on the road under itself.
  *
  * One InstancedMesh for every box on the circuit, so the whole effect is a
@@ -729,7 +758,13 @@ export class ItemSystem {
           // "something happened here" and it is right for a shell expiring;
           // a box is a *container*, and the whole of what makes taking one
           // feel like a reward is that it visibly comes apart.
-          this.fx?.itemBreak(b.mesh.position);
+          //
+          // Handed the box's live colour, because the pickup and the impact
+          // burst had converged into the same pale scatter and hue is one of
+          // the four axes they now differ on. It is the box's colour rather
+          // than a fixed gold so the burst belongs to the object the player
+          // was looking at a frame earlier.
+          this.fx?.itemBreak(b.mesh.position, boxTint(b.mesh.position, ctx.time));
           this.startRoulette(k, karts.length);
           break;
         }
@@ -837,10 +872,13 @@ export class ItemSystem {
         if (k.star > 0 || k.invuln > 0) continue;
         if (k.pos.distanceToSquared(h.mesh.position) > 2.0 * 2.0) continue;
         if (k.spinout(1.0, 'banana')) {
-          // `spinout` raised the `hit` event already — see `Race._wireEvents`.
-          this.fx?.burst(h.mesh.position, 0xf5d02a, {
-            count: 20, speed: 7, size: 0.5, life: 0.5, alpha: 0.8, ring: 1.1, gravity: 12,
-          });
+          // `spinout` raised the `hit` event already — see `Race._wireEvents`
+          // — and the FX for it are raised from there too. A second yellow
+          // burst fired from here landed within two metres of the impact's
+          // own, half a frame apart, so a banana strike was two overlapping
+          // effects in two vocabularies for one collision. The peel's identity
+          // now lives in `HIT_CAUSE.banana`, which is where the rest of the
+          // hit vocabulary lives.
           this.group.remove(h.mesh);
           this.hazards.splice(i, 1);
           break;

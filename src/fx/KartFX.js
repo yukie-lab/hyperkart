@@ -5,7 +5,7 @@ import { clamp01, lerp, makeRng, TAU } from '../core/MathX.js';
 
 /**
  * All per-kart visual effects: drift sparks, tyre smoke, surface dust, exhaust,
- * boost flames, impact bursts and the ground shadow blob.
+ * boost flames and the one-shot bursts for impacts, pickups and mini-turbos.
  *
  * Effects are budgeted: emission rates scale with the quality preset, and the
  * player's kart always gets the full rate while distant AI karts get a
@@ -85,13 +85,6 @@ const DRIFT_TIERS = [
 ];
 
 /**
- * Half-size of the sun's fitted shadow box, mirroring SHADOW_EXTENT in
- * render/Lighting.js. Karts outside it get no cast shadow at all, so the
- * contact patch has to carry the anchor on its own out there.
- */
-const SHADOW_BOX = 78;
-
-/**
  * Every `sizeGrow` on a RING in this file came down in this pass, and none of
  * them because the ring was too big *before*.
  *
@@ -121,6 +114,39 @@ function onRoad(p, gy) { if (gy != null) p.y = gy + 0.06; return p; }
 
 /** Dust colour per off-road surface id (see SURFACE in track/Tracks.js). */
 const DUST_COLOR = { 2: 0xbdb6ad, 3: 0xa87c50, 4: 0xdcc79a, 5: 0x8f9a5e };
+
+/**
+ * What hit you, as a presentation.
+ *
+ * `impact()` was handed a colour and nothing else, so a peel, a shell and a
+ * thunder squash fired one identical burst — and that burst shared a palette,
+ * a direction and a footprint with the item pickup. A frozen frame could not
+ * say whether you had just gained a second or lost one, which is the only
+ * question a hit effect exists to answer.
+ *
+ * The colour is the *attacker's*. The victim is already on screen spinning;
+ * the fact the frame is missing is what did it, and in one frame that fact can
+ * only live in the hue.
+ *
+ * `lift` is the second axis and it carries as much as the colour does. A peel
+ * throws nothing upward — you slid on it — and thunder throws everything
+ * *downward*, because being flattened is a compression, not an explosion. The
+ * same shower with a different tint is the defect, not the fix.
+ *
+ * Nothing here is a spray into the air: the whole vocabulary is low, outward
+ * and on the road, so that it cannot be confused with the pickup's rising
+ * chime even at the edge of vision. See `itemBreak` for the other half.
+ */
+const HIT_CAUSE = {
+  //            hue         front sparks  lift  debris  speed
+  banana:     { c: 0xf0bc14, f: 0.80, n: 12, lift:  0.06, d: 4, sp: 4.0 },
+  greenShell: { c: 0x2fe256, f: 1.00, n: 18, lift:  0.40, d: 7, sp: 6.5 },
+  redShell:   { c: 0xff4419, f: 1.22, n: 22, lift:  0.48, d: 8, sp: 7.6 },
+  star:       { c: 0xffc42e, f: 1.12, n: 20, lift:  0.52, d: 6, sp: 7.0 },
+  squash:     { c: 0x9a5cff, f: 1.48, n: 16, lift: -0.30, d: 6, sp: 8.4 },
+  // `Kart.spinout`'s default, and the row an unknown cause falls back to.
+  shell:      { c: 0xff7744, f: 1.00, n: 18, lift:  0.40, d: 7, sp: 6.5 },
+};
 
 /**
  * Golden ratio conjugate — the step that spreads a sequence of hues as evenly
@@ -185,69 +211,56 @@ export class KartFX {
     this._fx = new WeakMap();
     this._karts = null;
     this._time = 0;
-    this._playerPos = null;
     this.quality = opts.quality || 'high';
 
-    this._buildShadowBlob();
     // Items and anything else that needs to emit can find the FX layer here
     // rather than the race director having to thread it through by hand.
     scene.userData.kartFX = this;
   }
 
-  _buildShadowBlob() {
-    // A contact-darkening patch under the tyres — *not* a second copy of the
-    // kart's shadow.
-    //
-    // The shadow map already draws the silhouette. When this quad also drew one
-    // the two multiplied, and shaded road landed near 0.03 display luminance
-    // while lit road beside it sat at 0.4: a hole with the road's aggregate
-    // speckle crawling inside it. So this is now small, soft, and tinted the
-    // colour ground actually takes in daylight shade rather than black —
-    // nothing outdoors is lit by nothing, and a black multiply is what reads as
-    // a hole instead of a shadow.
-    const size = 128;
-    const c = document.createElement('canvas');
-    c.width = c.height = size;
-    const ctx = c.getContext('2d');
-    const img = ctx.createImageData(size, size);
-    for (let y = 0; y < size; y++) {
-      for (let x = 0; x < size; x++) {
-        const dx = (x / size - 0.5) * 2, dy = (y / size - 0.5) * 2;
-        // Slightly elongated along the kart's length.
-        const r = Math.hypot(dx * 1.12, dy * 0.88);
-        // Steeper than a linear falloff so the dark part stays under the
-        // chassis and the edge is gone well before the silhouette would be.
-        const a = Math.pow(clamp01(1 - r), 2.6);
-        const i = (y * size + x) * 4;
-        // White texel, tint from material.color: a black texel would make the
-        // colour below meaningless.
-        img.data[i] = img.data[i + 1] = img.data[i + 2] = 255;
-        img.data[i + 3] = a * 255;
-      }
-    }
-    ctx.putImageData(img, 0, 0);
-    this.blobTex = new THREE.CanvasTexture(c);
-    this.blobGeo = new THREE.PlaneGeometry(2.3, 2.9);
-    this.blobGeo.rotateX(-Math.PI / 2);
-    this.blobMat = new THREE.MeshBasicMaterial({
-      map: this.blobTex, transparent: true, depthWrite: false,
-      // Linear scene units, roughly what sky fill alone puts on tarmac. Alpha
-      // blending toward this instead of toward zero means the patch has a
-      // floor: even at full strength over already-shadowed road it lands near
-      // 0.19 display, not 0.03.
-      color: new THREE.Color().setRGB(0.045, 0.055, 0.078),
-      opacity: 0.30, toneMapped: false,
-      polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
-    });
-  }
-
-  createShadowBlob() {
-    const m = new THREE.Mesh(this.blobGeo, this.blobMat.clone());
-    m.name = 'shadowBlob';   // nameable so `shot.mjs --hide` can isolate it
-    m.renderOrder = 3;
-    this.scene.add(m);
-    return m;
-  }
+  /**
+   * Deliberately nothing, and the measurement that made it nothing.
+   *
+   * There was a soft dark quad under every kart here: a third fake shadow,
+   * stacked on the cast shadow and on `KartModel`'s contactAO. 4b1a47d tuned it
+   * down to stop it double-darkening the road with the cast shadow and the
+   * tuning went past the point of contributing anything — hiding all twelve
+   * across a racing frame moved 0.037% of the frame at a maximum channel delta
+   * of 4/255, against contactAO's 0.284% at 105. That is not a quiet effect,
+   * it is an absent one, bought with one draw call per visible kart.
+   *
+   * It was given a fair attempt at the one job contactAO explicitly refuses
+   * before being cut. `KartModel._updateContact` retires the contact patches
+   * above 32 cm of altitude with the note that "the FX blob is the only honest
+   * cue" up there, so the blob was rebuilt for exactly that: the texture
+   * falloff broadened from a 2.6 power to 1.7 (at 2.6 essentially all of its
+   * alpha sat inside a radius the bodywork covers), the altitude ramp re-based
+   * on measured flight rather than a round number — sampled at 25 ms over a
+   * full race, 95.6% of kart-frames sit in the 0.25-0.50 m *resting* band and
+   * only 4.4% are above it, tailing to 3.4 m — and the airborne opacity taken
+   * to 0.85 with the patch growing 2.3x.
+   *
+   * It made no difference, for a geometric reason no tuning reaches. On the
+   * best airborne frame in ninety seconds of racing — a rival three metres up,
+   * four and a half metres from the lens, its patch at opacity 0.85 and scale
+   * 2.3 — that patch drew *exactly zero pixels*: the ground beneath a kart that
+   * high and that near projects behind the camera. Planted, the kart's own
+   * bodywork and contact patches cover it. There is no altitude at which a
+   * chase camera can see this thing. Forcing every blob to opacity 1.0, a black
+   * hole nobody would ship, reaches 0.160% at delta 54 — and all of it comes
+   * from the planted karts, i.e. from the double-darkening 4b1a47d removed.
+   *
+   * Race.js owns the call site, so this stays as a null-returning stub rather
+   * than a signature change into a file this pass does not own. `kart.shadowBlob`
+   * becomes null and every reader of it is already guarded.
+   *
+   * Worth recording for whoever revisits it: the `SHADOW_BOX` constant deleted
+   * with this code said 78 while `SHADOW_EXTENT` in render/Lighting.js said 62,
+   * so the "outside the fitted shadow box, no cast shadow exists, the patch is
+   * the whole anchor" branch was starting sixteen metres late. Fixing it changed
+   * nothing measurable either, which is its own answer.
+   */
+  createShadowBlob() { return null; }
 
   _rate(kart, cameraPos) {
     if (kart.isPlayer) return 1;
@@ -272,7 +285,10 @@ export class KartFX {
   _state(kart) {
     let s = this._fx.get(kart);
     if (!s) {
-      s = { lastStage: -1, ringPhase: 0, boostPhase: 0, sparkPhase: 0, starSeq: 0 };
+      // `boostTier` outlives the drift it came from on purpose: the mini-turbo
+      // it pays for runs for up to 1.9 s after `drift.stage` has gone back to
+      // -1, and the plume has to keep wearing the tier's colour for all of it.
+      s = { lastStage: -1, ringPhase: 0, boostPhase: 0, sparkPhase: 0, starSeq: 0, boostTier: -1 };
       this._fx.set(kart, s);
     }
     return s;
@@ -286,12 +302,12 @@ export class KartFX {
   update(dt, karts, cameraPos) {
     this._time += dt;
     this._karts = karts;
-    this._playerPos = karts.find((k) => k.isPlayer)?.pos ?? null;
     for (const kart of karts) {
       const rate = this._rate(kart, cameraPos);
       // Stage transitions are one-shots and must fire even for a kart that is
-      // too far away to be worth a continuous emitter.
-      this._driftTransitions(kart);
+      // too far away to be worth a continuous emitter — but they may scale
+      // their density by the same distance term, which is what `rate` is for.
+      this._driftTransitions(kart, rate);
       if (rate > 0.01) {
         this._driftFX(dt, kart, rate);
         this._surfaceDust(dt, kart, rate);
@@ -300,7 +316,6 @@ export class KartFX {
         this._exhaust(dt, kart, rate);
         this._starSparkle(dt, kart, rate);
       }
-      this._shadowBlob(kart);
     }
     this.additive.update(dt);
     this.smoke.update(dt);
@@ -334,12 +349,12 @@ export class KartFX {
   // -- drift ----------------------------------------------------------------
 
   /** Stage-up flashes and the release burst; both are single-frame events. */
-  _driftTransitions(kart) {
+  _driftTransitions(kart, rate = 1) {
     const st = this._state(kart);
     const d = kart.drift;
     const stage = d.active ? d.stage : -1;
     if (d.active && stage > st.lastStage && stage >= 0) this._stageUp(kart, stage);
-    else if (!d.active && st.lastStage >= 0) this._driftRelease(kart, st.lastStage);
+    else if (!d.active && st.lastStage >= 0) this._driftRelease(kart, st.lastStage, rate);
     st.lastStage = stage;
   }
 
@@ -383,51 +398,189 @@ export class KartFX {
     }
   }
 
-  /** Letting go pays out: a wide directional flare in the banked tier colour. */
-  _driftRelease(kart, stage) {
+  /**
+   * Letting go pays out.
+   *
+   * This is the genre's signature reward and it was rendering as two pale
+   * puffs the size of the rear wheels. Three separate things were wrong and
+   * only one of them was the burst itself.
+   *
+   * It had no *duration*. Every layer died inside 0.44 s, and the frame a
+   * reviewer or a player actually looks at is a third of a second after the
+   * button comes up, by which time the entire payout was already gone and what
+   * remained on screen was the ordinary boost plume.
+   *
+   * It had no *colour*. That plume is blue at every tier, so a purple
+   * mini-turbo paid out in blue-white for its whole second and a half. The
+   * tier is now carried through the boost by `_boostFlame` — see `st.boostTier`
+   * below, which is the other half of this effect and by far the larger half
+   * in screen-seconds.
+   *
+   * And it had no *axis*. Thirty sprites thrown backwards out of a point is a
+   * puff from any camera; a chase camera looks straight down the kart's spine,
+   * so "backwards" projects to almost nothing and the payout occupied a circle
+   * about as wide as the axle. What follows is built along the direction of
+   * travel instead: light running away down the road ahead, a flame sheet
+   * trailing behind, and speed lines sweeping the frame edges. Those three
+   * make one elongated shape pointing where the kart is going, which is the
+   * only shape that survives being seen at 143 km/h out of the corner of an
+   * eye.
+   */
+  _driftRelease(kart, stage, rate = 1) {
     const model = kart.model;
     if (!model) return;
+    const st = this._state(kart);
+    // Handed to `_boostFlame` for as long as the mini-turbo runs.
+    st.boostTier = stage;
+
     const tier = DRIFT_TIERS[stage];
     const col = DRIFT.stages[stage].color;
     const gy = this._groundY(kart);
+    const sp = Math.abs(kart.speed);
     _w.set(Math.sin(kart.yaw), 0, Math.cos(kart.yaw));
-    model.anchors.center.getWorldPosition(_p);
-    _p.addScaledVector(_w, -1.1);
+    _side.set(_w.z, 0, -_w.x);
+    model.anchors.center.getWorldPosition(_q);
+    // Distant karts still get the whole shape, at a fraction of the density:
+    // a release is a one-shot and must fire wherever it happens, but eighty
+    // sprites for a rival two hundred metres back is pool the player's own
+    // drift is about to want.
+    const dens = kart.isPlayer ? 1 : Math.max(0.3, rate);
 
-    for (let i = 0; i < 30 + stage * 14; i++) {
-      const a = this.rng() * TAU;
-      const spread = 1.4 + this.rng() * 3.2;
-      _v.copy(_w).multiplyScalar(-(10 + this.rng() * 16 + stage * 5));
-      _v.x += Math.cos(a) * spread;
-      _v.y += Math.sin(a) * spread * 0.7 + 1.0;
-      _v.z += Math.sin(a) * spread;
-      _c.setHex(col);
-      const streak = this.rng() < 0.55;
+    // 1. The road ahead lights up.
+    //
+    // Rimless GROUND pools laid along the travel axis from just behind the
+    // kart to six metres in front of it, brightest and widest at the kart. It
+    // is light thrown down the road by something that just fired, not a front
+    // — a front has a hard edge and would read as a second shockwave — and on
+    // dark tarmac a wide low-alpha wash of a saturated hue moves a great many
+    // pixels a small distance, which is the cheapest legibility in the file
+    // and cannot clip because it never drives more than one channel hard.
+    //
+    // Six metres, not twelve: the ground height is the kart's own, and past
+    // about that distance a crest or a bank on this circuit will have moved
+    // the surface out from under the far end of the trail.
+    if (gy != null) {
+      const N = 8;
+      for (let i = 0; i < N; i++) {
+        const f = i / (N - 1);
+        _p.copy(_q).addScaledVector(_w, -1.4 + f * 7.4);
+        onRoad(_p, gy);
+        // Hot at the kart, the tier's own hue by the far end: the ramp is what
+        // makes the streak read as coming *from* the vehicle.
+        _c.setHex(col).lerp(_WHITE, 0.34 * (1 - f) * (1 - f));
+        _c2.setHex(col).multiplyScalar(0.10);
+        this.additive.spawn(_p, _ZERO, _c, {
+          shape: SHAPE.GROUND, size: 3.4 - f * 1.5, sizeGrow: 2.2,
+          // Longest-lived layer in the burst, and deliberately so: the boost it
+          // pays for runs for 0.85-1.9 s, and every other layer here is gone
+          // inside half of that. This is what keeps the tier's colour on the
+          // road while the eye is still arriving.
+          life: 0.44 + (1 - f) * 0.24, alpha: 0.30 * (1 - f * 0.55),
+          drag: 3, colorB: _c2, rot: 1.0,   // GROUND reads aRot as how filled it is
+        });
+      }
+    }
+
+    // 2. Two payout fronts on the road under the kart. A fast thin one that is
+    //    already past the kart by the time the eye arrives, and a slower
+    //    filled one that is still there when it does.
+    _p.copy(_q); onRoad(_p, gy);
+    _c.setHex(col).lerp(_WHITE, 0.22);
+    _c2.setHex(col).multiplyScalar(0.10);
+    this.additive.spawn(_p, _ZERO, _c, {
+      shape: SHAPE.GROUND, size: 2.4 + stage * 0.9, sizeGrow: 22 + stage * 8,
+      life: 0.32, alpha: 0.70, drag: 4, colorB: _c2, rot: 0.14,
+    });
+    this.additive.spawn(_p, _ZERO, _c2.setHex(col), {
+      shape: SHAPE.GROUND, size: 1.6 + stage * 0.6, sizeGrow: 10 + stage * 4,
+      life: 0.46, alpha: 0.44, drag: 4, colorB: col, rot: 0.42,
+    });
+
+    // 3. A flame sheet off each rear wheel.
+    //
+    // FLAME rather than another shower of specks, because the complaint the
+    // burst has to answer is that it has no shape: a teardrop with a hard
+    // silhouette and a white-hot axis is a shape, and thirty of them
+    // overlapping along one line is a sheet.
+    //
+    // Small and thrown hard, and both halves of that are load-bearing. FLAME
+    // is a *jet* element: it takes its entire silhouette from where it is
+    // going, and the teardrop is built out of a band clipped by the sprite's
+    // own quad — so a slow one a metre across is a translucent rectangle with
+    // a hard edge, which is exactly what a first pass at this layer put six of
+    // beside the kart. Ejected at 6-21 m/s backwards in world terms they
+    // stretch, they read as coming off the vehicle, and they expire well short
+    // of a chase lens that is pulling away from them at thirty.
+    const sheet = Math.round(30 * dens);
+    for (let i = 0; i < sheet; i++) {
+      const sgn = i % 2 === 0 ? -1 : 1;
+      model.anchors[i % 2 === 0 ? 'driftL' : 'driftR'].getWorldPosition(_p);
+      _p.addScaledVector(_w, -0.55);
+      _p.y += 0.10 + this.rng() * 0.28;
+      _v.copy(_w).multiplyScalar(sp * 0.30 - (15 + this.rng() * 15));
+      _v.addScaledVector(_side, sgn * (0.25 + this.rng() * 0.9));
+      _v.y += 0.35 + this.rng() * 0.6;
+      _c.setHex(col).lerp(_WHITE, 0.18);
+      _c2.setHex(col).multiplyScalar(0.13);
       this.additive.spawn(_p, _v, _c, {
-        shape: streak ? SHAPE.STREAK : SHAPE.EMBER,
-        size: streak ? 1.4 + this.rng() * 1.3 : tier.size * 1.2,
-        life: 0.18 + this.rng() * 0.26, alpha: streak ? 0.42 : 0.85,
-        gravity: streak ? 0 : 7, drag: streak ? 2.6 : 1.5,
-        ground: gy, bounce: streak ? 0 : 0.3,
-        rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 16, colorB: 0x180a20,
+        shape: SHAPE.FLAME, size: 0.38 + this.rng() * 0.36,
+        life: 0.22 + this.rng() * 0.18, alpha: 0.55, drag: 2.0, sizeGrow: 0.5,
+        // FLAME reads aRot as its white-hot fraction: this is the third stop
+        // on the ramp, after the near-white front and before the dark tail.
+        rot: 0.55, colorB: _c2,
       });
     }
-    // The payout front. Two of them: a fast thin one that is already past the
-    // kart by the time the eye arrives, and a slower filled one that is still
-    // there when it does. Both lie on the road, which is what makes a release
-    // read as the kart having *shoved* the surface rather than as a circle
-    // drawn over the scene.
-    onRoad(_p, gy);
-    _c.setHex(col);
-    this.additive.spawn(_p, _ZERO, _c, {
-      shape: SHAPE.GROUND, size: 2.2 + stage * 0.8, sizeGrow: 18 + stage * 7,
-      life: 0.26, alpha: 0.62, drag: 4, colorB: 0x0c0c14, rot: 0.14,
-    });
-    _c2.setHex(col).lerp(_WHITE, 0.30);
-    this.additive.spawn(_p, _ZERO, _c2, {
-      shape: SHAPE.GROUND, size: 1.5 + stage * 0.5, sizeGrow: 9 + stage * 3,
-      life: 0.36, alpha: 0.40, drag: 4, colorB: col, rot: 0.42,
-    });
+
+    // 4. Sparks. Fewer than before and thrown outward-and-back rather than
+    //    into a cone, because the sheet now carries the body and these only
+    //    have to give it grain.
+    const sparks = Math.round((18 + stage * 8) * dens);
+    _c2.setHex(col).multiplyScalar(0.14);
+    for (let i = 0; i < sparks; i++) {
+      const a = this.rng() * TAU;
+      const spread = 1.6 + this.rng() * 3.4;
+      _p.copy(_q).addScaledVector(_w, -1.0);
+      _v.copy(_w).multiplyScalar(sp * 0.35 - (8 + this.rng() * 12 + stage * 4));
+      _v.x += Math.cos(a) * spread;
+      _v.y += Math.abs(Math.sin(a)) * spread * 0.6 + 1.2;
+      _v.z += Math.sin(a) * spread;
+      _c.setHex(col);
+      if (this.rng() < 0.30) _c.lerp(_WHITE, 0.35);
+      this.additive.spawn(_p, _v, _c, {
+        shape: SHAPE.EMBER, size: tier.size * (0.9 + this.rng() * 0.8),
+        life: 0.24 + this.rng() * 0.26, alpha: 0.95, gravity: 8, drag: 1.6,
+        ground: gy, bounce: 0.30,
+        rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 16, colorB: _c2,
+      });
+    }
+
+    // 5. Speed lines through the periphery, for the kart the camera is glued
+    //    to. The sustained boost already lays these down at alpha 0.10 as a
+    //    texture; the release fires a short brighter volley of them in the
+    //    tier's own colour, seeded outside the kart's silhouette and flying
+    //    backwards fast enough to leave frame in a fifth of a second.
+    //
+    //    This is the layer that answers "unmistakable in peripheral vision"
+    //    literally: it is the only part of the effect that puts the tier
+    //    colour at the edges of the frame, where nothing else in the game
+    //    ever draws.
+    if (kart.isPlayer) {
+      _c2.setHex(col).multiplyScalar(0.25);
+      for (let i = 0; i < 26; i++) {
+        const a = (i * PHI) * TAU;
+        const r = 4.8 + this.rng() * 4.6;
+        _p.copy(_q);
+        _p.addScaledVector(_side, Math.cos(a) * r);
+        _p.y += Math.sin(a) * r * 0.55 + 0.5;
+        _p.addScaledVector(_w, 1.0 + this.rng() * 3.5);
+        _v.copy(_w).multiplyScalar(-(24 + this.rng() * 20));
+        _c.setHex(col).lerp(_WHITE, 0.26);
+        this.additive.spawn(_p, _v, _c, {
+          shape: SHAPE.STREAK, size: 2.2 + this.rng() * 2.0,
+          life: 0.17 + this.rng() * 0.09, alpha: 0.20, drag: 0.8, colorB: _c2,
+        });
+      }
+    }
   }
 
   _driftFX(dt, kart, rate) {
@@ -723,11 +876,26 @@ export class KartFX {
     // logic with them and read as two unrelated effects on one vehicle. One
     // hue clock now drives both, and the plume cycles with the sparkle.
     let mid, tail, halo;
+    const mt = kart.boostKind === 'drift' && st.boostTier >= 0;
     if (kart.star > 0) {
       const h = (this._time * 0.5) % 1;
       mid = setLuma(_STAR_MID.setHSL(h, 0.88, 0.60), 0.55);
       halo = setLuma(_STAR_HALO.setHSL((h + 0.10) % 1, 0.85, 0.45), 0.30);
       tail = setLuma(_STAR_TAIL.setHSL((h + 0.30) % 1, 1.0, 0.20), 0.10);
+    } else if (mt) {
+      // A mini-turbo is the payout for the drift that earned it, and it lasts
+      // between 0.85 s and 1.9 s — an order of magnitude longer than the
+      // release burst. Firing that burst in the tier colour and then handing
+      // the next second and a half to the ordinary blue jet is why a purple
+      // mini-turbo has been reviewed as "two pale blue-white puffs": the
+      // reward's own colour was on screen for about a fifth of the time the
+      // reward was. The tier hue is rebuilt here against the same luminance
+      // budget the fixed palettes are authored to, so a yellow-orange tier
+      // cannot arrive twice as bright as a blue one.
+      const c = DRIFT.stages[st.boostTier].color;
+      mid = setLuma(_MT_MID.setHex(c), 0.55);
+      halo = setLuma(_MT_HALO.setHex(c), 0.30);
+      tail = setLuma(_MT_TAIL.setHex(c), 0.09);
     } else {
       mid = strong ? _MID_BLUE : _MID_ORANGE;
       tail = strong ? _TAIL_BLUE : _TAIL_ORANGE;
@@ -817,7 +985,12 @@ export class KartFX {
       // but a star jet whose hottest part never takes the hue reads as an
       // ordinary boost with something coloured happening around it.
       _c.copy(_CORE);
+      // Same argument as the star's: a jet whose hottest part never takes the
+      // hue reads as an ordinary boost with something coloured around it. Less
+      // than the star takes, because a tier colour has to stay nameable and
+      // white is what stops it being.
       if (kart.star > 0) _c.lerp(mid, 0.45);
+      else if (mt) _c.lerp(mid, 0.34);
       this.additive.spawn(_p, _v, _c, {
         shape: SHAPE.FLAME, size: 0.44 + this.rng() * 0.20,
         life: 0.095 + this.rng() * 0.06, alpha: 1.10, drag: 4, sizeGrow: 0.7,
@@ -1087,112 +1260,155 @@ export class KartFX {
   // -- one-shots ------------------------------------------------------------
 
   /**
-   * One-shot burst when something hits a kart.
+   * One-shot burst when something hits a kart: a short, tight, ground-anchored
+   * shock in the attacker's colour.
    *
-   * A hit has to be readable in peripheral vision from a single frame, and it
-   * gets there the way every shipped kart racer does: three events on three
-   * timescales that each answer a different question. A near-white flash says
-   * *now*. A hard ring front says *here, and this big*. Tumbling debris with
-   * real silhouettes says *something came apart* — and it is the only one of
-   * the three still on screen a second later.
+   * Every choice below is the opposite of the one `itemBreak` makes, because
+   * the pair had converged: both were a scatter of pale quads over a third of
+   * the frame and a player could not tell from a still which had happened.
+   * This one is *low* (nothing is thrown above head height), *flat* (the
+   * fronts and the scorch lie on the road), *tight* (the debris field is over
+   * inside three metres) and *hot* (a saturated attacker hue, never pastel).
+   * The pickup is high, contained, screen-facing and cool. They now share no
+   * axis at all.
    *
-   * What was here before was thirty-four soft round sprites in one colour and
-   * a glow, which composites to a salmon smudge over the kart: three copies of
-   * "something happened somewhere" and no answer to any of the questions.
+   * The other correction is duration. The punch was a 55 ms flash — under four
+   * frames — and every capture this project takes lands at least 133 ms after
+   * the event it is reviewing, so the loudest part of a hit was structurally
+   * invisible to every screenshot ever taken of it, and very nearly invisible
+   * to a player. What follows lives on the 0.15-0.35 s timescale a reaction
+   * actually occupies, and pays for it by being smaller and less white.
+   *
+   * @param {THREE.Vector3} pos
+   * @param {number} color   the caller's guess; only used for an unknown cause
+   * @param {number} count   spark budget, 30 being the caller's nominal
+   * @param {string} cause   'banana' | 'greenShell' | 'redShell' | 'star' |
+   *                         'squash' | 'shell'; see HIT_CAUSE
    */
-  impact(pos, color = 0xffcc44, count = 34) {
+  impact(pos, color = 0xffcc44, count = 34, cause) {
+    const hit = HIT_CAUSE[cause] ?? HIT_CAUSE.shell;
+    // The caller's colour is the fallback, not the default: when the cause is
+    // known the table wins, because the caller has no way to know that a
+    // thunder squash is violet and a green shell is not simply "not banana".
+    const hue = HIT_CAUSE[cause] ? hit.c : color;
     const gy = this._groundNear(pos);
-    // Off the road surface, or the flash and the ring spend half their area
-    // clipped into the tarmac by the soft ground fade.
-    _p.copy(pos); _p.y += 0.45;
+    const fg = gy == null ? null : gy;
+    _q.copy(pos); onRoad(_q, fg); if (fg == null) _q.y = pos.y;
+    // Low, not level with the roll bar: this is a burst coming off the contact
+    // patches, and starting it at chest height is what let the old one read as
+    // an explosion happening *over* the kart.
+    _p.copy(pos); _p.y += 0.30;
 
-    // 1. Flash: three frames at 60 Hz. Long enough to be seen, short enough
-    //    that it cannot be photographed as a white frame — and small, because
-    //    the thing that has to read is the *onset*, not the coverage.
-    _c.copy(_FLASH);
+    // 1. Flash. Hued, not white, and long enough to be seen — the onset is the
+    //    only part that says *now*, and a near-white sprite at alpha 2.45 was
+    //    also the one thing in the effect that could clip. Half the radiance
+    //    over twice the time reads as more, not less, because it survives.
+    _c.setHex(hue).lerp(_FLASH, 0.55);
     this.additive.spawn(_p, _ZERO, _c, {
-      shape: SHAPE.GLOW, size: 0.82, sizeGrow: 8, life: 0.055, alpha: 2.45,
-      drag: 8, colorB: color,
+      shape: SHAPE.GLOW, size: 0.70, sizeGrow: 5.5, life: 0.13, alpha: 1.55,
+      drag: 8, colorB: hue,
     });
 
     // 2. Two shock fronts at different rates, lying on the road. One ring is a
     //    circle; two moving apart is a blast, and the gap between them is what
-    //    carries the speed.
+    //    carries the speed. On the ground they say *where* as well as *what*,
+    //    and the kart in the middle of them stays in front of them.
     //
-    //    Both used to be screen-facing annuli centred on the kart, so an
-    //    impact rendered as two concentric hairline hoops threaded round the
-    //    vehicle — aligned to nothing, occluding the tyres, and impossible to
-    //    place in the world. On the ground they say *where* as well as *what*,
-    //    and the kart in the middle of them stays in front.
-    const fg = gy == null ? null : gy;
-    _q.copy(pos); onRoad(_q, fg); if (fg == null) _q.y = pos.y;
-    _c.setHex(color);
+    //    Scaled by the cause: a peel is a stumble and a thunder squash is a
+    //    column of air arriving, so they may not expand at the same rate.
+    const F = hit.f;
+    _c.setHex(hue);
+    _c2.setHex(hue).multiplyScalar(0.10);
     this.additive.spawn(_q, _ZERO, _c, {
-      shape: SHAPE.GROUND, size: 1.1, sizeGrow: 23, life: 0.24, alpha: 0.72,
-      drag: 4, colorB: 0x1a0a0c, rot: 0.26,
+      shape: SHAPE.GROUND, size: 1.0 * F, sizeGrow: 15 * F, life: 0.34, alpha: 1.15,
+      drag: 4, colorB: _c2, rot: 0.16,
     });
-    _c2.copy(_FLASH).lerp(_c, 0.35);
+    _c2.setHex(hue).lerp(_FLASH, 0.40);
     this.additive.spawn(_q, _ZERO, _c2, {
-      shape: SHAPE.GROUND, size: 0.7, sizeGrow: 15, life: 0.15, alpha: 0.95,
-      drag: 4, colorB: color, rot: 0.62,
+      shape: SHAPE.GROUND, size: 0.6 * F, sizeGrow: 18 * F, life: 0.26, alpha: 1.15,
+      drag: 4, colorB: hue, rot: 0.50,
     });
     // A pool of the hit's own colour left burning on the tarmac under it. The
-    // fronts are gone in a quarter second; this is what is still saying "you
-    // were hit here" when the eye arrives, and it is the only part of the
+    // fronts are gone in a third of a second; this is what is still saying
+    // "you were hit here" when the eye arrives, and it is the only part of the
     // effect that puts light on the road instead of over it.
+    _c2.setHex(hue).multiplyScalar(0.08);
     this.additive.spawn(_q, _ZERO, _c, {
-      shape: SHAPE.GROUND, size: 4.4, sizeGrow: 3.5, life: 0.44, alpha: 0.48,
-      drag: 4, colorB: 0x120608, rot: 1.0,
+      shape: SHAPE.GROUND, size: 4.0 * F, sizeGrow: 3.0, life: 0.52, alpha: 0.46,
+      drag: 4, colorB: _c2, rot: 1.0,
     });
 
-    // 3. Debris. Eight pieces, not thirty: you have to be able to *track* a
-    //    piece for it to have come off anything, and they go in the opaque
-    //    pool because a silhouette is the whole point and additive sprites
-    //    have none. Real gravity, a bounce, and a tumble on aRot.
-    for (let i = 0; i < 8; i++) {
-      const a = (i / 8 + this.rng() * 0.1) * TAU;
-      const sp = 4.5 + this.rng() * 5.5;
-      _v.set(Math.cos(a) * sp, 4.5 + this.rng() * 4.5, Math.sin(a) * sp);
-      _c.setHex(color).offsetHSL(0, -0.20, -0.46);
+    // 3. Debris. A handful of pieces, not thirty: you have to be able to
+    //    *track* a piece for it to have come off anything, and they go in the
+    //    opaque pool because a silhouette is the whole point and additive
+    //    sprites have none.
+    //
+    //    They are lit chips now. The colour was the hit hue at minus 0.46
+    //    lightness with a near-black end colour, which in a normal-blended
+    //    pool at alpha 0.95 is a black lozenge — and SHARD whitens one facet
+    //    by 42%, so what actually rendered was a field of hard black-and-white
+    //    diamonds belonging to no palette in the game. A chip has to be the
+    //    colour of the thing that broke; the facet is the light on it, not the
+    //    whole of its brightness range.
+    //
+    //    And they are thrown a third as hard. At 4.5-10 m/s outward with 4.5-9
+    //    up and drag 0.35 they crossed fifteen metres of road and were still
+    //    tumbling a second and a half later — a hit that is over in 0.35 s
+    //    followed by a second of litter that outlives its own cause.
+    for (let i = 0; i < hit.d; i++) {
+      const a = (i / hit.d + this.rng() * 0.12) * TAU;
+      const sp = 2.2 + this.rng() * 2.8;
+      _v.set(Math.cos(a) * sp, (1.6 + this.rng() * 2.4) * (0.4 + hit.lift), Math.sin(a) * sp);
+      _c.setHex(hue).offsetHSL(0, 0.04, -0.13);
+      _c2.setHex(hue).offsetHSL(0, 0.10, -0.32);
       this.smoke.spawn(_p, _v, _c, {
-        shape: SHAPE.SHARD, size: 0.20 + this.rng() * 0.16,
-        life: 0.85 + this.rng() * 0.55, alpha: 0.95, gravity: 20, drag: 0.35,
-        ground: gy, bounce: 0.36,
-        rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 22, colorB: 0x241c18,
+        shape: SHAPE.SHARD, size: 0.16 + this.rng() * 0.14,
+        life: 0.42 + this.rng() * 0.26, alpha: 0.92, gravity: 24, drag: 0.9,
+        ground: gy, bounce: 0.30,
+        rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 18, colorB: _c2,
       });
     }
 
-    // 4. Sparks: fewer and tapered. Thirty round ones at half a metre each is
-    //    the "twenty-five soft circles scattered over the kart"; twenty combs
-    //    that you can follow outward from a centre is a burst.
-    const sparks = Math.round(count * 0.62);
-    for (let i = 0; i < sparks; i++) {
-      _v.set(this.rng() - 0.5, this.rng() * 0.9, this.rng() - 0.5).normalize()
-        .multiplyScalar(6 + this.rng() * 13);
-      _c.setHex(color).offsetHSL((this.rng() - 0.5) * 0.06, 0, (this.rng() - 0.5) * 0.18);
-      const streak = this.rng() < 0.25;
+    // 4. Sparks, thrown *outward along the road* rather than into a
+    //    hemisphere. A spherical spray is the one shape that says nothing
+    //    about what happened — it is the same picture for a peel, a shell and
+    //    a lightning bolt — and half of it flies up out of frame where the
+    //    chase camera cannot see it anyway. Cast flat and given real weight
+    //    they skitter across the tarmac and stay inside the fronts.
+    //
+    //    Not *too* flat, though: `ground` has to be set for a spark to bounce
+    //    off the road at all, and setting it also turns on the soft contact
+    //    fade, which takes a sprite to nothing below about 40 cm. A shower
+    //    thrown perfectly horizontally is therefore a shower that deletes
+    //    itself. The lift term is sized so the arc peaks around half a metre —
+    //    high enough to be drawn, low enough that it is unmistakably a thing
+    //    skidding across tarmac rather than an explosion over the kart.
+    const n = Math.max(6, Math.round(hit.n * (count / 30)));
+    _c2.setHex(hue).multiplyScalar(0.12);
+    for (let i = 0; i < n; i++) {
+      const a = (i / n + this.rng() * 0.4) * TAU;
+      const sp = hit.sp * (0.55 + this.rng() * 0.85);
+      _v.set(Math.cos(a) * sp, hit.lift * (3.4 + this.rng() * 5.0), Math.sin(a) * sp);
+      _c.setHex(hue).offsetHSL((this.rng() - 0.5) * 0.04, 0, (this.rng() - 0.5) * 0.14);
       this.additive.spawn(_p, _v, _c, {
-        shape: streak ? SHAPE.STREAK : SHAPE.EMBER,
-        size: streak ? 1.3 + this.rng() * 1.2 : 0.40 + this.rng() * 0.45,
-        life: 0.30 + this.rng() * 0.35, alpha: streak ? 0.45 : 1.0,
-        gravity: streak ? 2 : 14, drag: streak ? 2.4 : 1.1,
-        ground: gy, bounce: streak ? 0 : 0.42,
-        rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 16, colorB: 0x20080c,
+        shape: SHAPE.EMBER, size: 0.30 + this.rng() * 0.34,
+        life: 0.24 + this.rng() * 0.24, alpha: 1.0,
+        gravity: 22, drag: 2.0, ground: gy, bounce: 0.30,
+        rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 16, colorB: _c2,
       });
     }
 
-    // 5. Scorch: the part that lingers after everything else is gone. Thinner
-    //    than it was — the debris now carries the aftermath, and a dark puff
-    //    over the kart was hiding the pieces it was supposed to sell.
-    for (let i = 0; i < 10; i++) {
+    // 5. Scorch: the part that lingers after everything else is gone, kept
+    //    low and thin so it backs the sparks instead of hiding them.
+    for (let i = 0; i < 7; i++) {
       const a = this.rng() * TAU;
-      const sp = 1.5 + this.rng() * 4.5;
-      _v.set(Math.cos(a) * sp, this.rng() * 1.4 + 0.2, Math.sin(a) * sp);
+      const sp = 1.4 + this.rng() * 3.0;
+      _v.set(Math.cos(a) * sp, this.rng() * 0.9 + 0.15, Math.sin(a) * sp);
       _c.setRGB(0.14, 0.12, 0.11);
       this.smoke.spawn(pos, _v, _c, {
-        shape: SHAPE.SMOKE, size: 0.50 + this.rng() * 0.6,
-        life: 0.7 + this.rng() * 0.6, alpha: 0.17, gravity: -0.4, drag: 2.2,
-        rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 2.5, sizeGrow: 1.1,
+        shape: SHAPE.SMOKE, size: 0.46 + this.rng() * 0.5,
+        life: 0.55 + this.rng() * 0.45, alpha: 0.16, gravity: -0.3, drag: 2.4,
+        rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 2.5, sizeGrow: 1.0,
         ground: gy, colorB: 0x2b2622,
       });
     }
@@ -1251,76 +1467,141 @@ export class KartFX {
   }
 
   /**
-   * An item box being collected — the moment the box stops existing.
+   * An item box being collected — a contained upward chime in the box's own
+   * colour.
    *
-   * This used to be `burst()`: roughly eight four-pixel star sprites and
-   * nothing else. No shatter, no flash, no front. Taking a box was therefore
-   * the one event in the game with a *worse* presentation than driving in a
-   * straight line, and a pickup a player will not change line for is a pickup
-   * that is not doing its job on the track layout either.
+   * The previous version was eighteen tumbling prism shards and thirty sparks
+   * thrown into a hemisphere at up to 16 m/s, and it was a good effect for the
+   * wrong event: it was the *impact* effect with a rainbow palette. Both
+   * scattered hard-edged quads across a third of the frame for the better part
+   * of a second, both were centred on the kart, and from a still frame the
+   * only difference was hue. Nothing in a kart racer costs more than a player
+   * not knowing whether the last half second was a reward or a punishment.
    *
-   * A container coming apart reads from three things, in this order: the thing
-   * is suddenly gone (flash), pieces of it are in the air (shards with real
-   * silhouettes, tumbling, falling, bouncing on the road), and the space it
-   * occupied is briefly lit (front and spill). The shards are the expensive
-   * part and the only part still on screen half a second later, so they carry
-   * the hue: a box is a rainbow prism, and its pieces are pieces of a rainbow.
+   * So this one gives up every axis the hit uses. It goes *up*, not outward.
+   * It stays inside about two metres of where the box was. It is over in a
+   * third of a second — a chime, not an explosion. It has no ground front and
+   * no ground spill, because the road is the hit's surface now; a pickup
+   * happens in the air, at bonnet height, and the shape that reads there is a
+   * screen-facing ring, which is the one primitive in the set that nothing
+   * else emits. And it carries no tumbling debris at all: a silhouette flying
+   * across the road is the hit's sentence, and it is the part that lingered
+   * long enough to be mistaken for one.
+   *
+   * @param {THREE.Vector3} pos
+   * @param {THREE.Color} tint  the box's own live colour, from ItemSystem —
+   *                            the burst has to be the colour of the thing
+   *                            that was standing there, or it is a generic pop
+   *                            with a hue applied.
    */
-  itemBreak(pos) {
-    const gy = this._groundNear(pos);
+  itemBreak(pos, tint) {
     _p.copy(pos);
+    // Fallback is the warm gold the box shader mixes toward, so a caller that
+    // has no tint still gets something from the box's own palette.
+    const c0 = tint && tint.isColor ? _PICK.copy(tint) : _PICK.setRGB(1.00, 0.86, 0.46);
+    // The box wears 28% warm white on top of its hue, which is correct for a
+    // translucent prop lit from inside and far too pale for an additive burst
+    // — the first pass at this read as a grey soap bubble. Saturation back up
+    // and luminance pinned, so a box's own colour survives being turned into
+    // light and a green box does not arrive at half the brightness of a yellow
+    // one (a hue swept at fixed lightness moves 2.6x in luminance).
+    setLuma(c0.offsetHSL(0, 0.45, 0), 0.74);
+    const deep = _PICK2.copy(c0).multiplyScalar(0.16);
 
-    // 1. Flash. Three frames, small, near-white — the onset, nothing else.
-    _c.copy(_FLASH);
+    // 1. Flash. Four frames, small, and only halfway to white: the box was a
+    //    coloured thing and the instant it stops existing is not the moment to
+    //    forget what colour it was.
+    _c.copy(c0).lerp(_FLASH, 0.5);
     this.additive.spawn(_p, _ZERO, _c, {
-      shape: SHAPE.GLOW, size: 1.45, sizeGrow: 12, life: 0.07, alpha: 2.6,
-      drag: 8, colorB: 0xffd070,
+      shape: SHAPE.GLOW, size: 1.10, sizeGrow: 7, life: 0.075, alpha: 1.70,
+      drag: 8, colorB: c0,
     });
 
-    // 2. Fronts on the road under it, so the pickup has a footprint the eye
-    //    can find even when the box itself was behind another kart.
-    _q.copy(pos); onRoad(_q, gy);
-    _c.setRGB(1.00, 0.82, 0.34);
-    this.additive.spawn(_q, _ZERO, _c, {
-      shape: SHAPE.GROUND, size: 1.6, sizeGrow: 25, life: 0.26, alpha: 0.85,
-      drag: 4, colorB: 0x2a1804, rot: 0.16,
+    // 2. Two screen-facing rings where the box was.
+    //
+    //    RING has sat unused since every shockwave in the game moved to the
+    //    road — correctly, because a blast expands across a surface. A pickup
+    //    does not: it happens a metre in the air with nothing under it but the
+    //    racing line, and a hoop drawn in the lens plane is exactly the right
+    //    object for a thing that popped in mid-air. It is also the single
+    //    clearest way to tell these two events apart in one frozen frame, from
+    //    any angle, because the hit's fronts are ellipses lying flat and this
+    //    is a circle standing up.
+    // No white mixed in here on purpose. RING already takes its leading edge
+    // half of the way to white on its own, and a colour pre-lightened on top
+    // of that came out as a grey soap bubble on every box whose hue was not
+    // already extreme — the ramp belongs to the primitive, and the emitter's
+    // job is to hand it a hue worth ramping.
+    this.additive.spawn(_p, _ZERO, c0, {
+      shape: SHAPE.RING, size: 1.0, sizeGrow: 9.5, life: 0.28, alpha: 1.65,
+      drag: 4, colorB: deep,
     });
-    this.additive.spawn(_q, _ZERO, _c, {
-      shape: SHAPE.GROUND, size: 3.8, sizeGrow: 3.0, life: 0.38, alpha: 0.44,
-      drag: 4, colorB: 0x1a1004, rot: 1.0,
+    this.additive.spawn(_p, _ZERO, c0, {
+      shape: SHAPE.RING, size: 0.6, sizeGrow: 4.2, life: 0.38, alpha: 0.75,
+      drag: 4, colorB: deep,
     });
 
-    // 3. Shards. Eighteen pieces of prism, each keeping its own hue right
-    //    through its life so the shower is a spectrum rather than a colour.
-    //    Opaque pool: a silhouette is the entire point and additive sprites
-    //    have none.
-    for (let i = 0; i < 18; i++) {
-      const a = (i / 18 + this.rng() * 0.12) * TAU;
-      const sp = 3.5 + this.rng() * 5.0;
-      _v.set(Math.cos(a) * sp, 3.0 + this.rng() * 5.0, Math.sin(a) * sp);
-      const h = (i * PHI + 0.1) % 1;
-      setLuma(_c.setHSL(h, 0.85, 0.62), 0.68);
-      setLuma(_c2.setHSL(h, 0.95, 0.30), 0.14);
-      this.smoke.spawn(_p, _v, _c, {
-        shape: SHAPE.SHARD, size: 0.26 + this.rng() * 0.24,
-        life: 0.70 + this.rng() * 0.50, alpha: 0.95, gravity: 19, drag: 0.4,
-        ground: gy, bounce: 0.38,
-        rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 24, colorB: _c2,
+    // 3. The chime itself: motes going up.
+    //
+    //    SPARK, not EMBER. A four-point star scintillates on its own clock, so
+    //    two dozen of them rising together twinkle — which is the whole of
+    //    what "you gained something" sounds like rendered as pixels, and it is
+    //    a shape the hit deliberately never uses. They are small on purpose:
+    //    at any size where a star's arms survive minification you get lozenges
+    //    piling up on the tarmac, and this shower has to be gone before it can
+    //    land on anything.
+    for (let i = 0; i < 32; i++) {
+      const a = (i * PHI) * TAU;
+      const r = 0.30 + this.rng() * 0.45;
+      _p.copy(pos);
+      _p.x += Math.cos(a) * r;
+      _p.z += Math.sin(a) * r;
+      _p.y += (this.rng() - 0.5) * 0.45;
+      // Almost all of the speed is vertical. The lateral term only exists so
+      // the column has a width; anything more and it becomes a spray, and a
+      // spray is what the hit does.
+      _v.set(Math.cos(a) * (0.4 + this.rng() * 0.9),
+             5.0 + this.rng() * 3.8,
+             Math.sin(a) * (0.4 + this.rng() * 0.9));
+      // A narrow hue spread around the box's own colour, so the column has
+      // internal variety without becoming the old full-spectrum confetti —
+      // twenty-six hues is a rainbow, and a rainbow belongs to the star.
+      _c.copy(c0).offsetHSL((this.rng() - 0.5) * 0.055, 0.05, this.rng() * 0.12);
+      this.additive.spawn(_p, _v, _c, {
+        shape: SHAPE.SPARK, size: 0.13 + this.rng() * 0.14,
+        life: 0.22 + this.rng() * 0.16, alpha: 1.15, gravity: 5.0, drag: 2.7,
+        rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 22, colorB: deep,
       });
     }
 
-    // 4. Sparkle. Tapered, so it reads as thrown outward from a centre rather
-    //    than as confetti that happened to land near the kart.
-    for (let i = 0; i < 30; i++) {
-      _v.set(this.rng() - 0.5, this.rng() * 0.85 + 0.15, this.rng() - 0.5).normalize()
-        .multiplyScalar(5 + this.rng() * 11);
-      const h = (this.rng() * 0.18 + 0.08) % 1;
-      setLuma(_c.setHSL(h, 0.90, 0.66), 0.95);
+    // 4. Six vertical light lines. A STREAK orients to its own screen-space
+    //    travel, so throwing them straight up is what makes them draw upward
+    //    — the one direction nothing else in the game streaks in. They are the
+    //    peripheral-vision read: thin, bright, and unmistakably rising.
+    for (let i = 0; i < 8; i++) {
+      _p.copy(pos);
+      _p.x += (this.rng() - 0.5) * 0.7;
+      _p.z += (this.rng() - 0.5) * 0.7;
+      _v.set((this.rng() - 0.5) * 0.6, 7.5 + this.rng() * 3.5, (this.rng() - 0.5) * 0.6);
+      _c.copy(c0).lerp(_WHITE, 0.30);
       this.additive.spawn(_p, _v, _c, {
-        shape: SHAPE.EMBER, size: 0.30 + this.rng() * 0.30,
-        life: 0.26 + this.rng() * 0.30, alpha: 1.0, gravity: 13, drag: 1.2,
-        ground: gy, bounce: 0.40,
-        rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 16, colorB: 0x2a1000,
+        shape: SHAPE.STREAK, size: 1.2 + this.rng() * 0.9,
+        life: 0.16 + this.rng() * 0.09, alpha: 0.46, gravity: 3, drag: 2.4,
+        colorB: c0,
+      });
+    }
+
+    // 5. A short column of body under the motes, so the burst has a middle.
+    //    Four sprites, small and dim: this is the only layer with no shape of
+    //    its own, and a wide soft glow here is what turns a chime back into a
+    //    puff.
+    for (let i = 0; i < 4; i++) {
+      _p.copy(pos); _p.y += i * 0.26;
+      _v.set(0, 3.2 - i * 0.45, 0);
+      _c.copy(c0).lerp(_WHITE, 0.18 - i * 0.04);
+      this.additive.spawn(_p, _v, _c, {
+        shape: SHAPE.GLOW, size: 0.58 - i * 0.06,
+        life: 0.17 + i * 0.03, alpha: 0.34, drag: 3.4, colorB: deep,
       });
     }
   }
@@ -1342,32 +1623,6 @@ export class KartFX {
     }
   }
 
-  _shadowBlob(kart) {
-    if (!kart.shadowBlob) return;
-    const b = kart.shadowBlob;
-    const g = kart.ground;
-    if (!g || g.height === undefined) { b.visible = false; return; }
-    b.visible = true;
-    b.position.set(kart.visualPos.x, g.height + 0.03, kart.visualPos.z);
-    b.rotation.y = kart.bodyYaw;
-
-    // Complementary, not additive. The fitted shadow box follows the player
-    // (SHADOW_EXTENT in render/Lighting.js), so inside it the shadow map owns
-    // the silhouette and this only has to seat the tyres; outside it there is
-    // no cast shadow at all and the patch is the whole anchor.
-    const far = this._playerPos ? this._playerPos.distanceTo(kart.pos) > SHADOW_BOX : false;
-    let opacity = far ? 0.52 : 0.30;
-
-    // Off the ground the cast shadow slides away along the sun direction, so
-    // the patch stops being a duplicate and starts being the only altitude cue.
-    // It still shrinks and softens with height — that *is* the cue.
-    const h = Math.max(0, kart.visualPos.y - g.height - 0.42);
-    const k = clamp01(h / 4.5);
-    b.material.opacity = opacity * (1 - k * 0.55);
-    const sc = 1 + k * 0.7;
-    b.scale.set(sc, 1, sc);
-  }
-
   setPixelScale(heightPx, fovDeg) {
     this.additive.setPixelScale(heightPx, fovDeg);
     this.smoke.setPixelScale(heightPx, fovDeg);
@@ -1378,9 +1633,6 @@ export class KartFX {
   dispose() {
     this.additive.dispose();
     this.smoke.dispose();
-    this.blobGeo.dispose();
-    this.blobMat.dispose();
-    this.blobTex.dispose();
     if (this.scene.userData.kartFX === this) delete this.scene.userData.kartFX;
   }
 }
@@ -1408,3 +1660,11 @@ const _HALO_ORANGE = new THREE.Color().setRGB(0.85, 0.30, 0.06);
 const _STAR_MID = new THREE.Color();
 const _STAR_TAIL = new THREE.Color();
 const _STAR_HALO = new THREE.Color();
+// Same reason: a mini-turbo plume is the drift tier's colour rebuilt against
+// the same luminance budget the fixed palettes above were authored to.
+const _MT_MID = new THREE.Color();
+const _MT_TAIL = new THREE.Color();
+const _MT_HALO = new THREE.Color();
+// The pickup's tint has to survive the loops that reuse `_c`/`_c2`.
+const _PICK = new THREE.Color();
+const _PICK2 = new THREE.Color();
