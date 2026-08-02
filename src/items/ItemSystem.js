@@ -45,6 +45,210 @@ const ODDS = [
 /** How long a collected box keeps drawing while it blows apart. */
 const POP_TIME = 0.30;
 
+/**
+ * Item-box appearance.
+ *
+ * Everything below writes *linear scene-referred* values, because the scene
+ * renders into a half-float target and tone mapping only happens in the output
+ * pass (see render/PostFX.js). Exposure is 0.52, so linear 1.9 is screen white
+ * and the bloom threshold sits at 1.05 post-exposure — i.e. linear 2.0. The
+ * shell body is therefore authored around 1.0-1.3 and *only* the edge frame is
+ * allowed past 2.0. A box that reads as bright as the sky is a box that has
+ * stopped being a prop and started being a light source, which is precisely
+ * how these ended up as white cardboard cartons.
+ */
+const BOX_SHELL_VERT = /* glsl */`
+  varying vec3 vNrm;
+  varying vec3 vView;
+  varying vec3 vObj;
+  varying float vHueOff;
+  void main() {
+    vObj = position;
+    // Per-box hue offset hashed from where the box stands. A single shared
+    // material would otherwise paint every box on the circuit the same colour
+    // in the same frame, and four identical boxes in a row is a texture, not
+    // four separate pickups.
+    vHueOff = fract(dot(modelMatrix[3].xyz, vec3(0.037, 0.019, 0.029)));
+    vec4 world = modelMatrix * vec4(position, 1.0);
+    vNrm = normalize(mat3(modelMatrix) * normal);
+    vView = normalize(cameraPosition - world.xyz);
+    gl_Position = projectionMatrix * viewMatrix * world;
+  }`;
+
+const BOX_SHELL_FRAG = /* glsl */`
+  precision highp float;
+  varying vec3 vNrm;
+  varying vec3 vView;
+  varying vec3 vObj;
+  varying float vHueOff;
+  uniform float uTime;
+
+  vec3 hue(float h) {
+    // Cheap cosine palette. Hue as a continuous function beats an HSL helper
+    // here because the fresnel term feeds it directly, every fragment.
+    return 0.5 + 0.5 * cos(6.28318 * (h + vec3(0.0, 0.33, 0.67)));
+  }
+
+  void main() {
+    // abs(): the shell is double-sided, and a back face whose normal points
+    // away would otherwise report zero fresnel and go invisible at the rim,
+    // which is the one place the effect has to be strongest.
+    float ndv = abs(dot(normalize(vNrm), normalize(vView)));
+    float f = pow(1.0 - ndv, 2.6);
+
+    // Thin-film interference: the hue is a function of viewing angle, so the
+    // colour sweeps as the box rotates and every face reads differently. That
+    // angular dependence is the whole difference between "glass" and "a
+    // translucent grey cube".
+    vec3 film = hue(0.44 + vHueOff * 0.5 + f * 0.72 + vObj.y * 0.14 + normalize(vNrm).x * 0.09 + uTime * 0.05);
+    // Pull toward white by the film's own strength: fully saturated rainbow
+    // across a whole face reads as a beach ball, not as a coating.
+    film = mix(vec3(0.74, 0.94, 1.00), film, 0.52);
+
+    // Face shading from the world normal alone. There is no light here on
+    // purpose: a magic prop that samples the scene's sun picks up the sun's
+    // *intensity*, and this thing has to look identical at every point of a
+    // lap and on all three tracks.
+    float up = normalize(vNrm).y * 0.5 + 0.5;
+    vec3 body = film * mix(0.85, 1.55, up);
+
+    // Moulded frame along the cube edges. Two of the three object-space axes
+    // being near the surface means "edge"; all three means "corner".
+    vec3 e = abs(vObj) / 0.78;
+    float m1 = max(max(e.x, e.y), e.z);
+    float m2 = max(min(e.x, e.y), min(max(e.x, e.y), e.z));   // second largest
+    float edge = smoothstep(0.87, 0.995, m2) * step(0.86, m1);
+
+    // Interior volume: a slow diagonal caustic so the inside of the box is not
+    // empty space. Very low amplitude — this is texture, not a feature.
+    float caustic = 0.5 + 0.5 * sin(vObj.x * 7.0 + vObj.z * 5.0 - uTime * 1.7);
+
+    float a = mix(0.15, 0.72, f) + caustic * 0.04;
+    vec3 col = body * (1.05 + caustic * 0.15);
+    // The frame is the only part allowed past the bloom threshold, and it is
+    // thin enough that it costs a fraction of a percent of the frame.
+    col = mix(col, hue(0.30 + vHueOff * 0.5 + uTime * 0.11) * 2.1 + 0.40, edge);
+    a = mix(a, 0.92, edge);
+
+    gl_FragColor = vec4(col, a);
+  }`;
+
+/**
+ * The core. A screen-aligned billboard rather than a solid, because the thing
+ * it has to communicate — "a random item is inside" — is a glyph, and a glyph
+ * on a spinning polyhedron is edge-on half the time. Billboarding in the vertex
+ * shader keeps it free: no per-frame quaternion writes for the dozens of boxes
+ * a circuit carries.
+ */
+const BOX_CORE_VERT = /* glsl */`
+  varying vec2 vP;
+  varying float vHueOff;
+  void main() {
+    vP = position.xy;
+    vHueOff = fract(dot(modelMatrix[3].xyz, vec3(0.037, 0.019, 0.029)));
+    // Uniform scale of the instance, recovered from its own matrix, so the
+    // holder's breathe and the collection pop still drive the glyph.
+    float s = length(modelMatrix[0].xyz);
+    vec4 mv = viewMatrix * modelMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+    mv.xy += position.xy * s;
+    gl_Position = projectionMatrix * mv;
+  }`;
+
+const BOX_CORE_FRAG = /* glsl */`
+  precision highp float;
+  varying vec2 vP;
+  varying float vHueOff;
+  uniform float uTime;
+
+  float seg(vec2 p, vec2 a, vec2 b) {
+    vec2 pa = p - a, ba = b - a;
+    return length(pa - ba * clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0));
+  }
+
+  void main() {
+    vec2 p = vP;
+    float r = length(p) * 2.0;
+
+    // A question mark, as three strokes. The hook is a ring with its
+    // lower-left quadrant cut away; the descender runs from where the hook
+    // ends into the centreline; the dot sits below.
+    vec2 q = p - vec2(0.0, 0.15);
+    float d = abs(length(q) - 0.13);
+    if (q.x < 0.0 && q.y < 0.0) d = 1.0;
+    d = min(d, seg(p, vec2(0.112, 0.088), vec2(0.0, -0.02)));
+    d = min(d, seg(p, vec2(0.0, -0.02), vec2(0.0, -0.15)));
+    d = min(d, length(p - vec2(0.0, -0.26)) - 0.004);
+    // Wide strokes on purpose. At forty metres the whole glyph spans about a
+    // dozen pixels, and a hairline one minifies to grey mush — the mark has to
+    // survive being three pixels tall or it is decoration, not information.
+    float glyph = smoothstep(0.072, 0.026, d);
+
+    // Halo. Past about twenty metres the glyph itself is sub-pixel, and this
+    // is what survives: a coloured point of light on the road. It is the
+    // reason a box is findable at all at the far end of a straight.
+    float halo = pow(smoothstep(0.62, 0.0, r), 2.4);
+    // Hot nucleus behind the mark, so the box is lit from the inside rather
+    // than being a display case with a sticker in it.
+    float nucleus = pow(smoothstep(0.30, 0.0, r), 2.0);
+
+    // Hue cycles through the item palette rather than sitting on one colour,
+    // because the contents are random and the box should say so.
+    float h = fract(uTime * 0.13 + vHueOff);
+    vec3 tint = 0.5 + 0.5 * cos(6.28318 * (h + vec3(0.0, 0.33, 0.67)));
+    tint = mix(vec3(1.0, 0.92, 0.72), tint, 0.72);
+
+    // Counter-beat against the shell's slower breathe: two rates is what makes
+    // a container read as holding something alive.
+    float pulse = 0.82 + 0.18 * sin(uTime * 7.0);
+
+    vec3 col = tint * (halo * 0.40 + nucleus * 0.55 + glyph * 2.40) * pulse;
+    float a = clamp(halo * 0.16 + nucleus * 0.18 + glyph * 1.0, 0.0, 1.0);
+    if (a < 0.004) discard;
+    gl_FragColor = vec4(col, a);
+  }`;
+
+/**
+ * The pool of light a box lays on the road under itself.
+ *
+ * One InstancedMesh for every box on the circuit, so the whole effect is a
+ * single draw call. It does two jobs at once: the centre blends toward a warm
+ * emissive so the box has a visible footprint, and an outer ring blends toward
+ * a dark cool so the box is anchored to the surface instead of hovering in
+ * front of it. A purely additive pool can only ever do the first.
+ */
+const BOX_POOL_VERT = /* glsl */`
+  attribute float aOn;
+  varying vec2 vUvP;
+  varying float vOn;
+  void main() {
+    vUvP = position.xy * 2.0;
+    vOn = aOn;
+    gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+  }`;
+
+const BOX_POOL_FRAG = /* glsl */`
+  precision highp float;
+  varying vec2 vUvP;
+  varying float vOn;
+  uniform float uTime;
+  void main() {
+    if (vOn <= 0.001) discard;
+    float r = length(vUvP);
+    if (r > 1.0) discard;
+    float g = pow(smoothstep(0.62, 0.0, r), 1.8);
+    float shade = smoothstep(1.0, 0.34, r) * (1.0 - g);
+
+    float pulse = 0.78 + 0.22 * sin(uTime * 3.1);
+    float ga = g * 0.46 * pulse * min(vOn, 1.0) * vOn;
+    float sa = shade * 0.26 * min(vOn, 1.0);
+
+    vec3 glow = vec3(1.70, 1.14, 0.44);
+    vec3 dark = vec3(0.035, 0.042, 0.062);
+    float a = ga + sa;
+    if (a < 0.004) discard;
+    gl_FragColor = vec4((glow * ga + dark * sa) / a, a);
+  }`;
+
 function oddsRow(rank, fieldSize) {
   const r = rank / Math.max(fieldSize, 2);
   if (rank === 1) return ODDS[0];
@@ -91,49 +295,95 @@ export class ItemSystem {
     // Alpha-blended glass rather than `transmission`. Real transmission makes
     // three re-render the whole opaque scene into a refraction buffer, so a
     // single box in frame roughly doubled the scene's triangle count — for a
-    // prop that reads as a flat white cube at race distance anyway. Low opacity
-    // plus a hot core inside sells "container with something in it" far better,
-    // and costs one ordinary transparent draw.
-    this.boxMaterial = new THREE.MeshPhysicalMaterial({
-      color: 0xbfe6ff,
-      roughness: 0.06,
-      metalness: 0.0,
-      clearcoat: 1.0,
-      clearcoatRoughness: 0.04,
-      iridescence: 1.0,
-      iridescenceIOR: 1.7,
-      iridescenceThicknessRange: [120, 520],
+    // prop that reads as a flat white cube at race distance anyway.
+    //
+    // What replaced it — a physical material at opacity 0.34 with clearcoat 1
+    // and envMapIntensity 2.2 — was no better: two double-sided layers of a
+    // near-mirror pale-blue surface composite to about 0.56 coverage of a value
+    // above 1.0, which is a white carton. The glass read has to come from
+    // *angle*, not from a low opacity number: a fresnel that is nearly
+    // transparent face-on and nearly opaque at the rim, with the hue moving as
+    // it goes. Hand-authored because a lit PBR material cannot do it without
+    // also inheriting the sun's intensity, which changes across a lap.
+    this.boxMaterial = new THREE.ShaderMaterial({
+      uniforms: { uTime: { value: 0 } },
+      vertexShader: BOX_SHELL_VERT,
+      fragmentShader: BOX_SHELL_FRAG,
       transparent: true,
-      opacity: 0.34,
-      emissive: 0x1b3d5c,
-      emissiveIntensity: 0.5,
-      envMapIntensity: 2.2,
       depthWrite: false,
       side: THREE.DoubleSide,
     });
-    // The core carries the read: unlit, un-tonemapped and bright enough to
-    // bloom a little, so a box is a point of light on the road from far away.
-    this.boxCoreMaterial = new THREE.MeshBasicMaterial({
-      color: 0xffd23c, toneMapped: false, transparent: true, opacity: 0.95,
+    this.boxCoreMaterial = new THREE.ShaderMaterial({
+      uniforms: { uTime: { value: 0 } },
+      vertexShader: BOX_CORE_VERT,
+      fragmentShader: BOX_CORE_FRAG,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
     });
-    const coreGeo = new THREE.OctahedronGeometry(0.34, 0);
+    const coreGeo = new THREE.PlaneGeometry(0.80, 0.80);
 
-    for (const def of this.track.itemBoxes) {
+    const n = this.track.itemBoxes.length;
+    this.boxPoolOn = new Float32Array(n);
+    const poolGeo = new THREE.PlaneGeometry(1, 1);
+    poolGeo.setAttribute('aOn', new THREE.InstancedBufferAttribute(this.boxPoolOn, 1));
+    this.boxPoolMaterial = new THREE.ShaderMaterial({
+      uniforms: { uTime: { value: 0 } },
+      vertexShader: BOX_POOL_VERT,
+      fragmentShader: BOX_POOL_FRAG,
+      transparent: true,
+      depthWrite: false,
+      // The road frame is not guaranteed right-handed, so half the quads would
+      // be wound away from the camera and back-face culled out of existence.
+      side: THREE.DoubleSide,
+    });
+    this.boxPool = new THREE.InstancedMesh(poolGeo, this.boxPoolMaterial, Math.max(n, 1));
+    this.boxPool.name = 'itemBoxPool';
+    this.boxPool.frustumCulled = false;   // one draw either way; culling it costs a bounds update
+    this.boxPool.renderOrder = 2;
+    this.group.add(this.boxPool);
+
+    const frame = {};
+    const basis = new THREE.Matrix4();
+    const POOL_R = 3.1;
+
+    for (let i = 0; i < n; i++) {
+      const def = this.track.itemBoxes[i];
       const pos = this.track.placeOnRoad(def.s, def.lateral, new THREE.Vector3());
+
+      // The pool has to lie in the road's plane, not the world's — sunsetCoast
+      // banks hard enough that a horizontal quad would sink into the tarmac on
+      // one side and float off it on the other.
+      this.track.frameAt(def.s, frame);
+      basis.makeBasis(frame.right, frame.tangent, frame.normal);
+      basis.scale(new THREE.Vector3(POOL_R, POOL_R, 1));
+      basis.setPosition(
+        pos.x + frame.normal.x * 0.05,
+        pos.y + frame.normal.y * 0.05,
+        pos.z + frame.normal.z * 0.05,
+      );
+      this.boxPool.setMatrixAt(i, basis);
+      this.boxPoolOn[i] = 1;
+
       pos.y += 1.25;
       const holder = new THREE.Group();
       holder.position.copy(pos);
+      const core = new THREE.Mesh(coreGeo, this.boxCoreMaterial);
+      core.renderOrder = 3;
+      holder.add(core);
+      // Shell after core, so the glass tints the glyph rather than the glyph
+      // being pasted on the outside of it.
       const shell = new THREE.Mesh(geo, this.boxMaterial);
       shell.castShadow = false;
+      shell.renderOrder = 4;
       holder.add(shell);
-      const core = new THREE.Mesh(coreGeo, this.boxCoreMaterial);
-      holder.add(core);
       this.group.add(holder);
       this.boxes.push({
-        s: def.s, lateral: def.lateral, pos, mesh: holder, core, shell,
+        s: def.s, lateral: def.lateral, pos, mesh: holder, core, shell, poolIndex: i,
         active: true, respawn: 0, phase: this.rng() * TAU, pop: 0,
       });
     }
+    this.boxPool.instanceMatrix.needsUpdate = true;
   }
 
   /**
@@ -165,7 +415,9 @@ export class ItemSystem {
   }
 
   setEnvMap(env) {
-    for (const m of [this.boxMaterial, this.matGreen, this.matRed, this.matBanana]) {
+    // The box shell is hand-shaded and deliberately takes no environment: see
+    // the note in _buildBoxes about it having to look the same all lap.
+    for (const m of [this.matGreen, this.matRed, this.matBanana]) {
       m.envMap = env; m.needsUpdate = true;
     }
   }
@@ -334,8 +586,14 @@ export class ItemSystem {
 
   _updateBoxes(dt, ctx, karts) {
     const eye = karts.find((k) => k.isPlayer)?.pos ?? karts[0]?.pos ?? null;
+    this.boxMaterial.uniforms.uTime.value = ctx.time;
+    this.boxCoreMaterial.uniforms.uTime.value = ctx.time;
+    this.boxPoolMaterial.uniforms.uTime.value = ctx.time;
+    const on = this.boxPoolOn;
+
     for (const b of this.boxes) {
       b.phase += dt;
+      on[b.poolIndex] = b.active ? 1 : (b.pop > 0 ? (b.pop / POP_TIME) * 1.9 : 0);
 
       if (!b.active) {
         b.respawn -= dt;
@@ -363,8 +621,9 @@ export class ItemSystem {
 
       b.mesh.rotation.y = b.phase * 1.4;
       b.mesh.rotation.x = Math.sin(b.phase * 0.8) * 0.22;
-      b.core.rotation.y = -b.phase * 3.0;
-      b.core.rotation.z = b.phase * 1.7;
+      // The core is deliberately *not* spun: it billboards, and a question
+      // mark you have to read while it cartwheels is a question mark nobody
+      // reads. The shell's rotation carries all the motion.
       b.mesh.position.y = b.pos.y + Math.sin(b.phase * 2.1) * 0.10;
       // A slow breathe on the shell and a faster counter-beat on the core:
       // two rates make it read as a container with something alive inside.
@@ -400,6 +659,7 @@ export class ItemSystem {
         }
       }
     }
+    this.boxPool.geometry.attributes.aOn.needsUpdate = true;
   }
 
   _updateProjectiles(dt, karts) {

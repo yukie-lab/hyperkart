@@ -24,6 +24,18 @@ import { clamp, clamp01, damp, fbm2D, lerp, makeValueNoise2D, smoothstep, TAU } 
  * buffer at build time. Nothing about the model changes on screen; what
  * changes is that a kart is ~29 draw calls instead of 61, and with a full grid
  * on track the karts were 93% of everything the renderer submitted.
+ *
+ * Cost is then held down three more ways, none of which touches how a kart
+ * looks in the chase camera:
+ *
+ *  - Distance. Past LOD_DISTANCE every animated transform on a kart is
+ *    sub-pixel, so the whole model — chassis, wheels, steering rack, driver —
+ *    is baked once into a handful of merged buffers and swapped in. Body lean,
+ *    pitch, squash and tricks still apply, because the swap happens *below*
+ *    the group those ride on.
+ *  - The shadow map. It is a second full pass over the same meshes, so only
+ *    the slots that actually widen a kart's silhouette are asked to cast.
+ *  - Transmission. See the `glass` material.
  */
 
 const WHEEL_R = 0.36;
@@ -909,6 +921,67 @@ function buildSteering() {
 let _steeringGeo = null;
 
 // ---------------------------------------------------------------------------
+// Level of detail
+// ---------------------------------------------------------------------------
+
+/**
+ * Where a kart stops being a machine and becomes a shape.
+ *
+ * Measured, not guessed: at 30 m a metre is ~34 px, so the largest thing the
+ * detailed model animates that the shell does not — the driver's head, which
+ * swings about 5 cm into a corner — is under two pixels, and suspension travel
+ * is one. Everything else (wheel spin, the steering rack, the arms) is smaller
+ * still. The hysteresis band means a rival trading places at the boundary
+ * cannot flicker: it has to come 3.6 m closer to earn the detailed model back.
+ */
+const LOD_DISTANCE = 30;
+const LOD_HYSTERESIS = 0.12;
+
+/**
+ * Material slot -> shell slot.
+ *
+ * The shell is one draw per entry in the *range* of this map, so every merge
+ * here has to be paid for in fidelity somewhere. These five survived that
+ * trade. Paint carries the livery and is the kart's identity. Accent is the
+ * second identity channel, and the helmet is already the accent colour — so is
+ * chrome, near enough, once a 4 cm roll hoop is thirty metres away. The brake
+ * bar stays separate because it is emissive and animated by braking. The
+ * driver's suit stays separate because it is a saturated character colour over
+ * a large area, and folding it into the dark mass was the one merge that
+ * showed: measured, the driver's back was the single biggest delta across the
+ * switch. Everything genuinely dark — tyres, floor, diffuser, engine,
+ * exhausts, the visor — reads as one mass and is drawn as one.
+ */
+const LOD_SLOT = {
+  body: 'body',
+  accent: 'accent',
+  helmet: 'accent',
+  chrome: 'lodDark',
+  suit: 'suit',
+  lamp: 'lamp',
+  darkMetal: 'lodDark',
+  exhaust: 'lodDark',
+  rubber: 'lodDark',
+  skin: 'lodDark',
+  glass: 'lodDark',
+};
+
+/**
+ * Which slots cast into the shadow map, up close and at distance.
+ *
+ * The shadow pass re-draws every caster, so it was costing as much as the
+ * scene itself. A slot only earns a place here if it widens the silhouette the
+ * others already project: the roll hoop, the exhausts, the brake bar, the
+ * steering rack, the arms and the wheel internals all fall inside the hull,
+ * the tyres and the driver's back, and their shadows were never visible.
+ */
+const NEAR_CASTERS = new Set(['body', 'accent', 'darkMetal', 'suit', 'helmet', 'rubber']);
+const SHELL_CASTERS = new Set(['body', 'accent', 'lodDark']);
+const _NO_CAST = new Set();
+
+const _shellCache = new Map();
+
+// ---------------------------------------------------------------------------
 // Materials
 // ---------------------------------------------------------------------------
 
@@ -972,10 +1045,16 @@ function makeMaterials(character, envMap) {
     map: wheelBlurTexture(), color: character.accent,
     metalness: 0.5, roughness: 0.55, envMapIntensity: 0.9, side: THREE.DoubleSide,
   });
+  // A tinted visor, deliberately NOT a transmissive one. Three renders an
+  // entire extra opaque pass over the whole scene the moment any material in
+  // it has transmission > 0 — measured at 328 draw calls a frame, a third of
+  // everything submitted, so twelve sub-pixel visors could refract a beach
+  // they were already too dark to show. Alpha over the face plus a hard
+  // clearcoat reflection lands in the same place for free.
   const glass = new THREE.MeshPhysicalMaterial({
-    color: 0x111820, metalness: 0.1, roughness: 0.06,
-    transmission: 0.55, thickness: 0.3, ior: 1.45,
-    envMapIntensity: 1.6, transparent: true, opacity: 0.92,
+    color: 0x0d141c, metalness: 0.25, roughness: 0.05,
+    clearcoat: 1.0, clearcoatRoughness: 0.03,
+    envMapIntensity: 2.0, transparent: true, opacity: 0.86,
   });
   const suit = new THREE.MeshStandardMaterial({
     color: new THREE.Color(character.color).lerp(new THREE.Color(0x101018), 0.45),
@@ -986,9 +1065,17 @@ function makeMaterials(character, envMap) {
   });
   const glow = new THREE.MeshBasicMaterial({ color: character.accent });
 
-  const all = [body, accent, helmet, rubber, chrome, darkMetal, exhaust, lamp, blur, glass, suit, skin];
+  // The distant kart's one dark mass. Tuned toward rubber rather than toward
+  // dark metal, because four tyres and the floor are most of the area it stands
+  // in for and a metallic tyre catches the sun in a way nothing on a kart
+  // should. The colour is the tread's own mid-tone, not dark metal's.
+  const lodDark = new THREE.MeshStandardMaterial({
+    color: 0x2e3239, metalness: 0.28, roughness: 0.64, envMapIntensity: 0.58,
+  });
+
+  const all = [body, accent, helmet, rubber, chrome, darkMetal, exhaust, lamp, blur, glass, suit, skin, lodDark];
   if (envMap) for (const m of all) { m.envMap = envMap; m.needsUpdate = true; }
-  return { body, accent, helmet, rubber, chrome, darkMetal, exhaust, lamp, blur, glass, suit, skin, glow, all };
+  return { body, accent, helmet, rubber, chrome, darkMetal, exhaust, lamp, blur, glass, suit, skin, lodDark, glow, all };
 }
 
 const _v1 = new THREE.Vector3();
@@ -1024,39 +1111,50 @@ export class KartModel {
     this.body = new THREE.Group();
     this.group.add(this.body);
 
+    // The LOD sits *under* `body`, so swapping detail levels never costs the
+    // kart its lean, pitch, squash or trick spin. Three's renderer calls
+    // LOD.update() itself while it walks the graph, which is the only reason a
+    // model that is never handed a camera can switch on camera distance.
+    this.lod = new THREE.LOD();
+    this.body.add(this.lod);
+    this.detail = new THREE.Group();
+    this.lod.addLevel(this.detail, 0, LOD_HYSTERESIS);
+
     // Bodywork rides on `chassis` so a build can sit high or low over wheels
     // that always keep their contact plane at body y = 0.
     this.chassis = new THREE.Group();
     this.chassis.position.y = B.stance;
-    this.body.add(this.chassis);
+    this.detail.add(this.chassis);
 
     const M = this.mats;
-    const add = (geo, mat, parent) => {
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.castShadow = true;
+    // Every mesh is recorded against its material slot, because the shell is
+    // baked by reading this model's own rest pose back out rather than by
+    // authoring the whole kart a second time.
+    this._parts = [];
+    const add = (geo, slot, parent, cast) => {
+      const mesh = new THREE.Mesh(geo, M[slot]);
+      mesh.castShadow = cast;
       mesh.receiveShadow = true;
       parent.add(mesh);
+      this._parts.push({ mesh, slot });
       return mesh;
     };
 
     /** Instantiate a pre-merged assembly: one mesh per material slot. */
-    const addMerged = (assembly, parent) => {
-      for (const [slot, geo] of assembly) {
-        const mesh = new THREE.Mesh(geo, M[slot]);
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        parent.add(mesh);
-      }
+    const addMerged = (assembly, parent, casters) => {
+      for (const [slot, geo] of assembly) add(geo, slot, parent, casters.has(slot));
     };
 
-    addMerged(chassis, this.chassis);
+    addMerged(chassis, this.chassis, NEAR_CASTERS);
 
     // Steering wheel assembly.
     this.steering = new THREE.Group();
     this.steering.position.set(0, 0.60, 0.42);
     this.steering.rotation.x = -0.65;
     this.chassis.add(this.steering);
-    addMerged(_steeringGeo, this.steering);
+    // Nothing in the cockpit casts: the rack, the rim and the driver's arms all
+    // sit inside the shadow the hull and the driver's back already throw.
+    addMerged(_steeringGeo, this.steering, _NO_CAST);
 
     // --- Wheels ---------------------------------------------------------
     // Order: FL, FR, RL, RR — matches `kart.suspension`.
@@ -1072,16 +1170,14 @@ export class KartModel {
       pivot.position.set(...def.pos);
       const spin = new THREE.Group();           // rolling
       pivot.add(spin);
-      this.body.add(pivot);
+      this.detail.add(pivot);
 
       const src = def.front ? wheels.front : wheels.rear;
       let spokeMesh = null;
       for (const [slot, geo] of src.parts) {
-        const mesh = new THREE.Mesh(geo, M[slot]);
         // Only the tyre casts: the rim and spokes sit inside its silhouette,
         // so shadowing them again buys nothing but shadow-pass draw calls.
-        mesh.castShadow = slot === 'rubber';
-        spin.add(mesh);
+        const mesh = add(geo, slot, spin, slot === 'rubber');
         if (slot === 'accent') spokeMesh = mesh;
       }
       this.wheels.push({
@@ -1099,16 +1195,16 @@ export class KartModel {
     this.chassis.add(this.driver);
     this._driverBase = this.driver.position.clone();
 
-    addMerged(driverGeo.body, this.driver);
+    addMerged(driverGeo.body, this.driver, NEAR_CASTERS);
 
     this.headGroup = new THREE.Group();
     this.headGroup.position.set(0, 0.60, 0.02);
     this.driver.add(this.headGroup);
-    add(head.face, M.skin, this.headGroup).position.set(0, -0.015, 0.012);
-    add(head.helmet, M.helmet, this.headGroup).position.y = 0.015;
-    const vis = new THREE.Mesh(head.visor, M.glass);
-    vis.position.set(0, 0.015, 0);
-    this.headGroup.add(vis);
+    // The helmet is the whole head as far as the shadow map is concerned; the
+    // face and the visor live inside it.
+    add(head.face, 'skin', this.headGroup, false).position.set(0, -0.015, 0.012);
+    add(head.helmet, 'helmet', this.headGroup, true).position.y = 0.015;
+    add(head.visor, 'glass', this.headGroup, false).position.set(0, 0.015, 0);
 
     // Shoulder sockets aim the arms; the gloves are solved onto the rim
     // separately so a hand is never merely *near* the wheel.
@@ -1118,10 +1214,10 @@ export class KartModel {
       const shoulder = new THREE.Group();
       shoulder.position.set(s * 0.205, 0.44, 0.035);
       this.driver.add(shoulder);
-      const a = add(driverGeo.arm, M.suit, shoulder);
+      const a = add(driverGeo.arm, 'suit', shoulder, false);
       this.arms.push(shoulder);
       shoulder.userData.mesh = a;
-      this.hands.push(add(driverGeo.glove, M.accent, this.driver));
+      this.hands.push(add(driverGeo.glove, 'accent', this.driver, false));
     }
 
     // --- Effect anchors --------------------------------------------------
@@ -1164,6 +1260,50 @@ export class KartModel {
     this._impactPrev = 0;
     this._dirt = 0;
     this._brake = 0;
+
+    // The gloves are solved onto the rim rather than authored on it, so the rig
+    // has to be posed once before anything reads the model's rest state — an
+    // unposed bake puts both hands inside the driver's chest.
+    this._solveHands();
+    this._buildShell(`${buildKey}|${character.wing || 'gt'}|${character.helmet || 'dome'}|${character.cls}`);
+  }
+
+  /**
+   * Bake the whole kart, at rest, into one merged buffer per shell slot.
+   *
+   * Read back out of the live model rather than authored a second time: that
+   * way a build, a wing, a helmet or a livery added upstream lands in the shell
+   * automatically, and the shell can never drift out of agreement with the
+   * thing it stands in for. Cached by silhouette, so a twelve-kart field with
+   * repeated characters still only merges each distinct kart once.
+   */
+  _buildShell(key) {
+    let slots = _shellCache.get(key);
+    if (!slots) {
+      this.group.updateMatrixWorld(true);
+      const toBody = new THREE.Matrix4().copy(this.body.matrixWorld).invert();
+      const lists = new Map();
+      for (const { mesh, slot } of this._parts) {
+        const dst = LOD_SLOT[slot] || 'lodDark';
+        if (!lists.has(dst)) lists.set(dst, []);
+        lists.get(dst).push({
+          geo: mesh.geometry,
+          matrix: new THREE.Matrix4().multiplyMatrices(toBody, mesh.matrixWorld),
+        });
+      }
+      slots = new Map();
+      for (const [slot, list] of lists) slots.set(slot, mergeGeometries(list));
+      _shellCache.set(key, slots);
+    }
+
+    this.shell = new THREE.Group();
+    for (const [slot, geo] of slots) {
+      const mesh = new THREE.Mesh(geo, this.mats[slot]);
+      mesh.castShadow = SHELL_CASTERS.has(slot);
+      mesh.receiveShadow = true;
+      this.shell.add(mesh);
+    }
+    this.lod.addLevel(this.shell, LOD_DISTANCE, LOD_HYSTERESIS);
   }
 
   setEnvMap(envMap) {
@@ -1311,8 +1451,16 @@ export class KartModel {
     h.rotation.x = -this._gLong * 0.06 + jolt * 0.42;
 
     this.steering.rotation.z = -kart.wheelSteer * 1.25;
+    this._solveHands();
+  }
 
-    // Hands ---------------------------------------------------------------
+  /**
+   * Put both gloves on the rim wherever the rim currently is, and stretch each
+   * arm to reach. Split out of the rig because the shell bake needs the same
+   * solve run once, at rest, before it reads the model's pose.
+   */
+  _solveHands() {
+    const d = this.driver;
     this.steering.updateMatrix();
     d.updateMatrix();
     _m1.copy(d.matrix).invert();

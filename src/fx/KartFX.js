@@ -40,10 +40,26 @@ const _c2 = new THREE.Color();
  * near a metre — makes fifty of them merge into one coloured cloud, which is
  * exactly how a stage reads as "some glow" instead of "purple sparks".
  */
+/**
+ * The alphas below are the second most important numbers, and they went *down*
+ * in this pass. These are additive sprites feeding an ACES curve: past roughly
+ * 1.2 of accumulated linear radiance the dominant channel saturates first and
+ * the hue slides toward magenta-white, which is why forced stage 0 (a blue
+ * tier) and forced stage 2 (a purple one) both rendered as the same mauve
+ * smudge. Tier identity survives on the *shape and count* of the shower, not on
+ * turning one sprite up until it glows.
+ *
+ * `lift` shrank for a related reason: the chase camera looks straight down the
+ * kart's forward axis, so forward velocity projects to almost nothing on screen
+ * and the vertical component decides the streak angle. Sparks thrown mostly
+ * upward became tall pale columns either side of the kart. Throwing them
+ * *sideways*, along the drift direction, is what puts the shower across the
+ * screen where it can be read.
+ */
 const DRIFT_TIERS = [
-  { rate: 110, size: 0.20, alpha: 1.60, glow: 0.40, glowA: 0.34, hz: 6.5, ring: 1.0, ringA: 0.28, streak: 0.16, strSize: 1.2, spread: 3.4, lift: 3.2 },
-  { rate: 175, size: 0.27, alpha: 1.80, glow: 0.56, glowA: 0.40, hz: 9.5, ring: 1.5, ringA: 0.36, streak: 0.30, strSize: 1.7, spread: 4.4, lift: 4.0 },
-  { rate: 245, size: 0.35, alpha: 2.00, glow: 0.74, glowA: 0.46, hz: 14.0, ring: 2.0, ringA: 0.44, streak: 0.44, strSize: 2.3, spread: 5.4, lift: 4.8 },
+  { rate: 150, size: 0.17, alpha: 0.85, glow: 0.26, glowA: 0.30, hz: 6.5, ring: 0.34, ringA: 0.22, streak: 0.12, strSize: 0.9, spread: 3.0, lift: 1.5, out: 2.0 },
+  { rate: 235, size: 0.22, alpha: 1.05, glow: 0.34, glowA: 0.36, hz: 9.5, ring: 0.46, ringA: 0.28, streak: 0.22, strSize: 1.2, spread: 3.8, lift: 1.9, out: 3.0 },
+  { rate: 330, size: 0.28, alpha: 1.25, glow: 0.44, glowA: 0.42, hz: 14.0, ring: 0.60, ringA: 0.34, streak: 0.32, strSize: 1.6, spread: 4.6, lift: 2.3, out: 4.2 },
 ];
 
 /**
@@ -254,9 +270,12 @@ export class KartFX {
       for (let r = 0; r < 2; r++) {
         _v.set(0, 0.3, 0);
         _c.setHex(col);
+        // Sized independently of the tier's continuous ring, which is now a
+        // small contact pop: a stage-up is a one-frame event and is allowed to
+        // be the biggest thing on screen for two frames.
         this.additive.spawn(_p, _v, _c, {
-          shape: SHAPE.RING, size: tier.ring * (0.8 + r * 0.5), sizeGrow: 9 + r * 6,
-          life: 0.22 + r * 0.10, alpha: tier.ringA * 1.4, drag: 3, colorB: 0x101018,
+          shape: SHAPE.RING, size: (0.9 + stage * 0.35) * (0.8 + r * 0.5), sizeGrow: 7 + r * 4,
+          life: 0.22 + r * 0.10, alpha: tier.ringA * 1.6, drag: 3, colorB: 0x101018,
         });
       }
       const n = 10 + stage * 7;
@@ -389,27 +408,34 @@ export class KartFX {
     const pulse = 0.72 + 0.28 * Math.sin(st.sparkPhase * TAU);
 
     const col = DRIFT.stages[stage].color;
+    // Cooling colour is a dark version of *this tier's* hue. A single shared
+    // dark magenta made every tier's mid-life sparks the same mauve, which is
+    // exactly the smudge the tiers were failing to distinguish themselves by.
+    _c2.setHex(col).multiplyScalar(0.16);
     const sparkN = this._emitAccum(kart, 'driftSpark', dt, tier.rate * (0.75 + 0.5 * pulse) * rate);
     for (let i = 0; i < sparkN; i++) {
-      const side = i % 2 === 0 ? 'driftL' : 'driftR';
-      model.anchors[side].getWorldPosition(_p);
-      _v.set((this.rng() - 0.5) * tier.spread, this.rng() * tier.lift + 0.8, (this.rng() - 0.5) * tier.spread);
-      // Sparks keep half the kart's momentum, so the plume stays attached to
-      // the tyre and streams a couple of metres back rather than being flung
-      // behind at forty metres a second.
-      _v.addScaledVector(_w, kart.speed * 0.50);
+      const left = i % 2 === 0;
+      model.anchors[left ? 'driftL' : 'driftR'].getWorldPosition(_p);
+      _v.set((this.rng() - 0.5) * tier.spread, this.rng() * tier.lift + 0.5, (this.rng() - 0.5) * tier.spread);
+      // Sparks keep a quarter of the kart's momentum, so relative to the kart
+      // they stream backwards rather than being carried along beside it, and
+      // they are thrown hard toward the *outside* of the slide — the direction
+      // a scrubbing tyre actually flings debris, and the one direction that is
+      // still visible from directly behind.
+      _v.addScaledVector(_w, kart.speed * 0.25);
+      _v.addScaledVector(_side, -d.dir * tier.out * (0.5 + this.rng()));
       _c.setHex(col);
       // A hot white fraction gives the plume a core; it grows as the next tier
       // approaches, so "about to upgrade" is visible before the HUD says so.
-      if (this.rng() < 0.18 + hot * 0.34) _c.lerp(_WHITE, 0.45 + hot * 0.4);
+      if (this.rng() < 0.18 + hot * 0.34) _c.lerp(_WHITE, 0.40 + hot * 0.35);
       const streak = this.rng() < tier.streak;
       this.additive.spawn(_p, _v, _c, {
         shape: streak ? SHAPE.STREAK : SHAPE.SPARK,
         size: streak ? tier.strSize * (0.7 + this.rng() * 0.6) : tier.size * (0.6 + this.rng() * 0.9),
-        life: 0.26 + this.rng() * 0.30, alpha: tier.alpha * (streak ? 0.28 : 1),
-        gravity: streak ? 1.5 : 7.5, drag: streak ? 2.2 : 1.4,
-        ground: gy, bounce: streak ? 0 : 0.30,
-        rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 14, colorB: 0x220a18,
+        life: 0.22 + this.rng() * 0.24, alpha: tier.alpha * (streak ? 0.30 : 1),
+        gravity: streak ? 1.5 : 9.5, drag: streak ? 2.2 : 1.3,
+        ground: gy, bounce: streak ? 0 : 0.34,
+        rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 14, colorB: _c2,
       });
     }
 

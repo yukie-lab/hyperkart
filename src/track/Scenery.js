@@ -7,10 +7,10 @@ import {
   T, mergeParts, paintGeometry, darkenBase,
   rockGeometry, sweepStack, columnGeometry, frondGeometry, mesaGeometry,
   tuftGeometry, blobClusterGeometry, personGeometry, pennantGeometry,
-  propMaterial, neonMaterial,
+  propMaterial, neonMaterial, rockMaterial, groundTexturesFor,
   applyWind, applyCrowd, applyBob, applyFlap, applyDrift, applyPulse, applyFlag,
   chunkedInstances, addMesh,
-  bannerStripTexture, planetTexture,
+  bannerStripTexture, planetTexture, moteTexture,
 } from './SceneryKit.js';
 
 const UP_V = new THREE.Vector3(0, 1, 0);
@@ -62,14 +62,46 @@ const COAST_SPONSORS = [
   { bg: '#efe9dd', accent: '#d5cdba', fg: '#1d3145' },
   { bg: '#a83a2c', accent: '#d47a5c', fg: '#fdf3e7' },
   { bg: '#28352c', accent: '#46614c', fg: '#e9f0e4' },
+  { bg: '#1d2b38', accent: '#3f7d78', fg: '#e6f1ef' },
+  { bg: '#e6ddc9', accent: '#bfae8c', fg: '#2a3b2c' },
+  { bg: '#7c4a5e', accent: '#b3798c', fg: '#fbeef2' },
+  { bg: '#20364a', accent: '#c9a13c', fg: '#f4ecd8' },
 ];
 const CANYON_SPONSORS = [
   { bg: '#6f3620', accent: '#a4623a', fg: '#f6e6d2' },
   { bg: '#ece5d6', accent: '#d3c6aa', fg: '#3a2a1c' },
   { bg: '#2c394b', accent: '#4f6379', fg: '#e8eef5' },
   { bg: '#b0731d', accent: '#dda94f', fg: '#33240d' },
+  { bg: '#3d2f26', accent: '#7a6046', fg: '#efe3d2' },
+  { bg: '#d9d2c2', accent: '#a8482f', fg: '#33261c' },
+  { bg: '#54301c', accent: '#8f7a3c', fg: '#f2e7cf' },
+  { bg: '#26343a', accent: '#5f8a72', fg: '#e7f0ea' },
 ];
-const SPONSOR_WORDS = ['HYPER', 'NOVA', 'TURBO', 'APEX', 'VOLT', 'DRIFT'];
+
+/**
+ * The circuit's advertisers.
+ *
+ * Eight, not four, and each a whole brand rather than a word — the four-word
+ * cycle read as HYPER NOVA TURBO APEX six times in a row down the pit straight,
+ * which is the most visible generated-content tell in the build. Names are
+ * deliberately mundane in kind (fuel, tyres, insurance, tooling): a paddock is
+ * advertised to by industrial suppliers, and boards that are all energy drinks
+ * read as a toy.
+ */
+const SPONSOR_BRANDS = [
+  { name: 'HYPERNOVA', sub: 'RACING FUELS' },
+  { name: 'TURBO APEX', sub: 'FORCED INDUCTION' },
+  { name: 'VOLTLINE', sub: 'ENERGY SYSTEMS' },
+  { name: 'DRIFT & CO', sub: 'TYRE COMPOUNDS' },
+  { name: 'MERIDIAN', sub: 'ASSURANCE GROUP' },
+  { name: 'KARBIDE', sub: 'BRAKE TECHNOLOGY' },
+  { name: 'SOLARIS', sub: 'TELEMETRY' },
+  { name: 'IRONWORKS', sub: 'PRECISION TOOLING' },
+];
+
+// The panels the boards are cut into. The texture cell is 2:1 and a board is
+// 1.5 m tall, so this is the only width that does not stretch the lettering.
+const PANEL_W = 3.0;
 
 export class Scenery {
   constructor(track, scene, opts = {}) {
@@ -125,13 +157,34 @@ export class Scenery {
   _n(base) { return Math.max(1, Math.round(base * this.detail)); }
 
   /**
+   * The terrain's texture set. Cached in ProcTex on the same key TrackBuilder
+   * uses, so this is the identical object the ground is drawn with — every
+   * landform below is literally made of the same rock as the floor it stands
+   * on, which is the only way the two stop reading as separate authorship.
+   */
+  _groundTex() {
+    if (!this._gtex) this._gtex = groundTexturesFor(this.theme);
+    return this._gtex;
+  }
+
+  /** A landform material on this track's ground maps. */
+  _rock(opts = {}) {
+    return this._mat(rockMaterial(this._groundTex(), opts));
+  }
+
+  /**
    * Queue a contact blob. Collected across every prop type and flushed into one
    * chunked instancer at the end, so the entire circuit's grounding costs a
    * handful of draw calls rather than one per prop family.
    */
-  _blob(item, radius, { opacity = 1, lift = 0.06 } = {}) {
+  _blob(item, radius, { opacity = 1, lift = 0.09 } = {}) {
     const n = terrainNormal(this.terrain, item.s, item.lateral, new THREE.Vector3());
-    const p = item.pos.clone().addScaledVector(n, lift);
+    // Re-derived from the sampler rather than taken from `item.pos`: almost
+    // every caller sinks its prop into the ground before asking for a blob,
+    // and a contact patch buried under the terrain fails the depth test and
+    // draws nothing at all. Trusting a mutated position is how half the
+    // circuit's grounding silently stopped existing.
+    const p = this.terrain.place(item.s, item.lateral, new THREE.Vector3()).addScaledVector(n, lift);
     const m = poseMatrix(p, {
       normal: n, align: 1, yaw: item.u * TAU,
       scale: [radius, 1, radius * lerp(0.8, 1.25, item.v)],
@@ -264,9 +317,10 @@ export class Scenery {
    * barrier's top rail so the barrier hides the legs.
    */
   _hoardings(palette) {
-    const tex = bannerStripTexture(palette, SPONSOR_WORDS);
+    const tex = bannerStripTexture(palette, SPONSOR_BRANDS);
     this._textures.push(tex);
     tex.repeat.set(1, 1);
+    const cells = tex.userData.cells;
     // Vertex colours multiply the sponsor map, which is what lets the dark top
     // rail live in the same mesh as the boards. Two meshes per run would have
     // doubled the busiest draw-call bucket in the scenery for one dark line.
@@ -290,14 +344,18 @@ export class Scenery {
       else cur = null;
     }
 
-    // 3.0 x 1.5 m panels: the texture cell is 2:1, so this is the only board
-    // size that does not stretch the lettering. Two-thirds of the earlier
-    // height — a 2 m hoarding puts metre-high type beside a kart and the
-    // signage stops reading as scenery and starts reading as UI.
-    const H = 1.5, BASE = 1.14, TILE = 12;
+    // Two-thirds of the earlier board height — a 2 m hoarding puts metre-high
+    // type beside a kart and the signage stops reading as scenery and starts
+    // reading as UI. The tile is now the whole eight-brand strip.
+    const H = 1.5, BASE = 1.14, TILE = PANEL_W * cells;
+    let runIndex = 0;
     for (const run of runs) {
       const span = run.s1 - run.s0;
       if (span < 30) continue;
+      // Every run starting on the same board is its own kind of repeat — the
+      // player passes six of them a lap and each one opened with HYPERNOVA.
+      // An irrational-ish stride walks the phase around the strip instead.
+      const phase = (runIndex++ * 3) % cells + 0.37;
       for (const side of [-1, 1]) {
         const segs = Math.max(4, Math.round(span / 3.0));
         const pos = [], uv = [], col = [], idx = [];
@@ -314,8 +372,10 @@ export class Scenery {
           prev = p.clone();
           const y0 = p.y - 0.40 + BASE;
           // Which way the arc runs across the screen flips with the side of
-          // the road, so one side's lettering has to be mirrored to read.
-          const u = side * uAcc / TILE;
+          // the road, so one side's lettering has to be mirrored to read. The
+          // two sides are also offset by half the strip, so a driver never
+          // sees the same brand facing them across the circuit.
+          const u = side * uAcc / TILE + (phase + (side > 0 ? 0 : cells * 0.5)) / cells;
           // Two sheets 13 cm apart with U mirrored on the outer one. A single
           // sheet drawn DoubleSide shows the sponsor's name reversed to anyone
           // looking across the circuit, which is the loudest possible tell.
@@ -537,7 +597,7 @@ export class Scenery {
    * clears the tallest ramp launch by a wide margin.
    */
   _gantry(fractions, palette) {
-    const tex = bannerStripTexture(palette, SPONSOR_WORDS);
+    const tex = bannerStripTexture(palette, SPONSOR_BRANDS);
     this._textures.push(tex);
     const beamMat = this._mat(new THREE.MeshStandardMaterial({
       map: tex, roughness: 0.55, metalness: 0.1, envMapIntensity: 0.6, side: THREE.DoubleSide,
@@ -593,10 +653,14 @@ export class Scenery {
       // Sponsor beam. Two faces so it reads coming and going.
       const beamW = legLat * 2, beamH = 1.55;
       const bg = new THREE.BoxGeometry(beamW, beamH, 0.5);
-      // Three passes of the four-board strip across the span, so the panels
-      // land at roughly the 3 m width a real hoarding panel has.
+      // Scale the strip so its cells land at the same 3 m panel width the
+      // trackside boards use — a hardcoded pass count re-stretched the type
+      // the moment the strip gained brands. The offset gives the two gantries
+      // different lead boards.
       const uv = bg.attributes.uv;
-      for (let i = 0; i < uv.count; i++) uv.setX(i, uv.getX(i) * 3);
+      const uScale = beamW / (PANEL_W * tex.userData.cells);
+      const uOff = frac * 2.7;
+      for (let i = 0; i < uv.count; i++) uv.setX(i, uv.getX(i) * uScale + uOff);
       bg.applyMatrix4(T([0, topY + 0.6, 0]));
       bg.applyMatrix4(m);
       bg.computeBoundingSphere();
@@ -767,17 +831,28 @@ export class Scenery {
       const r = lerp(520, 1280, Math.pow(rng(), 0.7));
       const big = rng();
       const h = lerp(26, 128, Math.pow(big, 1.5));
-      const w = h * lerp(1.5, 4.6, rng());
-      const geo = rockGeometry(rng, { detail: 1, rough: 0.30, squash: 0.55 });
-      // Islands sit *in* the water: the base is below sea level so there is no
-      // visible seam where a landform meets the plane.
-      parts.push({
-        geo,
-        color: 0xffffff,
-        m: T([c.x + Math.cos(th) * r, wl + h * 0.30, c.z + Math.sin(th) * r],
-          [(rng() - 0.5) * 0.16, rng() * TAU, (rng() - 0.5) * 0.16],
-          [w, h, w * lerp(0.55, 1.0, rng())]),
-      });
+      // A headland is two or three summits of different heights running into
+      // each other, never one mass. Flattening a single icosphere to four
+      // times its height — which is what this did — turns its facets into
+      // half-kilometre planes, and those planes are the razor-straight edges
+      // against the sky the critic caught. Aspect is capped and the width is
+      // made up out of overlapping lobes instead.
+      const lobes = 2 + Math.floor(rng() * 3);
+      for (let k = 0; k < lobes; k++) {
+        const hk = h * (k === 0 ? 1 : lerp(0.42, 0.88, rng()));
+        const wk = hk * lerp(1.0, 2.1, rng());
+        // Lobes are strung out along the tangent of the ring, so a headland
+        // spreads sideways across the view rather than back into the haze.
+        const off = (k === 0 ? 0 : (rng() - 0.5) * 2) * h * 1.9;
+        parts.push({
+          geo: mesaGeometry(rng, { rings: 6, sides: 11, wobble: 0.24, flute: 0.11, rim: 0.16, gullies: 0.55 }),
+          color: 0xffffff,
+          // Islands sit *in* the water: the base is below sea level so there
+          // is no visible seam where a landform meets the plane.
+          m: T([c.x + Math.cos(th) * r - Math.sin(th) * off, wl - hk * 0.16, c.z + Math.sin(th) * r + Math.cos(th) * off],
+            [0, rng() * TAU, 0], [wk, hk * 1.2, wk * lerp(0.6, 1.0, rng())]),
+        });
+      }
       // A couple of stacks in front of the larger masses for silhouette layering.
       if (big > 0.55) {
         for (let k = 0; k < 2; k++) {
@@ -794,14 +869,24 @@ export class Scenery {
       }
     }
     const geo = mergeParts(parts);
-    // Height-graded colour: wet dark rock at the waterline, sun-bleached scrub
-    // on top. One gradient does the work of a texture at this distance.
     paintGeometry(geo, (v, col) => {
-      const t = clamp01((v.y - wl) / 90);
-      col.setRGB(lerp(0.30, 0.52, t), lerp(0.28, 0.47, t), lerp(0.30, 0.40, t));
+      const k = 0.90 + (Math.sin(v.x * 0.037 + v.z * 0.029) * 0.5 + 0.5) * 0.20;
+      col.setRGB(k, k, k * 0.99);
     });
     geo.computeBoundingSphere();
-    const mat = this._mat(propMaterial({ roughness: 0.95, envMapIntensity: 0.5, flatShading: true }));
+    // A headland is scrub and wet rock, not beach: the ground's sand map is
+    // reused for its grain and macro drift but pulled two stops down and
+    // toward olive. Value is what does the work here — the previous slabs sat
+    // *brighter* than the sky they were silhouetted against, which is why the
+    // depth layers refused to separate no matter how much fog was in front of
+    // them.
+    const mat = this._rock({
+      color: 0x7e8172,
+      baseY: wl, tile: 46, macro: 0.11, macroDepth: 0.40,
+      strata: 26, strataDepth: 0.13, strataWarp: 22,
+      contact: 0.26, contactFall: 55, normalStrength: 0.5,
+      roughness: 1.0, envMapIntensity: 0.5, flatShading: true,
+    });
     addMesh(this.group, geo, mat, { name: 'coastBackdrop', receive: false });
   }
 
@@ -940,12 +1025,21 @@ export class Scenery {
     const geos = [0, 1, 2].map((i) => {
       const g = rockGeometry(makeRng(310 + i), { detail: i === 2 ? 1 : 0, rough: 0.30 + i * 0.06, squash: 0.62 + i * 0.08 });
       paintGeometry(g, (v, col) => {
-        const t = clamp01(v.y * 0.5 + 0.5);
-        col.setRGB(lerp(0.30, 0.55, t), lerp(0.27, 0.50, t), lerp(0.24, 0.44, t));
+        const k = 0.88 + (Math.sin(v.x * 5.3 + v.y * 4.1 + v.z * 6.7 + i) * 0.5 + 0.5) * 0.18;
+        col.setRGB(k, k * 0.99, k * 0.97);
       });
       return g;
     });
-    const mat = this._mat(propMaterial({ roughness: 0.95, envMapIntensity: 0.45, flatShading: true }));
+    // Sea-worn stone rather than beach sand: the map is the ground's, but the
+    // material colour pulls it grey and cool so shingle does not read as
+    // lumps of the dune it is lying on.
+    const mat = this._rock({
+      color: 0xa8a49a,
+      tile: 2.6, macro: 0.22, macroDepth: 0.30,
+      strata: 0.8, strataDepth: 0.12, strataWarp: 0.6,
+      contact: 0.40, contactFall: 1.3, normalStrength: 0.7,
+      roughness: 1.0, envMapIntensity: 0.45, flatShading: true,
+    });
 
     const sites = scatterAlong(this.rng, this.terrain, {
       count: this._n(330), band: [NEAR_D, 96], cycles: 12, threshold: -0.18,
@@ -1201,25 +1295,28 @@ export class Scenery {
       const h = lerp(70, 235, Math.pow(rng(), 1.4));
       const w = h * lerp(0.9, 2.4, rng());
       parts.push({
-        geo: mesaGeometry(rng, { rings: 6, sides: 10, wobble: 0.18 }),
+        geo: mesaGeometry(rng, { rings: 7, sides: 12, wobble: 0.18, flute: 0.10, rim: 0.09, gullies: 0.45 }),
         color: 0xffffff,
         m: T([c.x + Math.cos(th) * r, baseY, c.z + Math.sin(th) * r], [0, rng() * TAU, 0], [w, h, w * lerp(0.6, 1.1, rng())]),
       });
     }
     const geo = mergeParts(parts);
     paintGeometry(geo, (v, col) => {
-      // Strata: the horizontal banding is what makes a mesa read as sedimentary
-      // rock instead of a cone, and it survives being 1 km away.
-      const band = Math.sin(v.y * 0.09) * 0.5 + 0.5;
-      const t = clamp01((v.y - baseY) / 240);
-      col.setRGB(
-        lerp(0.44, 0.60, t) * lerp(0.86, 1.06, band),
-        lerp(0.30, 0.43, t) * lerp(0.88, 1.04, band),
-        lerp(0.25, 0.36, t),
-      );
+      const k = 0.92 + (Math.sin(v.x * 0.031 + v.z * 0.027) * 0.5 + 0.5) * 0.16;
+      col.setRGB(k, k * 0.99, k * 0.98);
     });
     geo.computeBoundingSphere();
-    const mat = this._mat(propMaterial({ roughness: 0.98, envMapIntensity: 0.45, flatShading: true }));
+    // Strata an order of magnitude coarser and a tile four times wider: at a
+    // kilometre a 4 m bed is under a pixel, and only banding at 30 m survives
+    // the trip. Contact runs over 60 m for the same reason — this is the layer
+    // that gives the range a base, and the fog then separates it from the mid
+    // mesas rather than having to do the whole job alone.
+    const mat = this._rock({
+      baseY, tile: 55, macro: 0.10, macroDepth: 0.42,
+      strata: 30, strataDepth: 0.15, strataWarp: 26,
+      contact: 0.30, contactFall: 60, normalStrength: 0.5,
+      roughness: 1.0, envMapIntensity: 0.45, flatShading: true,
+    });
     addMesh(this.group, geo, mat, { name: 'canyonBackdrop', receive: false });
   }
 
@@ -1227,21 +1324,23 @@ export class Scenery {
   _mesas() {
     const geos = [0, 1, 2].map((i) => {
       const rng = makeRng(660 + i);
-      const g = mesaGeometry(rng, { rings: 7, sides: 11 + i, wobble: 0.14 + i * 0.05 });
+      const g = mesaGeometry(rng, { rings: 8, sides: 12 + i, wobble: 0.14 + i * 0.05, flute: 0.07 + i * 0.02 });
+      // The map carries the colour now; vertex colour is left as a faint
+      // per-face mottle so no two neighbouring cliff planes are identical.
       paintGeometry(g, (v, col) => {
-        const band = Math.sin(v.y * 11 + i) * 0.5 + 0.5;
-        const t = clamp01(v.y);
-        col.setRGB(
-          lerp(0.50, 0.66, t) * lerp(0.82, 1.10, band),
-          lerp(0.31, 0.45, t) * lerp(0.85, 1.06, band),
-          lerp(0.23, 0.34, t) * lerp(0.9, 1.05, band),
-        );
+        const k = 0.94 + (Math.sin(v.x * 9.1 + v.z * 7.3 + i) * 0.5 + 0.5) * 0.12;
+        col.setRGB(k, k * 0.995, k * 0.985);
       });
       return g;
     });
-    const mat = this._mat(propMaterial({ roughness: 0.98, envMapIntensity: 0.4, flatShading: true }));
-    // `mesaGeometry`'s talus apron reaches r = 1.34, so a mesa's real footprint
-    // is 1.34x its width scale. Distance therefore has to be chosen *after*
+    // Strata scaled for a 15-50 m formation, and a deep contact because a
+    // mesa's talus is in its own shadow for most of the day.
+    const mat = this._rock({
+      strata: 4.2, strataDepth: 0.22, contact: 0.42, contactFall: 9,
+      roughness: 1.0, envMapIntensity: 0.42, flatShading: true,
+    });
+    // `mesaGeometry`'s talus apron reaches r = 1.38, so a mesa's real footprint
+    // is 1.38x its width scale. Distance therefore has to be chosen *after*
     // size, not before: a scatter band that ignores this puts a 130 m-wide
     // butte 70 m from the barrier and it swallows the entire outside of the
     // corner. Nothing may reach back inside `keepOut`.
@@ -1255,12 +1354,15 @@ export class Scenery {
     for (const it of sites) {
       const h = lerp(14, 52, Math.pow(it.u, 1.9));
       const w = h * lerp(0.42, 0.95, it.v);
-      const footprint = w * 1.34;
+      const footprint = w * 1.38;
       const d = Math.max(it.d, keepOut + footprint);
       if (d > TERRAIN_REACH - 20) continue;
       const lateral = it.side * (this.track.halfWidthAt(it.s) + WALL_OFFSET + d);
-      this.terrain.place(it.s, lateral, p);
-      p.y -= h * 0.06;
+      this.track.placeOnRoad(it.s, lateral, p);
+      // Plant it on the low corner of its own footprint and then bury the
+      // apron: a rigid disc sitting at the height under its centre hangs in
+      // the air on the downhill side, and on this terrain that is metres.
+      p.y = this.terrain.groundMin(it.s, lateral, footprint * 0.8) - h * 0.045;
       buckets[Math.floor(it.w * 3) % 3].push({
         s: it.s,
         m: poseMatrix(p.clone(), { yaw: it.v * TAU, scale: [w, h, w * lerp(0.7, 1.2, it.w)] }, new THREE.Matrix4()),
@@ -1269,31 +1371,39 @@ export class Scenery {
     for (let i = 0; i < 3; i++) this._spread(`mesa${i}`, geos[i], mat, buckets[i], { per: 9, maxChunks: 5, cast: true, receive: true });
 
     // Hoodoos: tall thin stacks nearer the road, for vertical rhythm between
-    // the mesas and the ground clutter.
+    // the mesas and the ground clutter. Deep gullies and a hard rim notch —
+    // these are the closest landform to the camera and the only one whose
+    // silhouette is read against sky at short range.
     const hoodooGeo = mergeParts([
-      { geo: mesaGeometry(makeRng(771), { rings: 8, sides: 8, wobble: 0.26 }), color: 0xffffff, m: T([0, 0, 0], [0, 0, 0], [1, 1, 1]) },
+      { geo: mesaGeometry(makeRng(771), { rings: 9, sides: 9, wobble: 0.26, flute: 0.13, rim: 0.10, gullies: 0.5 }), color: 0xffffff },
       { geo: rockGeometry(makeRng(772), { detail: 0, rough: 0.3, squash: 0.5 }), color: 0xffffff, m: T([0, 1.02, 0], [0, 0.5, 0], [1.35, 0.3, 1.35]) },
+      // Fallen cap rock at the foot. A hoodoo that stands alone on clean
+      // ground looks placed; the debris it shed is what says it eroded there.
+      { geo: rockGeometry(makeRng(773), { detail: 0, rough: 0.42, squash: 0.7 }), color: 0xffffff, m: T([1.15, 0.06, 0.35], [0.3, 0.9, 0.2], [0.55, 0.30, 0.45]) },
+      { geo: rockGeometry(makeRng(774), { detail: 0, rough: 0.45, squash: 0.7 }), color: 0xffffff, m: T([-0.9, 0.04, -0.7], [0, 2.1, 0.24], [0.38, 0.22, 0.34]) },
     ]);
-    paintGeometry(hoodooGeo, (v, col) => {
-      const band = Math.sin(v.y * 14) * 0.5 + 0.5;
-      col.setRGB(lerp(0.52, 0.68, band), lerp(0.33, 0.44, band), lerp(0.24, 0.32, band));
-    });
     const hoodoos = scatterAlong(this.rng, this.terrain, {
       count: this._n(46), band: [NEAR_D + 3, 74], cycles: 8, threshold: 0.16,
       bias: 2.2, cluster: [1, 4], clusterArc: 12, clusterLat: 9, minGap: 7,
+    });
+    const hMat = this._rock({
+      strata: 1.9, strataDepth: 0.26, contact: 0.44, contactFall: 3.0,
+      roughness: 1.0, envMapIntensity: 0.42, flatShading: true,
     });
     const hItems = [];
     for (const it of hoodoos) {
       const h = lerp(4.5, 15, Math.pow(it.u, 1.6));
       const w = h * lerp(0.16, 0.30, it.v);
-      it.pos.y -= 0.4;
+      // Same footprint rule as the mesas, at hoodoo scale. This is the defect
+      // the critic photographed: sky visible under the blocks on the ridge.
+      it.pos.y = this.terrain.groundMin(it.s, it.lateral, w * 1.5) - 0.35 - w * 0.20;
       hItems.push({
         s: it.s,
         m: poseMatrix(it.pos, { yaw: it.v * TAU, lean: (it.w - 0.5) * 0.10, leanDir: it.u * TAU, scale: [w, h, w * lerp(0.85, 1.15, it.w)] }, new THREE.Matrix4()),
       });
-      this._blob(it, w * 2.2, { opacity: 0.7 });
+      this._blob(it, w * 2.4, { opacity: 0.8 });
     }
-    this._spread('hoodoo', hoodooGeo, mat, hItems, { per: 10, maxChunks: 6, cast: true, receive: true });
+    this._spread('hoodoo', hoodooGeo, hMat, hItems, { per: 10, maxChunks: 6, cast: true, receive: true });
   }
 
   /** Dry brush and bunch grass. Sparser and yellower than the coast's cover. */
@@ -1409,13 +1519,20 @@ export class Scenery {
     const geos = [0, 1, 2].map((i) => {
       const g = rockGeometry(makeRng(930 + i), { detail: i === 2 ? 1 : 0, rough: 0.34 + i * 0.05, squash: 0.55 + i * 0.1 });
       paintGeometry(g, (v, col) => {
-        const t = clamp01(v.y * 0.5 + 0.5);
-        const band = Math.sin(v.y * 6 + i) * 0.5 + 0.5;
-        col.setRGB(lerp(0.36, 0.60, t) * lerp(0.88, 1.06, band), lerp(0.23, 0.38, t), lerp(0.17, 0.28, t));
+        const k = 0.90 + (Math.sin(v.x * 5.3 + v.y * 4.1 + v.z * 6.7 + i) * 0.5 + 0.5) * 0.18;
+        col.setRGB(k, k * 0.99, k * 0.97);
       });
       return g;
     });
-    const mat = this._mat(propMaterial({ roughness: 0.98, envMapIntensity: 0.35, flatShading: true }));
+    // Boulder scale: a 2 m rock at the terrain's 14 m tile would carry a
+    // seventh of one repeat and come out a flat colour, so the projection is
+    // tightened until the grain matches the size of the thing it is on.
+    const mat = this._rock({
+      tile: 2.6, macro: 0.22, macroDepth: 0.30,
+      strata: 0.9, strataDepth: 0.16, strataWarp: 0.7,
+      contact: 0.38, contactFall: 1.4, normalStrength: 0.7,
+      roughness: 1.0, envMapIntensity: 0.35, flatShading: true,
+    });
     const sites = scatterAlong(this.rng, this.terrain, {
       count: this._n(380), band: [NEAR_D, 120], cycles: 13, threshold: -0.22,
       bias: 1.9, cluster: [3, 10], clusterArc: 8, clusterLat: 7, minGap: 1.0, depthPow: 1.2,
@@ -1504,7 +1621,6 @@ export class Scenery {
    * thing on this circuit that puts geometry over the driver's head.
    */
   _rockArch(fractions) {
-    const mat = this._mat(propMaterial({ roughness: 0.98, envMapIntensity: 0.35, flatShading: true }));
     for (const frac of fractions) {
       const s = mod(frac * this.track.length, this.track.length);
       const half = this.track.halfWidthAt(s);
@@ -1512,35 +1628,62 @@ export class Scenery {
       const baseY = Math.min(this.terrain.heightAt(s, legLat), this.terrain.heightAt(s, -legLat)) - 1.5;
       const f = this.track.frameAt(s, {});
       const clear = f.pos.y - baseY + 15.5;
+      const rng = makeRng(1500 + Math.round(s));
 
+      // The span. Radius varies along the arc on two frequencies, and the
+      // section is lozenged rather than round: a constant-radius tube reads as
+      // a pipe, and a pipe is what the critic photographed.
       const pts = [];
-      const segs = 16;
+      const segs = 22;
       for (let i = 0; i <= segs; i++) {
         const t = i / segs;
         const a = Math.PI * t;
         pts.push({
           p: new THREE.Vector3(-Math.cos(a) * legLat, Math.sin(a) * clear * 0.98, Math.sin(a * 2) * 1.6),
-          r: lerp(4.6, 2.4, Math.sin(a)) * lerp(0.85, 1.15, Math.sin(t * 9)),
+          r: lerp(4.6, 2.4, Math.sin(a)) * lerp(0.85, 1.15, Math.sin(t * 9)) * lerp(0.92, 1.08, Math.sin(t * 23 + 1.3)),
         });
       }
       const archGeo = sweepStack(pts, 9, { capStart: true, capEnd: true, vScale: 0.08 });
       const parts = [{ geo: archGeo, color: 0xffffff }];
-      const rng = makeRng(1500 + Math.round(s));
       for (const sx of [-1, 1]) {
         parts.push({
           geo: rockGeometry(rng, { detail: 1, rough: 0.34, squash: 0.8 }), color: 0xffffff,
           m: T([sx * legLat, 2.0, 0], [0, rng() * TAU, 0], [8.5, 7.5, 8.5]),
         });
       }
+      // Buttresses and shed blocks around the feet. The straight join between
+      // a smooth leg and flat sand is the tell that says "two objects"; a pile
+      // of its own debris at the base is what says the arch weathered out of
+      // the ground it stands in.
+      for (let k = 0; k < 9; k++) {
+        const sx = k % 2 ? 1 : -1;
+        const th = rng() * TAU;
+        const rr = lerp(5.0, 11.5, rng());
+        const sc = lerp(1.4, 4.6, Math.pow(rng(), 1.6));
+        parts.push({
+          geo: rockGeometry(rng, { detail: 0, rough: 0.40, squash: 0.62 }), color: 0xffffff,
+          m: T([sx * legLat + Math.cos(th) * rr, sc * 0.22, Math.sin(th) * rr],
+            [(rng() - 0.5) * 0.5, rng() * TAU, (rng() - 0.5) * 0.5],
+            [sc * lerp(0.9, 1.6, rng()), sc * lerp(0.5, 0.9, rng()), sc * lerp(0.9, 1.5, rng())]),
+        });
+      }
       const geo = mergeParts(parts);
+      // Faint per-face mottle only; the triplanar map carries the material.
       paintGeometry(geo, (v, col) => {
-        const band = Math.sin(v.y * 0.42) * 0.5 + 0.5;
-        const t = clamp01(v.y / 26);
-        col.setRGB(lerp(0.44, 0.62, t) * lerp(0.84, 1.08, band), lerp(0.27, 0.40, t), lerp(0.20, 0.30, t));
+        const k = 0.93 + (Math.sin(v.x * 3.1 + v.z * 2.6 + v.y * 1.7) * 0.5 + 0.5) * 0.14;
+        col.setRGB(k, k * 0.99, k * 0.98);
       });
       const m = this._crossBasis(s, baseY);
       geo.applyMatrix4(m);
       geo.computeBoundingSphere();
+      // Smooth-shaded, not faceted: at 30 m the arch's own facets were reading
+      // as shading bands across a near-white lump. The relief now comes from
+      // the ground's normal map, which is metres of rock rather than polygons.
+      const mat = this._rock({
+        baseY, strata: 3.0, strataDepth: 0.24, strataWarp: 3.2,
+        contact: 0.40, contactFall: 7, normalStrength: 1.05,
+        roughness: 1.0, envMapIntensity: 0.4,
+      });
       addMesh(this.group, geo, mat, { name: 'rockArch', cast: true, receive: true });
     }
   }
@@ -1605,37 +1748,96 @@ export class Scenery {
   }
 
   /**
-   * A near dust field of glowing motes.
+   * A parallax mote field, banished to the far side of the play space.
    *
    * The sky's own starfield is infinitely far away and therefore does not move
-   * relative to the track. These sit within a few hundred metres, so they
-   * parallax past the camera and give the void a sense of speed.
+   * relative to the track. These sit at a few hundred metres, so they parallax
+   * past the camera and give the void a sense of speed — which is the entire
+   * job, and none of it requires a single mote in front of a kart.
+   *
+   * The previous field ran from 14 m out with a 150 m vertical spread, all at
+   * one point size and all within a whisker of white. Hundreds of near-white
+   * discs drawn over the road, the karts and the near foreground is snowfall,
+   * and it made the track edges unreadable. Three rules fix it:
+   *
+   *  - **Nothing in the play space.** Sites are rejected inside a 110 m tube
+   *    around the roadway, so no mote is ever *placed* where the driving is.
+   *  - **Nothing in the near field.** The tube is a local test and a looping
+   *    circuit folds back on itself, so the shader also fades every mote out
+   *    below 110 m from the camera. That one is view-dependent and therefore
+   *    the guarantee; the placement rule is what keeps the far field even.
+   *  - **Size varies.** A per-point scale on top of the distance attenuation
+   *    gives a real range of sizes instead of one disc at one radius, and a
+   *    hard pixel clamp stops the nearest survivors becoming lens blobs.
    */
   _skyDust() {
-    const n = this._n(1400);
-    const pos = new Float32Array(n * 3);
-    const col = new Float32Array(n * 3);
+    // The field now occupies roughly eight times the volume it did, so it
+    // takes more motes to hold the same apparent density. They cost one draw
+    // call between them either way.
+    const want = this._n(2600);
     const L = this.track.length;
     const p = new THREE.Vector3();
     const c = new THREE.Color();
-    for (let i = 0; i < n; i++) {
+    const pos = [], col = [], siz = [];
+    // The corridor the driver occupies, plus the width of the roadway itself.
+    // Wide enough that a mote is never beside a barrier, tight enough that the
+    // field still parallaxes: pushed much past this the whole point of having
+    // near dust at all — a sense of speed the infinite starfield cannot give —
+    // is thrown away with the defect.
+    const KEEP = 90;
+    for (let guard = 0; pos.length < want * 3 && guard < want * 12; guard++) {
       const s = this.rng() * L;
       const side = this.rng() < 0.5 ? -1 : 1;
-      const d = lerp(14, 260, Math.pow(this.rng(), 0.75));
+      const d = lerp(45, 340, Math.pow(this.rng(), 0.85));
+      const dy = (this.rng() - 0.5) * 460;
+      if (Math.hypot(d, dy) < KEEP) continue;
       this.track.placeOnRoad(s, side * (this.track.halfWidthAt(s) + d), p);
-      p.y += (this.rng() - 0.5) * 150;
-      pos[i * 3] = p.x; pos[i * 3 + 1] = p.y; pos[i * 3 + 2] = p.z;
-      c.setHSL(this.rng(), 0.55, lerp(0.55, 0.95, this.rng()));
-      col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
+      pos.push(p.x, p.y + dy, p.z);
+      // Authored in sRGB: setHSL defaults to the linear working space, where
+      // L = 0.75 is very nearly white. That is why every mote came out the
+      // same value and the field read as one grey drizzle rather than as
+      // scattered coloured light.
+      c.setHSL(
+        mod(0.52 + gauss(this.rng) * 0.22, 1),
+        lerp(0.35, 0.95, this.rng()),
+        lerp(0.42, 0.78, Math.pow(this.rng(), 1.5)),
+        THREE.SRGBColorSpace,
+      );
+      col.push(c.r, c.g, c.b);
+      siz.push(lerp(0.5, 2.0, Math.pow(this.rng(), 2.2)));
     }
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    geo.setAttribute('aSize', new THREE.Float32BufferAttribute(siz, 1));
     geo.computeBoundingSphere();
+
+    const tex = moteTexture(64);
+    this._textures.push(tex);
+    // `size` is metres, and three multiplies it by (halfViewportHeight / z).
+    // At 1080p that is ~486, so the old 2.4 put an 83-pixel disc on screen for
+    // every mote that happened to be 14 m away — which is what "dirt on the
+    // lens" actually was. 1.2 lands the band at one to six pixels across its
+    // whole depth range, so the clamp below only ever catches an outlier and
+    // the per-mote scale is free to read as depth instead of being flattened.
     const mat = this._mat(new THREE.PointsMaterial({
-      size: 2.4, sizeAttenuation: true, vertexColors: true, transparent: true,
-      opacity: 0.85, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false, fog: true,
+      map: tex, size: 1.2, sizeAttenuation: true, vertexColors: true, transparent: true,
+      opacity: 1.0, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false, fog: true,
     }), { env: false });
+    mat.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', '#include <common>\nattribute float aSize;\nvarying float vHkFade;')
+        .replace('gl_PointSize = size;', 'gl_PointSize = size * aSize;')
+        // After the size-attenuation block, so the clamp is the last word.
+        .replace('#include <uv_vertex>', `#include <uv_vertex>
+// A mote larger than this stops being a mote and becomes dirt on the lens.
+gl_PointSize = min( gl_PointSize, 7.0 );
+vHkFade = smoothstep( 60.0, 150.0, - mvPosition.z );`);
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', '#include <common>\nvarying float vHkFade;')
+        .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.a *= vHkFade;');
+    };
+    mat.customProgramCacheKey = () => 'hk-mote';
     const pts = new THREE.Points(geo, mat);
     pts.name = 'skyDust';
     pts.frustumCulled = false;
@@ -1653,7 +1855,7 @@ export class Scenery {
       });
     });
     const mat = this._mat(applyDrift(
-      propMaterial({ roughness: 0.18, metalness: 0.6, envMapIntensity: 1.6, emissive: 0x2a1060, emissiveIntensity: 0.9, flatShading: true }),
+      propMaterial({ roughness: 0.18, metalness: 0.6, envMapIntensity: 1.6, emissive: 0x2a1060, emissiveIntensity: 0.55, flatShading: true }),
       { amp: 3.4, freq: 0.18 },
     ));
     const L = this.track.length;
@@ -1662,9 +1864,13 @@ export class Scenery {
     for (let i = 0; i < this._n(180); i++) {
       const s = this.rng() * L;
       const side = this.rng() < 0.5 ? -1 : 1;
-      const d = lerp(26, 150, Math.pow(this.rng(), 1.2));
+      const d = lerp(52, 220, Math.pow(this.rng(), 1.1));
       this.track.placeOnRoad(s, side * (this.track.halfWidthAt(s) + d), p);
-      p.y += lerp(-46, 20, this.rng());
+      // Deliberately never level with the roadway. A shard at barrier height
+      // beside the track reads as furniture the player should be avoiding, and
+      // one behind the kart reads as debris it just shed. Most hang below the
+      // deck, which is where the eye expects a void's floor to be.
+      p.y += (this.rng() < 0.74 ? -1 : 1) * lerp(20, 96, this.rng());
       const sc = lerp(1.0, 4.6, Math.pow(this.rng(), 2.6));
       buckets[i % 2].push({
         s, m: poseMatrix(p.clone(), {

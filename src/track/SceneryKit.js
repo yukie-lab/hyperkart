@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { clamp, clamp01, lerp, mod, ringDelta, smoothstep, makeValueNoise2D, fbm2D, TAU } from '../core/MathX.js';
+import * as Tex from '../render/ProcTex.js';
 
 /**
  * Shared toolkit for the scenery layer.
@@ -99,8 +100,13 @@ export class TerrainSampler {
 
   /**
    * Height of the rendered terrain at (arc position, lateral offset).
-   * Bilinear across the same grid the mesh is built from, so a prop dropped
-   * here lands on a triangle rather than near one.
+   *
+   * Planar across the *same triangle* the mesh is built from, not bilinear
+   * across the quad. Those two disagree by half the quad's twist, and out at
+   * the hoodoo band a quad is twenty metres across a falling ridge — which is
+   * metres of error, and metres of error is exactly the gap of sky the critic
+   * found under the canyon hoodoos. Bilinear puts a prop near the surface;
+   * only the triangle puts it on the surface.
    */
   heightAt(s, lateral) {
     const half = this.track.halfWidthAt(s);
@@ -117,7 +123,30 @@ export class TerrainSampler {
 
     const a = this.node(i0, j0), b = this.node(i0, j0 + 1);
     const c = this.node(i0 + 1, j0), e = this.node(i0 + 1, j0 + 1);
-    return lerp(lerp(a, b, tj), lerp(c, e, tj), ti);
+    // TrackBuilder splits every quad along the (i,j)-(i+1,j+1) diagonal, so
+    // which of the two planes is in force is decided by which side of ti == tj
+    // the sample falls on.
+    return tj <= ti
+      ? a + (c - a) * ti + (e - c) * tj
+      : a + (b - a) * tj + (e - b) * ti;
+  }
+
+  /**
+   * The lowest terrain within `radius` of (s, lateral).
+   *
+   * A mesa's base is a rigid disc. Sitting it on the height at its centre
+   * leaves the downhill third of that disc hanging in the air, and a landform
+   * that floats is worse than one that is buried. Anything with a real
+   * footprint gets planted on the low corner of it instead.
+   */
+  groundMin(s, lateral, radius) {
+    let lo = this.heightAt(s, lateral);
+    for (let k = 0; k < 8; k++) {
+      const th = (k / 8) * TAU;
+      const y = this.heightAt(s + Math.cos(th) * radius, lateral + Math.sin(th) * radius);
+      if (y < lo) lo = y;
+    }
+    return lo;
   }
 
   /** World point sitting on the terrain at (s, lateral). */
@@ -606,19 +635,39 @@ export function frondGeometry(len, width, { segs = 5, droop = 1.0, fold = 0.32 }
 }
 
 /**
- * A flat-topped mesa: stacked rings with per-ring irregular radius, wider at
- * the base where scree has piled up. Colour banding is applied by the caller
- * from the returned `bandY` helper.
+ * A flat-topped mesa, one unit tall, standing on y = 0.
+ *
+ * Four scales of irregularity, because a butte's *silhouette* is the whole
+ * read at the distance these are seen from and a stack of near-circular rings
+ * gives a straight vertical edge against the sky — the single thing the critic
+ * called out on the far slabs:
+ *
+ *   - the mass wobbles ring to ring (`wobble`);
+ *   - the cliff face is fluted vertically, which is what erosion does to a
+ *     sandstone wall and what breaks a flat edge into a serrated one;
+ *   - a minority of faces carry a deep gully, because weathering around a
+ *     butte is never even and a rim that varies evenly reads as lathe work;
+ *   - the cap rim is notched per side, so the top edge is a broken line rather
+ *     than one horizontal cut.
  */
-export function mesaGeometry(rng, { rings = 7, sides = 11, wobble = 0.16 } = {}) {
+export function mesaGeometry(rng, {
+  rings = 8, sides = 13, wobble = 0.16, flute = 0.085, rim = 0.075, gullies = 0.34,
+} = {}) {
   const positions = [], uvs = [], idx = [];
-  const phase = [];
-  for (let j = 0; j < sides; j++) phase.push(rng() * TAU);
+  const phase = [], fluteP = [], gully = [], rimY = [];
+  for (let j = 0; j < sides; j++) {
+    phase.push(rng() * TAU);
+    fluteP.push(rng() * TAU);
+    gully.push(rng() < gullies ? lerp(0.10, 0.26, rng()) : 0);
+    // Biased toward zero: most of the rim is at full height and a few faces
+    // are cut well back, which is how a cap rock actually fails.
+    rimY.push(-Math.pow(rng(), 1.7) * rim);
+  }
   const profileR = (t) => {
     // Talus apron, a near-vertical cliff, then a slight cap overhang.
-    if (t < 0.22) return lerp(1.34, 1.02, t / 0.22);
-    if (t < 0.86) return lerp(1.02, 0.93, (t - 0.22) / 0.64);
-    return lerp(0.93, 0.72, (t - 0.86) / 0.14);
+    if (t < 0.24) return lerp(1.38, 1.02, smoothstep(t / 0.24));
+    if (t < 0.86) return lerp(1.02, 0.93, (t - 0.24) / 0.62);
+    return lerp(0.93, 0.74, (t - 0.86) / 0.14);
   };
   for (let i = 0; i <= rings; i++) {
     const t = i / rings;
@@ -626,8 +675,13 @@ export function mesaGeometry(rng, { rings = 7, sides = 11, wobble = 0.16 } = {})
     for (let j = 0; j <= sides; j++) {
       const jj = j % sides;
       const th = (j / sides) * TAU;
-      const r = rBase * (1 + Math.sin(phase[jj] + t * 1.7) * wobble + Math.sin(phase[jj] * 2.3) * wobble * 0.5);
-      positions.push(Math.cos(th) * r, t, Math.sin(th) * r);
+      let r = rBase * (1 + Math.sin(phase[jj] + t * 1.7) * wobble + Math.sin(phase[jj] * 2.3) * wobble * 0.5);
+      // Fluting fades out into the talus, where scree has filled the channels.
+      r *= 1 - Math.abs(Math.sin(fluteP[jj] + t * 5.5)) * flute * smoothstep(clamp01((t - 0.16) / 0.36));
+      r *= 1 - gully[jj] * Math.pow(clamp01(1 - Math.abs(t - 0.62) / 0.44), 1.6);
+      // The rim notch only opens over the top fifth, so the cliff below it
+      // stays plumb.
+      positions.push(Math.cos(th) * r, t + rimY[jj] * Math.pow(t, 6), Math.sin(th) * r);
       uvs.push(j / sides, t);
     }
   }
@@ -638,10 +692,11 @@ export function mesaGeometry(rng, { rings = 7, sides = 11, wobble = 0.16 } = {})
       idx.push(i0, i1, i1 + 1, i0, i1 + 1, i0 + 1);
     }
   }
-  // Cap.
+  // Cap. The apex sits slightly proud of the rim so the top is a low dome —
+  // a flat disc reads as a cut, and its edge is the straight line above.
   const top = rings * m;
   const c = positions.length / 3;
-  positions.push(0, 1, 0); uvs.push(0.5, 1);
+  positions.push(0, 1 + rim * 0.35, 0); uvs.push(0.5, 1);
   for (let j = 0; j < sides; j++) idx.push(c, top + j, top + j + 1);
 
   const geo = new THREE.BufferGeometry();
@@ -817,6 +872,149 @@ export function propMaterial(opts = {}) {
 
 export function neonMaterial(opts = {}) {
   return new THREE.MeshBasicMaterial({ vertexColors: true, toneMapped: false, ...opts });
+}
+
+// ---------------------------------------------------------------------------
+// Landforms
+// ---------------------------------------------------------------------------
+
+/**
+ * The terrain's own texture set, for props that are made of the same rock.
+ *
+ * `ProcTex` caches on `(generator, size, seed, tint)` and `TrackBuilder` builds
+ * the terrain from exactly this call, so asking for it a second time returns
+ * the identical texture objects. A mesa sharing the ground's maps is therefore
+ * free in memory, free in generation time, and — the point — cannot drift out
+ * of step with the ground when the ground's tint is retuned.
+ */
+export function groundTexturesFor(theme) {
+  const fn = theme.key === 'coast' ? Tex.sand : Tex.dirt;
+  return fn({ size: 1024, tint: theme.groundColor });
+}
+
+/**
+ * Landform material: ground texture projected triplanar, strata by world
+ * height, contact darkening at the base.
+ *
+ * Landmark props are the one family in this folder that cannot be UV-mapped.
+ * A mesa is a swept ring stack, an arch is a bent tube, and both are scaled
+ * non-uniformly per instance — so any UV they carry is stretched by a
+ * different factor on every face, and by a different factor again on the next
+ * copy. Projecting from the three world axes removes the question, and using
+ * the *ground's* maps to do it is what stops a formation reading as a prop
+ * dropped next to the terrain rather than as part of it.
+ *
+ * Everything tunable is a uniform rather than a baked constant, so every
+ * landform on a track shares one compiled program regardless of its settings.
+ */
+export function rockMaterial(tex, {
+  tile = 14,             // metres per texture repeat — the terrain's own figure
+  macro = 0.16,          // second, wider sample: breaks the tile on a 200 m butte
+  macroDepth = 0.34,
+  strata = 3.6,          // metres per sedimentary bed
+  strataDepth = 0.20,
+  strataWarp = 2.6,      // metres the bed contact wanders, so it is not a contour
+  normalStrength = 0.85,
+  contact = 0.40,        // how dark the last metres before the ground go
+  contactFall = 6.0,     // over how many metres
+  baseY = 0,             // ground height for non-instanced meshes
+  ...rest
+} = {}) {
+  const mat = new THREE.MeshStandardMaterial({
+    map: tex.map,
+    normalMap: tex.normalMap,
+    vertexColors: true,
+    metalness: 0.0,
+    roughness: 1.0,
+    envMapIntensity: 0.55,
+    ...rest,
+  });
+  const u = {
+    uHkTile: { value: 1 / tile },
+    uHkMacro: { value: macro },
+    uHkMacroDepth: { value: macroDepth },
+    uHkLuma: { value: Math.max(tex.meanLuma ?? 0.2, 1e-3) },
+    uHkStrata: { value: TAU / Math.max(strata, 0.2) },
+    uHkStrataDepth: { value: strataDepth },
+    uHkWarp: { value: strataWarp },
+    uHkNormal: { value: normalStrength },
+    uHkContact: { value: contact },
+    uHkFall: { value: Math.max(contactFall, 0.1) },
+    uHkBaseY: { value: baseY },
+  };
+  mat.userData.rock = u;
+
+  mat.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, u);
+
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>
+uniform float uHkBaseY;
+varying vec3 vHkW;
+varying float vHkBase;`)
+      // After <project_vertex>, so shader-side animation that moved
+      // `transformed` is already accounted for.
+      .replace('#include <project_vertex>', `#include <project_vertex>
+#ifdef USE_INSTANCING
+  vHkW = ( modelMatrix * instanceMatrix * vec4( transformed, 1.0 ) ).xyz;
+  // Props are placed *at* the terrain, so the instance origin is the contact
+  // point. That is the only per-copy ground height available to the shader.
+  vHkBase = ( modelMatrix * instanceMatrix[ 3 ] ).y;
+#else
+  vHkW = ( modelMatrix * vec4( transformed, 1.0 ) ).xyz;
+  vHkBase = uHkBaseY;
+#endif`);
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>
+uniform float uHkTile, uHkMacro, uHkMacroDepth, uHkLuma;
+uniform float uHkStrata, uHkStrataDepth, uHkWarp, uHkNormal, uHkContact, uHkFall;
+varying vec3 vHkW;
+varying float vHkBase;`)
+      .replace('#include <map_fragment>', `
+// Weights from the *geometric* world normal: derivatives of world position are
+// exact under any instance scale, which the interpolated normal is not.
+vec3 hkGeoN = normalize( cross( dFdx( vHkW ), dFdy( vHkW ) ) );
+vec3 hkB = pow( abs( hkGeoN ), vec3( 4.0 ) );
+hkB /= dot( hkB, vec3( 1.0 ) ) + 1e-5;
+vec2 hkUvX = vHkW.zy * uHkTile;
+vec2 hkUvY = vHkW.xz * uHkTile;
+vec2 hkUvZ = vHkW.xy * uHkTile;
+vec3 hkAlb = texture2D( map, hkUvX ).rgb * hkB.x
+           + texture2D( map, hkUvY ).rgb * hkB.y
+           + texture2D( map, hkUvZ ).rgb * hkB.z;
+// One wide tap over the top. A 14 m tile repeats fourteen times up a butte and
+// the eye reads that as wallpaper; pivoting on the map's own mean adds the
+// drift without moving the formation's overall value.
+float hkMacro = dot( texture2D( map, hkUvZ * uHkMacro + vec2( 0.37, 0.11 ) ).rgb,
+                     vec3( 0.2126, 0.7152, 0.0722 ) );
+hkAlb *= mix( 1.0, hkMacro / uHkLuma, uHkMacroDepth );
+// Strata. Beds a couple of metres thick are what say "sedimentary rock"
+// rather than "painted cone", and they read from a kilometre away. The
+// contact wanders with the macro sample so it is geology, not a contour line.
+hkAlb *= 1.0 + sin( ( vHkW.y + hkMacro * uHkWarp ) * uHkStrata ) * uHkStrataDepth;
+// Contact darkening. The shadow map is a box around the player and these
+// formations spend most of the lap outside it, so without this the base of
+// every one of them is the same value as its sunlit cap and it floats.
+hkAlb *= mix( 1.0 - uHkContact, 1.0, smoothstep( 0.0, 1.0, max( vHkW.y - vHkBase, 0.0 ) / uHkFall ) );
+diffuseColor.rgb *= hkAlb;`)
+      .replace('#include <normal_fragment_maps>', `
+vec3 hkNX = texture2D( normalMap, hkUvX ).xyz * 2.0 - 1.0;
+vec3 hkNY = texture2D( normalMap, hkUvY ).xyz * 2.0 - 1.0;
+vec3 hkNZ = texture2D( normalMap, hkUvZ ).xyz * 2.0 - 1.0;
+// Added to the shading normal, not swizzled into place over it: a blend that
+// replaces the normal snaps a 40-degree cliff face onto whichever world axis
+// won the weights, which is the classic triplanar tell. Adding the in-plane
+// part keeps the face pointing where the geometry points.
+vec3 hkD = vec3( 0.0, hkNX.y, hkNX.x ) * hkB.x
+         + vec3( hkNY.x, 0.0, hkNY.y ) * hkB.y
+         + vec3( hkNZ.x, hkNZ.y, 0.0 ) * hkB.z;
+normal = normalize( normal + mat3( viewMatrix ) * hkD * uHkNormal );`);
+  };
+  // One program for every landform on the track: the tuning all rides in
+  // uniforms, so nothing here forks the shader.
+  mat.customProgramCacheKey = () => 'hk-rock';
+  return mat;
 }
 
 /** Shared per-material clock, driven from Scenery.update. */
@@ -1011,47 +1209,139 @@ function texFrom(c, { srgb = true, repeatX = 1, repeatY = 1, transparent = false
 }
 
 /**
- * A strip of four trackside hoardings. The band geometry tiles this along the
- * barrier, so one texture supplies all the signage on the circuit.
+ * A strip of trackside hoardings, one cell per sponsor.
+ *
+ * The strip is what tiles along the barrier, so its cell count *is* the
+ * circuit's advertising vocabulary: at four cells the player reads the same
+ * two boards six times between one corner and the next, which is the loudest
+ * possible statement that the world is generated. Eight brands, each with its
+ * own layout as well as its own palette, is enough that no two adjacent boards
+ * repeat and a run has to be a hundred metres long before the cycle closes.
+ *
+ * Layout variety matters as much as the count. Four boards that differ only in
+ * their wordmark still read as one board recoloured — a real barrier carries
+ * centred marks, stacked lockups and full-bleed chevrons side by side.
+ *
+ * Returns the texture with `userData.cells` set, because every caller has to
+ * scale its UVs by the cell count to keep panels at a real 3 m width.
  */
-export function bannerStripTexture(palette, words) {
-  const W = 2048, H = 256, cells = 4, cw = W / cells;
+export function bannerStripTexture(palette, brands) {
+  const cells = brands.length;
+  const CW = 512, H = 256, W = CW * cells;
   const c = canvasOf(W, H);
   const g = c.getContext('2d');
+
+  // Fit to the box rather than trusting a point size: the brand names differ
+  // in length by a factor of two and a fixed size either overflows the short
+  // boards or leaves the long ones unreadable at distance.
+  const fit = (text, px, maxW, weight = 'bold') => {
+    let size = px;
+    g.font = `${weight} ${Math.round(size)}px Helvetica, Arial, sans-serif`;
+    const w = g.measureText(text).width;
+    if (w > maxW) {
+      size *= maxW / w;
+      g.font = `${weight} ${Math.round(size)}px Helvetica, Arial, sans-serif`;
+    }
+    return size;
+  };
+
   for (let i = 0; i < cells; i++) {
-    const x0 = i * cw;
+    const x0 = i * CW;
+    const b = brands[i];
     const p = palette[i % palette.length];
-    g.fillStyle = p.bg;
-    g.fillRect(x0, 0, cw, H);
-
-    // A diagonal accent sweep — the standard visual grammar of a sponsor board.
     g.save();
-    g.beginPath(); g.rect(x0, 0, cw, H); g.clip();
-    g.fillStyle = p.accent;
-    g.beginPath();
-    g.moveTo(x0 + cw * 0.60, 0); g.lineTo(x0 + cw * 1.02, 0);
-    g.lineTo(x0 + cw * 1.02, H); g.lineTo(x0 + cw * 0.44, H);
-    g.closePath(); g.fill();
-    g.fillStyle = 'rgba(255,255,255,0.16)';
-    g.beginPath();
-    g.moveTo(x0 + cw * 0.52, 0); g.lineTo(x0 + cw * 0.60, 0);
-    g.lineTo(x0 + cw * 0.44, H); g.lineTo(x0 + cw * 0.36, H);
-    g.closePath(); g.fill();
-    g.restore();
-
-    g.fillStyle = p.fg;
-    g.font = `bold ${Math.round(H * 0.52)}px Helvetica, Arial, sans-serif`;
+    g.beginPath(); g.rect(x0, 0, CW, H); g.clip();
+    g.fillStyle = p.bg;
+    g.fillRect(x0, 0, CW, H);
     g.textBaseline = 'middle';
-    g.textAlign = 'left';
-    const label = words[i % words.length];
-    g.fillText(label, x0 + cw * 0.06, H * 0.52);
+    const layout = i % 4;
+
+    if (layout === 0) {
+      // Diagonal accent sweep with the wordmark on the dark half.
+      g.fillStyle = p.accent;
+      g.beginPath();
+      g.moveTo(x0 + CW * 0.60, 0); g.lineTo(x0 + CW * 1.02, 0);
+      g.lineTo(x0 + CW * 1.02, H); g.lineTo(x0 + CW * 0.44, H);
+      g.closePath(); g.fill();
+      g.fillStyle = 'rgba(255,255,255,0.16)';
+      g.beginPath();
+      g.moveTo(x0 + CW * 0.52, 0); g.lineTo(x0 + CW * 0.60, 0);
+      g.lineTo(x0 + CW * 0.44, H); g.lineTo(x0 + CW * 0.36, H);
+      g.closePath(); g.fill();
+      g.fillStyle = p.fg;
+      g.textAlign = 'left';
+      fit(b.name, H * 0.46, CW * 0.50);
+      g.fillText(b.name, x0 + CW * 0.06, H * 0.52);
+    } else if (layout === 1) {
+      // Centred wordmark between two rules, with a strapline under it.
+      g.strokeStyle = p.accent;
+      g.lineWidth = H * 0.045;
+      g.beginPath();
+      g.moveTo(x0 + CW * 0.10, H * 0.17); g.lineTo(x0 + CW * 0.90, H * 0.17);
+      g.moveTo(x0 + CW * 0.10, H * 0.83); g.lineTo(x0 + CW * 0.90, H * 0.83);
+      g.stroke();
+      g.fillStyle = p.fg;
+      g.textAlign = 'center';
+      fit(b.name, H * 0.40, CW * 0.76);
+      g.fillText(b.name, x0 + CW * 0.5, H * 0.44);
+      fit(b.sub, H * 0.15, CW * 0.66, '');
+      g.globalAlpha = 0.75;
+      g.fillText(b.sub, x0 + CW * 0.5, H * 0.68);
+      g.globalAlpha = 1;
+    } else if (layout === 2) {
+      // A mark in a keyline box, wordmark right of it. The glyph is what makes
+      // a board legible at the distance the lettering has already dissolved.
+      g.fillStyle = p.accent;
+      g.fillRect(x0, 0, CW * 0.30, H);
+      g.fillStyle = p.fg;
+      g.save();
+      g.translate(x0 + CW * 0.15, H * 0.5);
+      g.rotate(Math.PI * 0.25);
+      g.fillRect(-H * 0.20, -H * 0.20, H * 0.40, H * 0.40);
+      g.restore();
+      g.fillStyle = p.bg;
+      g.save();
+      g.translate(x0 + CW * 0.15, H * 0.5);
+      g.rotate(Math.PI * 0.25);
+      g.fillRect(-H * 0.09, -H * 0.09, H * 0.18, H * 0.18);
+      g.restore();
+      g.fillStyle = p.fg;
+      g.textAlign = 'left';
+      fit(b.name, H * 0.42, CW * 0.62);
+      g.fillText(b.name, x0 + CW * 0.36, H * 0.5);
+    } else {
+      // Full-bleed chevrons behind a right-aligned lockup.
+      g.fillStyle = p.accent;
+      for (let k = -1; k < 5; k++) {
+        g.beginPath();
+        const bx = x0 + CW * (0.02 + k * 0.14);
+        g.moveTo(bx, H); g.lineTo(bx + CW * 0.09, 0);
+        g.lineTo(bx + CW * 0.15, 0); g.lineTo(bx + CW * 0.06, H);
+        g.closePath(); g.fill();
+      }
+      g.fillStyle = p.bg;
+      g.globalAlpha = 0.82;
+      g.fillRect(x0 + CW * 0.30, 0, CW * 0.70, H);
+      g.globalAlpha = 1;
+      g.fillStyle = p.fg;
+      g.textAlign = 'right';
+      fit(b.name, H * 0.38, CW * 0.60);
+      g.fillText(b.name, x0 + CW * 0.94, H * 0.40);
+      fit(b.sub, H * 0.155, CW * 0.56, '');
+      g.globalAlpha = 0.7;
+      g.fillText(b.sub, x0 + CW * 0.94, H * 0.66);
+      g.globalAlpha = 1;
+    }
 
     // Border keeps panels reading as separate boards at a distance.
     g.strokeStyle = 'rgba(0,0,0,0.45)';
     g.lineWidth = 8;
-    g.strokeRect(x0 + 4, 4, cw - 8, H - 8);
+    g.strokeRect(x0 + 4, 4, CW - 8, H - 8);
+    g.restore();
   }
-  return texFrom(c, { srgb: true });
+  const t = texFrom(c, { srgb: true });
+  t.userData.cells = cells;
+  return t;
 }
 
 /** Soft foam texture: white filaments with an alpha falloff top and bottom. */
@@ -1073,6 +1363,38 @@ export function foamTexture(seed = 5) {
   }
   g.putImageData(img, 0, 0);
   return texFrom(c, { srgb: true });
+}
+
+/**
+ * A single mote: a soft round core with a long tail into nothing.
+ *
+ * `PointsMaterial` with no map draws `gl_PointCoord` untouched, which is a
+ * hard axis-aligned square — at any size above two pixels that is instantly
+ * legible as a quad, and hundreds of them read as dirt on the lens. Written as
+ * ImageData rather than a canvas gradient so the alpha ramp is exactly the
+ * curve asked for and never passes through the 2D context's premultiplication.
+ */
+export function moteTexture(size = 64, core = 0.16, gamma = 2.6) {
+  const c = canvasOf(size, size);
+  const g = c.getContext('2d');
+  const img = g.createImageData(size, size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const dx = (x + 0.5) / size * 2 - 1, dy = (y + 0.5) / size * 2 - 1;
+      const r = Math.hypot(dx, dy);
+      // Flat core, then a power falloff: a pure gaussian has no centre and
+      // reads as fog, a hard disc has no glow and reads as a hole punch.
+      const a = r >= 1 ? 0 : Math.pow(clamp01(1 - Math.max(r - core, 0) / (1 - core)), gamma);
+      const i = (y * size + x) * 4;
+      img.data[i] = img.data[i + 1] = img.data[i + 2] = 255;
+      img.data[i + 3] = a * 255;
+    }
+  }
+  g.putImageData(img, 0, 0);
+  const t = texFrom(c, { srgb: true });
+  t.wrapS = t.wrapT = THREE.ClampToEdgeWrapping;
+  t.needsUpdate = true;
+  return t;
 }
 
 /** Radial glow sprite, used for nebulae, dust devils and lamp halos. */

@@ -659,20 +659,289 @@ export function grass({ size = 1024, seed = 61, tint = 0x4e8a3c } = {}) {
   return result;
 }
 
-/** Checkered start/finish. Kept high-contrast and crisp. */
+/**
+ * Boost strip: forward-pointing chevrons painted onto the tarmac.
+ *
+ * The shape is the whole point. A pad has to answer two questions in the
+ * fraction of a second it is in peripheral vision at 110 km/h — "will this make
+ * me faster" and "which way does it want me to go" — and a chevron is the only
+ * mark that answers the second one on its own. A uniform slab answers neither,
+ * which is why it read as a missing texture.
+ *
+ * The tile is one chevron *pitch* deep and `aspect` pitches wide, so the arms
+ * can be reasoned about in metres of road: at aspect 2 the phase shift from the
+ * centreline to either edge is exactly one full period, which both puts the
+ * arms at 45 degrees and makes each arm meet the next chevron's arm at the pad
+ * edge — the continuous zig-zag that reads as a strip rather than as stickers.
+ *
+ * Brightness is deliberately *not* uniform: only the arms carry emissive, and
+ * the plate they sit on is dark paint. Lighting the whole pad is what made it
+ * the brightest object in the frame, brighter than the sky and brighter than
+ * the player's own kart. Confining the glow to 40% of the area buys back all of
+ * that mean brightness and spends it on local contrast, where it does the
+ * reading work.
+ */
+export function boostPad({ size = 512, aspect = 2.0, plate = 0x123c56, glow = 0x2ecdff, wear = 1 } = {}) {
+  const key = `boost_${size}_${aspect}_${plate}_${glow}_${wear}`;
+  if (_textureCache.has(key)) return _textureCache.get(key);
+
+  const wearN = tiling(211, size, 4);    // tyre scuffing, over centimetres
+  const gritN = tiling(233, size, 2);    // road grit trodden into the film
+  const filmN = tiling(251, size, 16);   // how thick the machine laid it, over metres
+  const P = paintTint(plate), G = paintTint(glow);
+
+  // Arm thickness as a fraction of the pitch. Much above 0.45 and the gaps
+  // close up into a solid slab again — the gap is what makes it an arrow.
+  const ARM = 0.40;
+  // Softening the band edges by a couple of texels is not cosmetic: this
+  // surface is viewed at the most grazing angle of anything on the circuit, and
+  // a hard step is exactly the high-frequency energy the mip chain cannot hold.
+  const SOFT = 2.5 / size;
+
+  const arm = new Float32Array(size * size);
+  const lead = new Float32Array(size * size);
+  const halo = new Float32Array(size * size);
+  const alpha = new Float32Array(size * size);
+  const scuff = new Float32Array(size * size);
+  const height = new Float32Array(size * size);
+
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = y * size + x;
+      const u = (x + 0.5) / size;
+      // CanvasTexture flips Y, so canvas row 0 is sampled at v = 1. Undoing it
+      // here is what keeps the arrows pointing down the road instead of back
+      // up it — the one sign error in this function that a still cannot show.
+      const v = 1 - (y + 0.5) / size;
+      const wx = (u - 0.5) * aspect;    // half-widths, in pitches
+      // `+|wx|` puts the apex at the centre and the arms trailing behind it.
+      // `-|wx|` draws the same chevron pointing backwards.
+      const phase = mod(v + Math.abs(wx), 1);
+      // Wrapped signed distance to the arm's centre, so both edges of the band
+      // soften and the band crossing the tile seam does not tear.
+      let dp = phase - ARM * 0.5;
+      dp -= Math.round(dp);
+      const a = 1 - smoothstep((Math.abs(dp) - ARM * 0.5) / SOFT);
+      // A narrow bloom rim just outside each arm — real light on wet-look paint
+      // does not stop dead at the edge of the paint. It has to die out well
+      // before the midpoint between two arms: a wide falloff here does not read
+      // as a rim at all, it silently relights the entire plate, which is the
+      // uniform glow this whole rework exists to remove.
+      const h = 1 - smoothstep((Math.abs(dp) - ARM * 0.6) / 0.075);
+
+      // Karts cross a boost pad at full throttle and nothing else on the
+      // circuit gets scrubbed as hard, so the film is thin down the middle.
+      // `wear` is how much of a *road* this pad is painted on. Tarmac gets the
+      // full weathering story; Rainbow Skyway's strip is an energy plate on a
+      // neon ribbon with no traffic film to lose, and — more practically — a
+      // part-transparent plate simply disappears over an emissive road.
+      const line = 1 - smoothstep(Math.abs(wx) / 0.55);
+      const sc = wear * clamp01(line * lerp(0.35, 1.0, fbm2D(wearN.n, x / wearN.k, y / wearN.k, 4)) * 1.15 - 0.18);
+
+      arm[i] = a * lerp(1.0, 0.55, sc);
+      // Leading half of each arm brighter than the trailing half. It is a small
+      // thing, but it is the only cue that survives a single frozen frame.
+      lead[i] = clamp01(dp / (ARM * 0.5)) * a;
+      halo[i] = h;
+      scuff[i] = sc;
+
+      // The plate stops short of the pad edge and feathers out over the last
+      // ~7% of the half-width, so the strip is a decal painted on the road
+      // rather than a quad hovering above it with a polygon silhouette.
+      const edge = 1 - smoothstep((Math.abs(wx) / (aspect * 0.5) - 0.86) / 0.14);
+      // Feathering with a clean ramp reads as an airbrush; overspray and
+      // flaking at the border is what a real painted edge looks like.
+      const flake = smoothstep((fbm2D(wearN.n, x / wearN.k + 31, y / wearN.k, 4) - 0.26) * 3.2);
+      const patchy = lerp(1, lerp(0.42, 1.0, flake) * lerp(0.86, 1.0, fbm2D(gritN.n, x / gritN.k, y / gritN.k, 2)), wear);
+      alpha[i] = clamp01(edge * patchy);
+
+      // Two coats of thermoplastic, so the arms stand proudest and the scuffed
+      // centreline has been worn back down towards the tarmac.
+      height[i] = (0.30 + a * 0.55) * (1 - sc * 0.6)
+        + fbm2D(gritN.n, x / gritN.k, y / gritN.k, 2) * 0.15;
+    }
+  }
+
+  const mapC = paint(size, (x, y, o) => {
+    const i = y * size + x;
+    const film = lerp(0.88, 1.06, fbm2D(filmN.n, x / filmN.k, y / filmN.k, 3));
+    // Where the arms have been scrubbed thin the tarmac beneath starts to show
+    // through as grey, not as a paler blue.
+    const grey = scuff[i] * 0.5;
+    const a = arm[i];
+    let r = lerp(P.r, G.r, a) * film;
+    let g = lerp(P.g, G.g, a) * film;
+    let b = lerp(P.b, G.b, a) * film;
+    r = lerp(r, 0.34, grey); g = lerp(g, 0.33, grey); b = lerp(b, 0.34, grey);
+    o[0] = r * 255; o[1] = g * 255; o[2] = b * 255;
+  });
+
+  // Emissive rides only on the arms. Kept well under 1.0 here so the material's
+  // emissiveIntensity is the single place the pad's brightness is set.
+  const emisC = paint(size, (x, y, o) => {
+    const i = y * size + x;
+    const e = clamp01(arm[i] * (0.60 + 0.40 * lead[i]) + halo[i] * 0.22) * (1 - scuff[i] * 0.45);
+    o[0] = G.r * e * 255; o[1] = G.g * e * 255; o[2] = G.b * e * 255;
+  });
+
+  const roughC = paint(size, (x, y, o) => {
+    const i = y * size + x;
+    // Fresh thermoplastic holds a sheen; scuffed film is as matt as the road.
+    let rgh = lerp(0.62, 0.38, arm[y * size + x]);
+    rgh = lerp(rgh, 0.92, scuff[i]);
+    o[0] = o[1] = o[2] = clamp01(rgh) * 255;
+  });
+
+  const result = {
+    map: makeTexture(mapC, { srgb: true }),
+    emissiveMap: makeTexture(emisC, { srgb: true }),
+    alphaMap: makeTexture(grayCanvas(size, alpha)),
+    normalMap: makeTexture(heightToNormal(height, size, 1.5)),
+    roughnessMap: makeTexture(roughC),
+    normalScale: 0.5,
+  };
+  _textureCache.set(key, result);
+  return result;
+}
+
+/**
+ * The pool of light a boost strip throws onto the tarmac around it.
+ *
+ * Nothing in this renderer will do this for us — the pad's emissive lights
+ * only the pad's own pixels — and its absence is most of why the strip read as
+ * a decal *floating* rather than one lying on the road. An additive quad a
+ * little larger than the pad, with no hard boundary anywhere in it, is the
+ * cheapest honest stand-in for the bounce.
+ */
+export function boostSpill({ size = 256, core = 0.65 } = {}) {
+  const key = `boostspill_${size}_${core}`;
+  if (_textureCache.has(key)) return _textureCache.get(key);
+  const n = tiling(307, size, 8);
+  const c = paint(size, (x, y, o) => {
+    const u = (x + 0.5) / size * 2 - 1;
+    const v = (y + 0.5) / size * 2 - 1;
+    // A radial blob puts its peak in the middle of the pad, where the pad
+    // itself covers it, and leaves nothing at the flanks where the whole point
+    // of the effect is. So: a plateau over the pad's own footprint — `core` is
+    // where the pad's edge lands in this quad — falling to nothing by the
+    // border. Chebyshev rather than Euclidean distance, because a boost strip
+    // is a rectangle and its glow has to be one too.
+    const d = Math.max(Math.abs(u), Math.abs(v));
+    let g = Math.pow(1 - smoothstep((d - core) / (1 - core)), 1.7);
+    // Rounded corners, so the pool never shows a rectangle's vertex.
+    g *= 1 - smoothstep((Math.hypot(Math.max(0, Math.abs(u) - core), Math.max(0, Math.abs(v) - core)) - (1 - core) * 0.55) / ((1 - core) * 0.6));
+    // A perfectly smooth airbrush is the tell. Break it on the same scale the
+    // tarmac's binder mottles at, so the pool sits in the road's own texture.
+    g *= lerp(0.78, 1.0, fbm2D(n.n, x / n.k, y / n.k, 3));
+    o[0] = o[1] = o[2] = clamp01(g) * 255;
+  });
+  // The falloff is returned as an *alpha* map, not a colour map, and the tint
+  // comes from the material. That is not a stylistic choice: the scene runs
+  // exponential fog, and three fogs an additive pass by mixing its RGB towards
+  // the fog colour. With a colour falloff the quad's alpha is 1 everywhere, so
+  // a distant pad would add a full fog-coloured *rectangle* to the frame — the
+  // hard edge this effect exists to remove, reappearing at range and getting
+  // worse as fog density goes up. Alpha scales the fog contribution too, so the
+  // artifact cannot form. It also has to live in its own opaque texture rather
+  // than in the map's alpha channel, because canvases store premultiplied
+  // alpha (the same trap the lane markings hit).
+  const alphaMap = makeTexture(c, { srgb: false });
+  // The quad maps this once, so repeat wrapping would only ever let the
+  // opposite edge bleed in under bilinear filtering.
+  alphaMap.wrapS = alphaMap.wrapT = THREE.ClampToEdgeWrapping;
+  alphaMap.needsUpdate = true;
+  const result = { alphaMap };
+  _textureCache.set(key, result);
+  return result;
+}
+
+/**
+ * Checkered start/finish, as paint with a history rather than a chequerboard.
+ *
+ * The old version was two constants and a faint grime multiply, which is why it
+ * read as a texture laid on a quad instead of as the most abused three metres
+ * of paint on the circuit. Everything about a real start line is a consequence
+ * of what happens there: a full grid launches off it every race, so the film is
+ * scrubbed thin and rubbered black in the wheel tracks, it chips at the square
+ * joints first because that is where two paint passes meet, and the white has
+ * long since gone to bone rather than staying at 236.
+ *
+ * The square edges are softened by a texel or two on purpose. A hard step is
+ * free aliasing energy, and this surface is seen at exactly the grazing angle
+ * where the mip chain cannot hold one still.
+ */
 export function checker({ size = 512, squares = 8 } = {}) {
   const key = `checker_${size}_${squares}`;
   if (_textureCache.has(key)) return _textureCache.get(key);
-  const n = makeValueNoise2D(5, size / 8);
+  const grimeN = tiling(5, size, 8);
+  const chipN = tiling(63, size, 4);
+  const rubN = tiling(87, size, 16);
+  const gritN = tiling(109, size, 2);
+  const WHITE = paintTint(0xd9d5c8), DARK = paintTint(0x24242a);
+  const ROAD = paintTint(0x4a4a52);
+
+  const paintBuf = new Float32Array(size * size);
+  const rubBuf = new Float32Array(size * size);
+  const height = new Float32Array(size * size);
+  const alpha = new Float32Array(size * size);
+  const SOFT = 1.6 / size * squares;   // in square units
+
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = y * size + x;
+      const u = (x + 0.5) / size * squares, v = (y + 0.5) / size * squares;
+      // Distance to the nearest square joint, in square units. Paint lifts at
+      // those seams first — they are where one pass butted against the next.
+      const ju = Math.abs(mod(u, 1) - 0.5), jv = Math.abs(mod(v, 1) - 0.5);
+      const joint = Math.min(0.5 - ju, 0.5 - jv);
+      let p = smoothstep(joint / 0.09);
+      p *= 1 - clamp01((fbm2D(chipN.n, x / chipN.k, y / chipN.k, 3) - 0.66) * 4.5);
+      // Wheel tracks: a whole grid spins up from a standstill across this
+      // strip, which scrubs the film and lays rubber into what is left.
+      const rub = clamp01(fbm2D(rubN.n, x / rubN.k, y / (rubN.k * 3), 3) * 1.7 - 0.72);
+      p = clamp01(p * lerp(1.0, 0.62, rub));
+      paintBuf[i] = p;
+      rubBuf[i] = rub;
+      height[i] = p * 0.62 + fbm2D(gritN.n, x / gritN.k, y / gritN.k, 2) * 0.2 + 0.18;
+      // Coverage, so worn paint exposes the tarmac underneath rather than
+      // turning into a paler shade of paint.
+      alpha[i] = clamp01(lerp(0.30, 1.0, p) * lerp(0.88, 1.0, fbm2D(gritN.n, x / gritN.k + 7, y / gritN.k, 2)));
+    }
+  }
+
   const c = paint(size, (x, y, o) => {
-    const cx = Math.floor((x / size) * squares);
-    const cy = Math.floor((y / size) * squares);
+    const i = y * size + x;
+    const cx = Math.floor((x / size) * squares), cy = Math.floor((y / size) * squares);
+    // Antialias the square boundary itself, not just its wear.
+    const u = (x + 0.5) / size * squares, v = (y + 0.5) / size * squares;
+    const fu = smoothstep((0.5 - Math.abs(mod(u, 1) - 0.5)) / SOFT);
+    const fv = smoothstep((0.5 - Math.abs(mod(v, 1) - 0.5)) / SOFT);
     const on = (cx + cy) % 2 === 0;
-    const grime = lerp(0.82, 1.0, fbm2D(n, x / 9, y / 9, 3));
-    const v = (on ? 236 : 22) * grime;
-    o[0] = o[1] = o[2] = v;
+    const col = on ? WHITE : DARK;
+    const grime = lerp(0.74, 1.02, fbm2D(grimeN.n, x / grimeN.k, y / grimeN.k, 3));
+    const k = grime * lerp(0.82, 1.0, Math.min(fu, fv)) * lerp(1.0, 0.55, rubBuf[i]);
+    // Under the paint is road, not black: the RGB has to stay plausible where
+    // coverage is low, because a canvas hands the sampler premultiplied bytes.
+    o[0] = lerp(ROAD.r, col.r * k, paintBuf[i]) * 255;
+    o[1] = lerp(ROAD.g, col.g * k, paintBuf[i]) * 255;
+    o[2] = lerp(ROAD.b, col.b * k, paintBuf[i]) * 255;
   });
-  const result = { map: makeTexture(c, { srgb: true }), roughnessMap: null };
+
+  const roughC = paint(size, (x, y, o) => {
+    const i = y * size + x;
+    // Fresh film keeps a sheen, rubber is dead matt, bare road is between.
+    let rgh = lerp(0.88, 0.46, paintBuf[i]);
+    rgh = lerp(rgh, 0.97, rubBuf[i]);
+    o[0] = o[1] = o[2] = clamp01(rgh) * 255;
+  });
+
+  const result = {
+    map: makeTexture(c, { srgb: true }),
+    alphaMap: makeTexture(grayCanvas(size, alpha)),
+    normalMap: makeTexture(heightToNormal(height, size, 1.5)),
+    roughnessMap: makeTexture(roughC),
+    normalScale: 0.5,
+  };
   _textureCache.set(key, result);
   return result;
 }
@@ -778,4 +1047,4 @@ export function clearTextureCache() {
   _textureCache.clear();
 }
 
-export const SURFACE_TEXTURES = { asphalt, sand, dirt, grass, curb, checker, rainbow, paintedMetal, laneMarkings, waterNormal };
+export const SURFACE_TEXTURES = { asphalt, sand, dirt, grass, curb, checker, rainbow, paintedMetal, laneMarkings, waterNormal, boostPad, boostSpill };

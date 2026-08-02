@@ -18,6 +18,33 @@ const TERRAIN_COLS = 22;
 const TERRAIN_REACH = 260;    // how far the surrounding land extends
 const CURB_COLS = 6;          // enough columns to shape a crown and an outer lip
 
+// -- boost strips ------------------------------------------------------------
+// Metres of road per chevron. At 3 m a 12 m pad carries four arrows, which is
+// enough repetition to read as a direction and few enough to stay legible in
+// peripheral vision; the same figure sets the arrow's size on every track.
+const BOOST_PITCH = 3.0;
+// Metres over which the decal fades in at each end. The old pad ended in a
+// hard straight line drawn across the road, which is the single loudest tell
+// that a decal is a polygon.
+const BOOST_END_FADE = 1.5;
+// Chevrons per second of apparent forward flow. Slower than the road passes
+// underneath (ten pitches a second at racing speed) so the two motions read as
+// separate things rather than beating against each other.
+const BOOST_SCROLL = 1.15;
+// Emissive on the arms only. Tuned against the sky, not chosen: see the
+// measurements in _buildBoostPads.
+const BOOST_EMISSIVE = 0.70;
+// Rainbow Skyway's road runs at emissiveIntensity 1.35 and its bloom threshold
+// sits just above it, so the arms have to clear the road they are painted on to
+// register at all. Still under the road's own figure — the pad accents the
+// ribbon, it does not out-glow it.
+const BOOST_EMISSIVE_NEON = 1.25;
+// How far the glow pool reaches past the pad, as a fraction of the pad's own
+// half-extent. Proportional rather than absolute so the margin lands at the
+// same place in the spill texture on both axes — one texture, one plateau.
+const BOOST_SPILL_RATIO = 0.48;
+const BOOST_SPILL_TINT = 0x3d7899;
+
 /**
  * Cross-section of a rumble strip, `u` running from the tarmac edge outward.
  *
@@ -578,67 +605,175 @@ normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
     this._add(under, underMat, { receive: false }).name = 'roadUnderside';
   }
 
+  /**
+   * Boost strips, as decals painted on the road rather than slabs laid over it.
+   *
+   * Four things have to be true at once for a pad to work at 110 km/h, and the
+   * previous version had none of them: it has to say which way to drive (hence
+   * chevrons), it has to belong to the road surface (hence a feathered edge and
+   * a pool of spill light), it has to say "speed" rather than "warning" (hence
+   * a scroll along the direction of travel, not a brightness pulse), and it has
+   * to accent the frame rather than own it (hence emissive confined to the
+   * arrows and held below sky white).
+   *
+   * All pads on a track are merged into one buffer, and all their spill quads
+   * into a second: the pads are static, share a material, and are 80 triangles
+   * between them, so four meshes were four draw calls spent on nothing.
+   */
   _buildBoostPads() {
     if (!this.track.boostPads.length) return;
-    const mat = new THREE.MeshStandardMaterial({
-      color: 0x0a2a4a,
-      emissive: 0x33bbff,
-      emissiveIntensity: 2.4,
-      roughness: 0.3,
-      metalness: 0.2,
+    // Rainbow Skyway's road is emissive and is the brightest thing in its own
+    // world, so a pad tuned to read against dark tarmac vanishes into it: the
+    // weathered plate is part-transparent by design and lets a glowing road
+    // straight through, and arms at tarmac brightness lose to a surface that
+    // emits more than they do. Same decal, re-pitched for the surface it is
+    // painted on — which is the same reason the asphalt carries a per-theme
+    // tint a few methods up.
+    const isNeon = this.theme.roadSurface === 'rainbow';
+    const t = Tex.boostPad({
+      size: 512,
+      wear: isNeon ? 0.15 : 1,
+      plate: isNeon ? 0x081426 : 0x123c56,
+    });
+    // Chevrons are authored one per texture tile, and the tile is mapped to a
+    // fixed number of metres of road — so every pad gets the same size arrow
+    // regardless of its length, and the scroll is one shared texture offset
+    // rather than per-pad bookkeeping.
+    const mat = this._mat({
+      map: t.map,
+      emissiveMap: t.emissiveMap,
+      alphaMap: t.alphaMap,
+      normalMap: t.normalMap,
+      roughnessMap: t.roughnessMap,
+      normalScale: new THREE.Vector2(t.normalScale, t.normalScale),
+      emissive: 0xffffff,
+      // Set against the sky, not in the abstract. The old pad ran at 2.4 across
+      // its whole area and measured 1.2x the sky's luma — the single brightest
+      // thing in frame, ahead of the player's own kart. The arms now cover 40%
+      // of the pad, so this only has to light the arrows.
+      emissiveIntensity: isNeon ? BOOST_EMISSIVE_NEON : BOOST_EMISSIVE,
+      color: 0xffffff,
+      roughness: 1.0,
+      metalness: 0.0,
+      envMapIntensity: 0.5,
       transparent: true,
-      opacity: 0.95,
+      // Vertex alpha carries the fade at the two ends; see below.
+      vertexColors: true,
       depthWrite: false,
       polygonOffset: true,
       polygonOffsetFactor: -3,
       polygonOffsetUnits: -3,
     });
-    this.materials.push(mat);
     this.boostPadMaterial = mat;
+    this._boostMaps = [t.map, t.emissiveMap, t.alphaMap, t.normalMap, t.roughnessMap];
 
+    const ts = Tex.boostSpill({ size: 256, core: 1 / (1 + BOOST_SPILL_RATIO) });
+    const spillMat = new THREE.MeshBasicMaterial({
+      alphaMap: ts.alphaMap,
+      color: BOOST_SPILL_TINT,
+      transparent: true,
+      // Additive, because this is light landing on the tarmac and not paint on
+      // it: over dark asphalt it lifts and tints, and it can never draw an edge.
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      toneMapped: true,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    });
+    this.materials.push(spillMat);
+
+    const padParts = [], spillParts = [];
     for (const pad of this.track.boostPads) {
-      const steps = Math.max(6, Math.round(pad.length / 1.2));
-      const sList = [];
-      for (let i = 0; i <= steps; i++) sList.push(pad.s + (i / steps) * pad.length);
-      const half = this.track.halfWidthAt(pad.s);
-      const c = pad.lane * half;
-      const w = pad.halfWidth;
-
-      const n = sList.length, m = 3;
-      const positions = new Float32Array(n * m * 3);
-      const uvs = new Float32Array(n * m * 2);
-      const p = new THREE.Vector3();
-      for (let i = 0; i < n; i++) {
-        for (let j = 0; j < m; j++) {
-          const u = j / (m - 1);
-          this._point(sList[i], c + lerp(-w, w, u), p);
-          const k = (i * m + j) * 3;
-          positions[k] = p.x; positions[k + 1] = p.y + 0.02; positions[k + 2] = p.z;
-          const t = (i * m + j) * 2;
-          uvs[t] = u; uvs[t + 1] = i / (n - 1);
-        }
-      }
-      const idx = [];
-      for (let i = 0; i < n - 1; i++) {
-        for (let j = 0; j < m - 1; j++) {
-          const i0 = i * m + j, i1 = (i + 1) * m + j;
-          idx.push(i0, i1, i1 + 1, i0, i1 + 1, i0 + 1);
-        }
-      }
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-      geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-      geo.setIndex(idx);
-      geo.computeVertexNormals();
-      this._add(geo, mat, { receive: false, renderOrder: 2 }).name = 'boostPad';
+      padParts.push(this._boostPadStrip(pad));
+      spillParts.push(this._boostSpillStrip(pad));
     }
+    this._add(mergeStrips(padParts), mat, { receive: false, renderOrder: 3 }).name = 'boostPad';
+    this._add(mergeStrips(spillParts), spillMat, { receive: false, renderOrder: 2 }).name = 'boostPadSpill';
+  }
+
+  /** One pad's decal: positions, tiling chevron UVs, and an end-fade alpha. */
+  _boostPadStrip(pad) {
+    // 40 cm rings. The end fade is evaluated per vertex, so the rings have to
+    // be finer than the fade is long or the ramp comes out as a visible facet.
+    const steps = Math.max(8, Math.round(pad.length / 0.4));
+    const cols = 4;
+    const half = this.track.halfWidthAt(pad.s);
+    const c = pad.lane * half;
+    const w = pad.halfWidth;
+    const n = steps + 1, m = cols + 1;
+    const positions = new Float32Array(n * m * 3);
+    const uvs = new Float32Array(n * m * 2);
+    const colors = new Float32Array(n * m * 4);
+    const p = new THREE.Vector3();
+
+    for (let i = 0; i < n; i++) {
+      const along = (i / steps) * pad.length;
+      const s = pad.s + along;
+      // The leading edge was a hard straight line cutting across the road.
+      // Fading in over a metre and a half is what turns it into a decal that
+      // was sprayed on, and it costs nothing in gameplay — the trigger volume
+      // in Track.isOnBoostPad is untouched.
+      const fade = smoothstep(along / BOOST_END_FADE)
+        * smoothstep((pad.length - along) / BOOST_END_FADE);
+      for (let j = 0; j < m; j++) {
+        const u = j / cols;
+        this._point(s, c + lerp(-w, w, u), p);
+        const k = (i * m + j) * 3;
+        positions[k] = p.x; positions[k + 1] = p.y + 0.015; positions[k + 2] = p.z;
+        const tt = (i * m + j) * 2;
+        uvs[tt] = u; uvs[tt + 1] = along / BOOST_PITCH;
+        const kc = (i * m + j) * 4;
+        colors[kc] = colors[kc + 1] = colors[kc + 2] = 1;
+        colors[kc + 3] = fade;
+      }
+    }
+    return { positions, uvs, colors, n, m };
+  }
+
+  /** One pad's spill quad: a margin wider and longer, mapped 0..1 once. */
+  _boostSpillStrip(pad) {
+    const steps = Math.max(6, Math.round(pad.length / 1.0));
+    const cols = 6;
+    const half = this.track.halfWidthAt(pad.s);
+    const c = pad.lane * half;
+    const w = pad.halfWidth * (1 + BOOST_SPILL_RATIO);
+    const marginS = pad.length * 0.5 * BOOST_SPILL_RATIO;
+    const len = pad.length + marginS * 2;
+    const n = steps + 1, m = cols + 1;
+    const positions = new Float32Array(n * m * 3);
+    const uvs = new Float32Array(n * m * 2);
+    const p = new THREE.Vector3();
+
+    for (let i = 0; i < n; i++) {
+      const s = pad.s - marginS + (i / steps) * len;
+      for (let j = 0; j < m; j++) {
+        const u = j / cols;
+        // Clamped to the kerb line: a glow pool that spilled onto the rumble
+        // strip would read as the kerb being lit, not the road.
+        const lat = clamp(c + lerp(-w, w, u), -(half - 0.4), half - 0.4);
+        this._point(s, lat, p);
+        const k = (i * m + j) * 3;
+        positions[k] = p.x; positions[k + 1] = p.y + 0.010; positions[k + 2] = p.z;
+        const tt = (i * m + j) * 2;
+        uvs[tt] = u; uvs[tt + 1] = i / steps;
+      }
+    }
+    return { positions, uvs, colors: null, n, m };
   }
 
   _buildStartLine() {
     const t = Tex.checker({ size: 512, squares: 10 });
     t.map.repeat.set(1, 1);
     const mat = new THREE.MeshStandardMaterial({
-      map: t.map, roughness: 0.55, metalness: 0.0,
+      map: t.map,
+      alphaMap: t.alphaMap,
+      normalMap: t.normalMap,
+      roughnessMap: t.roughnessMap,
+      normalScale: new THREE.Vector2(t.normalScale, t.normalScale),
+      roughness: 1.0, metalness: 0.0,
+      transparent: true,
+      depthWrite: false,
       polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
       envMapIntensity: 0.5,
     });
@@ -649,21 +784,26 @@ normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
     const sList = [];
     for (let i = 0; i <= steps; i++) sList.push(s0 - depth * 0.5 + (i / steps) * depth);
 
-    const half = this.track.halfWidthAt(s0);
+    // The line stops at the tarmac, not at the barrier. It was spanning the
+    // full half-width, so on every track it ran out over the rumble strip and
+    // onto the run-off — paint laid across a kerb no circuit would ever paint.
+    const curbW = TRACK_LAYOUT.curbWidth;
     const cols = 12;
     const n = sList.length, m = cols + 1;
     const positions = new Float32Array(n * m * 3);
     const uvs = new Float32Array(n * m * 2);
     const p = new THREE.Vector3();
     for (let i = 0; i < n; i++) {
-      const hw = this.track.halfWidthAt(sList[i]);
+      const hw = this.track.halfWidthAt(sList[i]) - curbW;
       for (let j = 0; j < m; j++) {
         const u = j / cols;
         this._point(sList[i], lerp(-hw, hw, u), p);
         const k = (i * m + j) * 3;
         positions[k] = p.x; positions[k + 1] = p.y + 0.014; positions[k + 2] = p.z;
         const tt = (i * m + j) * 2;
-        uvs[tt] = u * (hw / 1.6); uvs[tt + 1] = i / (n - 1);
+        // Squares stay square in world space: one texture tile every 3.2 m on
+        // both axes, which is also exactly the depth of the strip.
+        uvs[tt] = u * (2 * hw / 3.2); uvs[tt + 1] = i / (n - 1);
       }
     }
     const idx = [];
@@ -841,8 +981,14 @@ normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
 
   update(dt, time) {
     for (const fn of this.animated) fn(dt, time);
-    if (this.boostPadMaterial) {
-      this.boostPadMaterial.emissiveIntensity = 2.0 + Math.sin(time * 7) * 0.9;
+    if (this._boostMaps) {
+      // Was a whole-pad brightness throb, which is the visual grammar of a
+      // hazard light: it says "look at me", not "go faster". Sliding the
+      // chevrons down the road instead says which way and how fast, and it is
+      // the same cue every real-world arrow board uses. Negative because the
+      // sampled V has to fall for the pattern to travel forward.
+      const off = -time * BOOST_SCROLL;
+      for (const m of this._boostMaps) m.offset.y = off;
     }
   }
 
@@ -853,6 +999,45 @@ normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
     // the water's two samplers are clones owned by this build.
     for (const t of this._waterTextures ?? []) t.dispose();
   }
+}
+
+/**
+ * Concatenate open grid strips into one indexed geometry.
+ *
+ * The parts share a material and never move, so drawing them separately spends
+ * a draw call per part on nothing. Unlike `_strip` these grids do *not* close
+ * on themselves, so the index walk stops one row short rather than wrapping.
+ */
+function mergeStrips(parts) {
+  let verts = 0, quads = 0;
+  for (const p of parts) { verts += p.n * p.m; quads += (p.n - 1) * (p.m - 1); }
+  const hasColor = parts[0].colors != null;
+  const positions = new Float32Array(verts * 3);
+  const uvs = new Float32Array(verts * 2);
+  const colors = hasColor ? new Float32Array(verts * 4) : null;
+  const indices = new Uint32Array(quads * 6);
+  let vo = 0, io = 0;
+  for (const p of parts) {
+    positions.set(p.positions, vo * 3);
+    uvs.set(p.uvs, vo * 2);
+    if (colors) colors.set(p.colors, vo * 4);
+    for (let i = 0; i < p.n - 1; i++) {
+      for (let j = 0; j < p.m - 1; j++) {
+        const i0 = vo + i * p.m + j, i1 = vo + (i + 1) * p.m + j;
+        indices[io++] = i0; indices[io++] = i1; indices[io++] = i1 + 1;
+        indices[io++] = i0; indices[io++] = i1 + 1; indices[io++] = i0 + 1;
+      }
+    }
+    vo += p.n * p.m;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+  if (colors) geo.setAttribute('color', new THREE.BufferAttribute(colors, 4));
+  geo.setIndex(new THREE.BufferAttribute(indices, 1));
+  geo.computeVertexNormals();
+  geo.computeBoundingSphere();
+  return geo;
 }
 
 /** Rewrite the U channel of a road strip as a 0..1 span across the road. */
