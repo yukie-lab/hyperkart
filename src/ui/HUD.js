@@ -199,6 +199,55 @@ const CSS = `
   box-shadow:0 calc(var(--u)*.4) calc(var(--u)*1) rgba(0,0,0,.6); }
 .hk-item.multi .hk-item-count { display:flex; }
 
+/* ---- STAR / INVINCIBILITY (under the item slot) --------------------------
+   A star changes how the kart behaves — it cannot be hit, it shoves everyone
+   it touches and it carries its own boost — and none of that was visible
+   anywhere in the HUD. The slot itself is the wrong home: the star is spent
+   the instant it is used, so the slot is legitimately empty (or already
+   holding the next item) while the effect runs. This is a separate status
+   chip, sized and centred to the slot above it so the two read as one column,
+   and it takes over the ITEM tag's line rather than stacking on top of it.
+
+   The chip *is* the timer: the fill retreats as the effect drains, which is
+   one transform per tick instead of a second bar element.
+
+   The whole centre stack is budgeted in --u so nothing in it can collide at
+   any resolution — slot 0-13.4, chip 13.9-17.1, lap banner 17.7-23.1, all
+   measured from the top gutter. Crossing the line while a star is running has
+   to look composed, not like two panels fighting for the same 40 pixels. */
+.hk-star { position:absolute; left:50%; top:calc(var(--st) + var(--u)*13.9); transform:translateX(-50%);
+  width:calc(var(--u)*13.4); height:calc(var(--u)*3.2);
+  display:none; align-items:center; justify-content:center; gap:calc(var(--u)*.55);
+  --chamfer:calc(var(--u)*1.0); overflow:hidden;
+  clip-path:polygon(var(--chamfer) 0,calc(100% - var(--chamfer)) 0,100% var(--chamfer),
+    100% calc(100% - var(--chamfer)),calc(100% - var(--chamfer)) 100%,var(--chamfer) 100%,
+    0 calc(100% - var(--chamfer)),0 var(--chamfer));
+  background:linear-gradient(180deg, rgba(30,20,2,.86), rgba(8,6,2,.90));
+  box-shadow:inset 0 0 0 calc(var(--u)*.16) rgba(255,225,120,.45);
+  filter:drop-shadow(0 0 calc(var(--u)*.3) rgba(0,0,0,.9))
+         drop-shadow(0 calc(var(--u)*.5) calc(var(--u)*1.3) rgba(0,0,0,.6)); }
+.hk-hud.star .hk-star { display:flex; }
+/* One line, one owner. */
+.hk-hud.star .hk-item.empty .hk-item-tag { opacity:0; }
+.hk-star-fill { position:absolute; left:0; top:0; bottom:0; width:100%; transform-origin:0 50%;
+  background:linear-gradient(90deg, rgba(255,120,220,.55), rgba(255,214,60,.60) 34%,
+    rgba(110,255,180,.55) 66%, rgba(120,205,255,.55));
+  will-change:transform; }
+/* The sheen is what says "invincible" rather than "a yellow progress bar". */
+.hk-star-fill::after { content:''; position:absolute; inset:0;
+  background:linear-gradient(105deg, rgba(255,255,255,0) 38%, rgba(255,255,255,.55) 50%, rgba(255,255,255,0) 62%);
+  animation:hkStarSheen 1.15s linear infinite; }
+@keyframes hkStarSheen { from { transform:translateX(-120%); } to { transform:translateX(120%); } }
+.hk-star-ico { position:relative; width:calc(var(--u)*2.2); height:calc(var(--u)*2.2); flex:0 0 auto; }
+.hk-star-ico svg { width:100%; height:100%; display:block;
+  filter:drop-shadow(0 0 calc(var(--u)*.28) rgba(0,0,0,.85)); }
+.hk-star-txt { position:relative; font-size:calc(var(--u)*1.5); font-weight:900; letter-spacing:.30em;
+  text-transform:uppercase; text-shadow:0 calc(var(--u)*.12) calc(var(--u)*.3) rgba(0,0,0,.95),
+    0 0 calc(var(--u)*.5) rgba(0,0,0,.9); }
+/* Last second and a half: the chip flashes so the drop-off is not a surprise. */
+.hk-star.ending { animation:hkStarEnd .34s steps(2,end) infinite; }
+@keyframes hkStarEnd { 0% { opacity:1; } 100% { opacity:.55; } }
+
 /* ---- MINIMAP (top-right) -------------------------------------------------
    Same chamfered-octagon frame as the item slot: two panels sharing one shape
    language is what makes a HUD look authored rather than assembled. */
@@ -221,9 +270,70 @@ const CSS = `
   backdrop-filter:blur(calc(var(--u)*.7)) saturate(1.1); overflow:hidden; }
 .hk-map canvas { width:100%; height:100%; display:block; }
 
-/* ---- SPLITS (under the map) ---------------------------------------------- */
-.hk-times { position:absolute; right:var(--sr); top:calc(var(--st) + var(--u)*23.2);
-  text-align:right; line-height:1.5; }
+/* ---- RIGHT RAIL: gaps, then splits ---------------------------------------
+   Both hang off the minimap and both are variable-height, so they share one
+   flow column rather than each carrying its own absolute top — otherwise the
+   splits have to reserve space for a gap strip that is sometimes three rows
+   and sometimes hidden. Width is locked to the map so the three panels share
+   one right edge and one left edge. */
+.hk-rail { position:absolute; right:var(--sr); top:calc(var(--st) + var(--u)*22.6);
+  width:calc(var(--u)*21.5); display:flex; flex-direction:column; gap:calc(var(--u)*1.1); }
+
+/* ---- GAP TO RIVALS -------------------------------------------------------
+   Place alone tells a player nothing about whether the kart ahead is one
+   second away or twenty, which is the difference between attacking and
+   settling. Distance is converted to seconds against the pair's mean speed:
+   metres are meaningless to a driver, seconds are the unit every decision is
+   actually made in. */
+.hk-gaps { display:none; flex-direction:column; }
+.hk-gaps.on { display:flex; }
+.hk-gap-row { display:flex; align-items:center; gap:calc(var(--u)*.55);
+  font-size:calc(var(--u)*1.85); font-weight:800; line-height:1.32; white-space:nowrap;
+  text-shadow:var(--halo); }
+.hk-gap-chev { flex:0 0 auto; font-size:calc(var(--u)*1.5); line-height:1; opacity:.95; }
+/* The chevron is a direction marker first. It only takes an alarm colour once
+   the gap is inside a second — a permanently red "behind" arrow cries wolf for
+   a rival twenty seconds back. */
+.hk-gap-row.ahead .hk-gap-chev { color:var(--ice); }
+.hk-gap-row.behind .hk-gap-chev { color:rgba(255,255,255,.55); }
+.hk-gap-row.ahead.close .hk-gap-chev { color:var(--gain); }
+.hk-gap-row.behind.close .hk-gap-chev { color:var(--loss); }
+/* The dot carries the rival's livery so it matches its own blip on the map
+   above. The inner light rim is not decoration: Onyx is #1a1a22, and a black
+   disc with only a black outline disappears entirely against the nebula. */
+.hk-gap-dot { flex:0 0 auto; width:calc(var(--u)*1.05); height:calc(var(--u)*1.05); border-radius:50%;
+  background:#8fa3bd;
+  box-shadow:inset 0 0 0 calc(var(--u)*.12) rgba(255,255,255,.45),
+             0 0 0 calc(var(--u)*.16) rgba(0,0,0,.8); }
+.hk-gap-name { flex:1 1 auto; overflow:hidden; text-overflow:clip; letter-spacing:.10em;
+  text-transform:uppercase; opacity:.88; }
+.hk-gap-t { flex:0 0 auto; font-weight:900; letter-spacing:-.02em; }
+.hk-gap-t i { font-style:normal; font-size:.72em; font-weight:800; opacity:.55; margin-left:.1em; }
+/* Under a second is a pass in progress, so the number changes colour rather
+   than the row: a tinted row at this size just looks like a selection. */
+.hk-gap-row.ahead.close .hk-gap-t { color:var(--gain); }
+.hk-gap-row.behind.close .hk-gap-t { color:var(--loss); }
+/* Nobody ahead / nobody behind is a state, not a blank line — same rule the
+   empty item slot follows. The furniture dims but the label does not, because
+   "LEADING" is the most valuable thing that row will ever say. */
+.hk-gap-row.none .hk-gap-chev, .hk-gap-row.none .hk-gap-t { opacity:.34; }
+.hk-gap-row.none .hk-gap-dot { background:transparent;
+  box-shadow:inset 0 0 0 calc(var(--u)*.16) rgba(255,255,255,.45); }
+.hk-gap-row.none .hk-gap-name { opacity:.7; letter-spacing:.16em; }
+.hk-gap-row.ahead.none .hk-gap-name { color:var(--gold); opacity:.95; }
+.hk-gap-row.none .hk-gap-t i { display:none; }
+/* The player's own line, drawn as a rule rather than a fourth readout: the
+   position numeral already owns that number, bottom-left. */
+.hk-gap-you { display:flex; align-items:center; gap:calc(var(--u)*.5); margin:calc(var(--u)*.28) 0; }
+.hk-gap-you::before, .hk-gap-you::after { content:''; height:calc(var(--u)*.22); flex:1 1 auto;
+  background:linear-gradient(90deg,rgba(255,212,92,0),var(--gold)); }
+.hk-gap-you::after { background:linear-gradient(90deg,var(--gold),rgba(255,212,92,0)); }
+.hk-gap-you span { font-size:calc(var(--u)*1.35); font-weight:900; letter-spacing:.26em;
+  text-transform:uppercase; color:var(--gold); text-shadow:var(--halo); }
+.hk-hud.final .hk-gap-you span { color:var(--hot); }
+
+/* ---- SPLITS (under the gaps) --------------------------------------------- */
+.hk-times { text-align:right; line-height:1.5; }
 .hk-times:empty { display:none; }
 .hk-times-row { font-size:calc(var(--u)*1.75); font-weight:800; letter-spacing:.02em;
   text-shadow:var(--halo); opacity:.9; white-space:nowrap; }
@@ -313,18 +423,34 @@ const CSS = `
   border-color:rgba(255,255,255,.7);
   box-shadow:0 0 calc(var(--u)*1.6) var(--lamp,#ff5030),0 0 calc(var(--u)*4) rgba(255,80,48,.45); }
 
-/* Banner: a skewed bar that sweeps across, used for laps and callouts. */
-.hk-band { position:absolute; left:0; right:0; top:26%; height:calc(var(--u)*11);
-  display:flex; align-items:center; justify-content:center; pointer-events:none; overflow:hidden; }
-.hk-band-bg { position:absolute; left:-4%; right:-4%; top:0; bottom:0; transform:skewY(-1.4deg);
-  background:linear-gradient(90deg, rgba(4,8,16,0) 0%, rgba(4,8,16,.72) 18%, rgba(4,8,16,.82) 50%,
-    rgba(4,8,16,.72) 82%, rgba(4,8,16,0) 100%); }
-.hk-band-bg::before, .hk-band-bg::after { content:''; position:absolute; left:8%; right:8%; height:calc(var(--u)*.3);
-  background:linear-gradient(90deg,transparent,var(--bc,#ffd45c) 22%,var(--bc,#ffd45c) 78%,transparent); }
-.hk-band-bg::before { top:0; } .hk-band-bg::after { bottom:0; }
+/* Banner: a slanted lozenge that wipes open, used for laps and callouts.
+   It used to span the full width at 26% height, which is exactly where the
+   horizon sits in a chase camera — so LAP 2 blacked out the approaching
+   corner, the grandstand and the rival pack for the whole announcement. Now it
+   is sized to its own text and parked in the clear sky band between the item
+   slot and the horizon, so it occludes ~1% of the frame instead of ~11%.
+   Position is measured in --u from the top gutter rather than in viewport
+   percent, which is what keeps it tucked under the item slot at every
+   resolution instead of drifting onto the skyline at 1440p. */
+.hk-band { position:absolute; left:50%; top:calc(var(--st) + var(--u)*17.7); transform:translateX(-50%);
+  height:calc(var(--u)*5.4); padding:0 calc(var(--u)*3.2);
+  display:flex; align-items:center; justify-content:center; pointer-events:none; overflow:hidden;
+  filter:drop-shadow(0 calc(var(--u)*.5) calc(var(--u)*1.4) rgba(0,0,0,.6)); }
+/* Slanted ends rather than a skewed rectangle: at letterbox width a 1.4deg
+   skew read as motion, but on a 300px lozenge it reads as a misaligned box.
+   The parallelogram carries the same speed cue at any width, and the clip
+   scales with the wipe because a transform scales the painted result. */
+.hk-band-bg { position:absolute; inset:0; --sk:calc(var(--u)*1.9);
+  clip-path:polygon(var(--sk) 0, 100% 0, calc(100% - var(--sk)) 100%, 0 100%);
+  background:linear-gradient(90deg, rgba(5,10,20,.90), rgba(12,20,38,.80) 50%, rgba(5,10,20,.90)); }
+.hk-band-bg::before, .hk-band-bg::after { content:''; position:absolute; height:calc(var(--u)*.3);
+  background:linear-gradient(90deg,transparent,var(--bc,#ffd45c) 18%,var(--bc,#ffd45c) 82%,transparent); }
+/* Each rule stops short of the slanted end it runs into, or it pokes out. */
+.hk-band-bg::before { top:0; left:calc(var(--sk) + var(--u)*.5); right:calc(var(--u)*.5); }
+.hk-band-bg::after { bottom:0; left:calc(var(--u)*.5); right:calc(var(--sk) + var(--u)*.5); }
 .hk-band-streak { position:absolute; top:0; bottom:0; width:26%; transform:skewX(-18deg);
-  background:linear-gradient(90deg,transparent,rgba(255,255,255,.20),transparent); }
-.hk-band-txt { position:relative; font-size:calc(var(--u)*5.6); font-weight:900; letter-spacing:.02em;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.22),transparent); }
+.hk-band-txt { position:relative; font-size:calc(var(--u)*4.0); font-weight:900; letter-spacing:.03em;
   white-space:nowrap; text-shadow:var(--halo); }
 
 /* Finish card. */
@@ -498,6 +624,25 @@ const gp = (deg, rad) => [
 const ORDINALS = ['', 'st', 'nd', 'rd'];
 const ordinal = (n) => (n % 100 >= 11 && n % 100 <= 13) ? 'th' : (ORDINALS[n % 10] || 'th');
 
+/**
+ * Distance between two karts expressed as the time one would take to cover it.
+ *
+ * Metres mean nothing to a driver — "eleven metres" is not a decision — but
+ * "0.4 seconds" is the unit every overtake is judged in. Converting against the
+ * pair's mean pace rather than the player's alone keeps the number honest when
+ * one of them is spun or boosting. The floor (12 m/s ≈ 43 km/h) is what stops a
+ * stopped kart reporting half a minute of gap to the rival alongside it.
+ */
+function rawGap(a, b) {
+  const d = Math.abs(a.raceDistance - b.raceDistance);
+  return d / Math.max(12, (Math.abs(a.speed) + Math.abs(b.speed)) * 0.5);
+}
+
+// A tenth of a second only changes a decision inside a few car lengths. Above
+// ten seconds it is noise — and dropping it there also stops a row that is
+// nowhere near rewriting itself five times a second for no reader.
+const fmtGap = (g) => (g >= 99 ? '99' : g >= 10 ? g.toFixed(0) : g.toFixed(1));
+
 const EASE_OUT = 'cubic-bezier(.16,1,.3,1)';
 const EASE_BACK = 'cubic-bezier(.2,1.7,.4,1)';
 
@@ -548,7 +693,23 @@ export class HUD {
       arc: q('[data-arc]'), arcGlow: q('[data-arcglow]'), needle: q('[data-needle]'),
       coins: q('[data-coins]'), center: q('[data-center]'),
       times: q('[data-times]'), map: q('[data-map]'),
+      star: q('[data-star]'), starFill: q('[data-starfill]'),
+      gaps: q('[data-gaps]'),
     };
+
+    // Gap rows are addressed by index (0 = ahead, 1 = behind) so the hot path
+    // never runs a selector.
+    this._gapRows = ['ahead', 'behind'].map((side) => {
+      const row = this.el.querySelector(`[data-row="${side}"]`);
+      return {
+        row,
+        dot: row.querySelector('.hk-gap-dot'),
+        name: row.querySelector('.hk-gap-name'),
+        val: row.querySelector('.hk-gap-t b'),
+        // Mirrors, so a tick that computes an unchanged string writes nothing.
+        smooth: 0, id: null, nameTxt: null, text: null, colour: null, close: null, none: null,
+      };
+    });
 
     // Every icon is built once and then only toggled. The roulette swaps the
     // visible item ~22 times a second; re-parsing SVG markup at that rate is
@@ -589,8 +750,13 @@ export class HUD {
     this._c = {
       pos: -1, ord: '', lap: -1, laps: -1, speed: -1, coins: -1,
       item: undefined, multi: null, rolling: null, empty: null, uses: 0,
-      times: -1, boost: null, arcOff: -1, needle: -999, final: false,
+      times: -1, boost: null, arcOff: -1, glowOff: -1, needle: -999, final: false,
+      star: null, starEnd: null, starFill: -1, gapsOn: null,
     };
+
+    this._starMax = 1;
+    this._starOut = null;   // in-flight chip fade, cancelled if a star returns
+    this._gapAccum = 0;
 
     this._onResize = () => { this._sizeMap(); };
     window.addEventListener('resize', this._onResize);
@@ -641,11 +807,29 @@ export class HUD {
         <div class="hk-item-tag">Item</div>
       </div>
 
+      <div class="hk-star" data-star>
+        <div class="hk-star-fill" data-starfill></div>
+        <div class="hk-star-ico">${itemArt('star', `${u}s`)}</div>
+        <div class="hk-star-txt">Star</div>
+      </div>
+
       <div class="hk-map">
         <div class="hk-map-frame"></div>
         <div class="hk-map-well"><canvas data-map width="256" height="256"></canvas></div>
       </div>
-      <div class="hk-times" data-times></div>
+
+      <div class="hk-rail">
+        <div class="hk-gaps" data-gaps>
+          ${['ahead', 'behind'].map((side) => `
+          <div class="hk-gap-row ${side} none" data-row="${side}">
+            <span class="hk-gap-chev">${side === 'ahead' ? '▲' : '▼'}</span>
+            <span class="hk-gap-dot"></span>
+            <span class="hk-gap-name">—</span>
+            <span class="hk-gap-t"><b>—</b><i>s</i></span>
+          </div>${side === 'ahead' ? '<div class="hk-gap-you"><span>You</span></div>' : ''}`).join('')}
+        </div>
+        <div class="hk-times" data-times></div>
+      </div>
 
       <div class="hk-coins">${COIN_ICON}<span class="hk-coins-val" data-coins>0</span></div>
 
@@ -795,6 +979,14 @@ export class HUD {
     if (off !== c.arcOff) {
       c.arcOff = off;
       this.dom.arc.style.strokeDashoffset = `${off}`;
+    }
+    // The glow path sits at opacity 0 unless the gauge is in its boost state,
+    // and it was being handed the same dash offset as the visible arc on every
+    // single frame — a third of the whole HUD's DOM traffic spent painting
+    // nothing. Its own mirror means it is caught up on the frame a boost
+    // starts and then left alone for the rest of the lap.
+    if (boosting && c.glowOff !== off) {
+      c.glowOff = off;
       this.dom.arcGlow.style.strokeDashoffset = `${off}`;
     }
 
@@ -841,6 +1033,47 @@ export class HUD {
     const multi = uses > 1;
     if (multi !== c.multi) { c.multi = multi; this.dom.item.classList.toggle('multi', multi); }
     if (multi && usesChanged) this.dom.itemCount.textContent = `×${uses}`;
+
+    // Star -------------------------------------------------------------------
+    // A star is spent the instant it is used, so the slot above is legitimately
+    // empty (or already holding the next item) while the player is invincible.
+    // Without this chip the only tell was the sparks on the kart itself, which
+    // the player cannot see behind their own bodywork on a busy frame.
+    const star = p.star > 0;
+    if (star !== c.star) {
+      c.star = star;
+      if (star) {
+        if (this._starOut) { this._starOut.cancel(); this._starOut = null; }
+        this.el.classList.add('star');
+        this._starMax = p.star;
+        this._enterStar();
+      } else {
+        this._exitStar();
+      }
+    }
+    if (star) {
+      // A second star collected mid-effect refills rather than shortening it.
+      if (p.star > this._starMax) this._starMax = p.star;
+      const t = Math.round(clamp01(p.star / this._starMax) * 100) / 100;
+      if (t !== c.starFill) { c.starFill = t; this.dom.starFill.style.transform = `scaleX(${t})`; }
+      const ending = p.star < 1.5;
+      if (ending !== c.starEnd) { c.starEnd = ending; this.dom.star.classList.toggle('ending', ending); }
+    }
+
+    // Gap to rivals ----------------------------------------------------------
+    // Gated on the start because every kart shares a race distance of zero on
+    // the grid, so a strip shown during the countdown reads "0.0" to everyone.
+    const gapsOn = !!race.raceStarted && !p.finished;
+    if (gapsOn !== c.gapsOn) { c.gapsOn = gapsOn; this.dom.gaps.classList.toggle('on', gapsOn); }
+    if (gapsOn) {
+      // Smoothed every frame because that is free arithmetic; written at 5 Hz
+      // because that is not. A raw per-frame delta swings by tenths as either
+      // kart corners, and a number that flickers is a number nobody reads.
+      this._gapAccum += dt;
+      const tick = this._gapAccum >= 0.2;
+      if (tick) this._gapAccum = 0;
+      this._updateGaps(dt, race, p, tick);
+    }
 
     // Coins ------------------------------------------------------------------
     if (p.coins !== c.coins) {
@@ -940,6 +1173,88 @@ export class HUD {
       { transform: 'translateX(-50%) scale(1)' },
     ], 360);
     this._ring(this.dom.item, ITEM_TINT[id] || '#8fe9ff');
+  }
+
+  /** The chip drops in from under the slot, so the eye is led to it. */
+  _enterStar() {
+    seq(this.dom.star, [
+      { opacity: 0, transform: 'translateX(-50%) translateY(-70%) scale(.72)', easing: EASE_OUT },
+      { opacity: 1, transform: 'translateX(-50%) translateY(0) scale(1.09)', offset: .52, easing: 'ease-in-out' },
+      { opacity: 1, transform: 'translateX(-50%) translateY(0) scale(1)' },
+    ], 460);
+  }
+
+  /**
+   * Fade out rather than blink out. The `star` class carries `display:flex`,
+   * so it has to survive until the animation lands — dropping it on the same
+   * frame the timer expires would pre-empt the whole exit with `display:none`.
+   */
+  _exitStar() {
+    const el = this.dom.star;
+    el.classList.remove('ending');
+    this._c.starEnd = null;
+    const a = seq(el, [
+      { opacity: 1, transform: 'translateX(-50%) scale(1)' },
+      { opacity: 0, transform: 'translateX(-50%) scale(.88)' },
+    ], 240, { easing: 'ease-in', fill: 'forwards' });
+    this._starOut = a;
+    a.finished.then(() => {
+      if (this._starOut !== a) return;   // a new star already re-entered
+      this._starOut = null;
+      this.el.classList.remove('star');
+      a.cancel();
+      this._c.starFill = -1;
+    }, () => {});
+  }
+
+  // -- gap to rivals ---------------------------------------------------------
+
+  /** Standings are 1-based and already sorted; fall back to a scan if absent. */
+  _rankedKart(race, rank) {
+    if (rank < 1) return null;
+    const st = race.standings;
+    if (st) return rank <= st.length ? st[rank - 1] : null;
+    for (const k of race.karts) if (k.rank === rank) return k;
+    return null;
+  }
+
+  _updateGaps(dt, race, p, tick) {
+    const a = 1 - Math.exp(-dt / 0.35);
+    for (let i = 0; i < 2; i++) {
+      const s = this._gapRows[i];
+      const rival = this._rankedKart(race, p.rank + (i ? 1 : -1));
+      const id = rival ? rival.index : -1;
+      // A new kart in the slot must not inherit the old one's smoothed value,
+      // and it must land immediately rather than on the next 5 Hz tick.
+      const fresh = id !== s.id;
+      if (fresh) { s.id = id; s.smooth = rival ? rawGap(p, rival) : 0; }
+      else if (rival) s.smooth += (rawGap(p, rival) - s.smooth) * a;
+      if (!tick && !fresh) continue;
+
+      const none = !rival;
+      if (none !== s.none) { s.none = none; s.row.classList.toggle('none', none); }
+      // An empty row that says why it is empty beats an em-dash: leading the
+      // race and running last are both information, not missing data.
+      const name = none ? (i ? 'Last' : 'Leading') : rival.stats.name;
+      if (name !== s.nameTxt) { s.nameTxt = name; s.name.textContent = name; }
+      if (none) {
+        if (s.text !== '—') { s.text = '—'; s.val.textContent = '—'; }
+        if (s.close) { s.close = false; s.row.classList.remove('close'); }
+        // The livery colour is an inline style, so it outranks the `.none`
+        // rule that hollows the dot out; it has to be handed back explicitly.
+        if (s.colour !== null) { s.colour = null; s.dot.style.background = ''; }
+        continue;
+      }
+      if (fresh) {
+        const col = `#${rival.stats.color.toString(16).padStart(6, '0')}`;
+        if (col !== s.colour) { s.colour = col; s.dot.style.background = col; }
+      }
+      const txt = fmtGap(s.smooth);
+      if (txt !== s.text) { s.text = txt; s.val.textContent = txt; }
+      // Hysteresis, or a rival hovering on the threshold strobes the colour.
+      const close = s.smooth < (s.close ? 1.25 : 1.0);
+      if (close !== s.close) { s.close = close; s.row.classList.toggle('close', close); }
+    }
   }
 
   _surgeSpeed() {
@@ -1062,15 +1377,21 @@ export class HUD {
     const streak = d.children[1];
     const txt = d.children[2];
     // Bar wipes open from the centre, text lands late, streak crosses, all out.
-    seq(bg, [{ transform: 'skewY(-1.4deg) scaleX(0)' }, { transform: 'skewY(-1.4deg) scaleX(1)' }],
-      260, { easing: EASE_OUT, fill: 'backwards' });
-    seq(txt, [{ opacity: 0, transform: 'translateX(-14%) skewX(-14deg)' },
+    // The timings are ~25% tighter than the letterbox version: a lozenge this
+    // small does not need a long read, and the whole event is over in 1.15s.
+    seq(bg, [{ transform: 'scaleX(0)' }, { transform: 'scaleX(1)' }],
+      240, { easing: EASE_OUT, fill: 'backwards' });
+    seq(txt, [{ opacity: 0, transform: 'translateX(-16%) skewX(-14deg)' },
       { opacity: 1, transform: 'translateX(0) skewX(0)' }],
-      300, { delay: 150, easing: EASE_OUT, fill: 'backwards' });
+      280, { delay: 130, easing: EASE_OUT, fill: 'backwards' });
     seq(streak, [{ transform: 'translateX(-180%) skewX(-18deg)' }, { transform: 'translateX(420%) skewX(-18deg)' }],
-      900, { delay: 200, easing: 'cubic-bezier(.4,0,.3,1)' });
-    const out = d.animate([{ opacity: 1 }, { opacity: 0, transform: 'translateY(-14%)' }],
-      { duration: 340, delay: 1250, easing: 'ease-in', fill: 'forwards' });
+      780, { delay: 170, easing: 'cubic-bezier(.4,0,.3,1)' });
+    // The exit keeps the element's own translateX(-50%) centring — a bare
+    // translateY here would snap the lozenge a half-width to the right.
+    const out = d.animate([
+      { opacity: 1, transform: 'translateX(-50%) translateY(0) scaleX(1)' },
+      { opacity: 0, transform: 'translateX(-50%) translateY(-40%) scaleX(.94)' },
+    ], { duration: 260, delay: 890, easing: 'ease-in', fill: 'forwards' });
     out.finished.then(() => d.remove(), () => d.remove());
   }
 
