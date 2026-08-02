@@ -398,8 +398,12 @@ export class Kart {
 
     this.yaw = wrapAngle(this.yaw + yawRate * dt);
 
-    // A touch of lateral slide gives the chassis weight in hard corners.
-    this.lateralVel += yawRate * this.speed * DRIVE.slipGain * dt;
+    // A touch of lateral slide gives the chassis weight in hard corners, which
+    // means throwing the body to the *outside* of the turn. Subtraction, not
+    // addition: `lateralVel` shares its frame with `lateral` and `g.right`, and
+    // that frame's positive direction is the kart's left, so a right-hand turn
+    // (negative yawRate) has to drive it positive to slide out of the corner.
+    this.lateralVel -= yawRate * this.speed * DRIVE.slipGain * dt;
 
     if (this.stun.time > 0 && this.stun.kind !== 'squash') {
       // Spinout rotates the body independently of the travel direction.

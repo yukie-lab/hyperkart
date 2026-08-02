@@ -67,6 +67,7 @@ export class Input {
   }
 
   update(dt) {
+    // Gathered in the player's terms: positive is a turn to the right.
     const kbSteer = (this.any(KEYMAP.right) ? 1 : 0) - (this.any(KEYMAP.left) ? 1 : 0);
     const kbAccel = this.any(KEYMAP.accel) ? 1 : 0;
     const kbBrake = this.any(KEYMAP.brake) ? 1 : 0;
@@ -74,7 +75,13 @@ export class Input {
     const gp = this._gamepad();
     const t = this.touch;
 
-    const rawSteer = clamp(kbSteer + (gp?.steer || 0) + (t.active ? t.steer : 0), -1, 1);
+    // ...and negated once here, because `ctrl.steer` is a *yaw command*, not a
+    // direction: the kart adds it to `yaw`, and the AI produces it as
+    // `desiredYaw - yaw`. The chassis faces its own +Z, so positive yaw swings
+    // the nose toward +X — screen-left, with the camera sitting behind it.
+    // Turning right is therefore negative yaw. This is the only place the two
+    // conventions meet; flipping it anywhere downstream would break the AI.
+    const rawSteer = -clamp(kbSteer + (gp?.steer || 0) + (t.active ? t.steer : 0), -1, 1);
     const rawAccel = clamp(Math.max(kbAccel, gp?.accel || 0, t.active ? t.accel : 0), 0, 1);
     const rawBrake = clamp(Math.max(kbBrake, gp?.brake || 0), 0, 1);
     const drift = this.any(KEYMAP.drift) || !!gp?.drift || (t.active && t.drift);
