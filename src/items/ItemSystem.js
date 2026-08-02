@@ -42,6 +42,9 @@ const ODDS = [
   [['star', 24], ['bulletBill', 22], ['thunder', 20], ['tripleMushroom', 18], ['tripleRed', 16]],
 ];
 
+/** How long a collected box keeps drawing while it blows apart. */
+const POP_TIME = 0.30;
+
 function oddsRow(rank, fieldSize) {
   const r = rank / Math.max(fieldSize, 2);
   if (rank === 1) return ODDS[0];
@@ -85,23 +88,33 @@ export class ItemSystem {
     }
     geo.computeVertexNormals();
 
+    // Alpha-blended glass rather than `transmission`. Real transmission makes
+    // three re-render the whole opaque scene into a refraction buffer, so a
+    // single box in frame roughly doubled the scene's triangle count — for a
+    // prop that reads as a flat white cube at race distance anyway. Low opacity
+    // plus a hot core inside sells "container with something in it" far better,
+    // and costs one ordinary transparent draw.
     this.boxMaterial = new THREE.MeshPhysicalMaterial({
-      color: 0xffffff,
-      transmission: 0.75,
-      thickness: 0.9,
-      roughness: 0.12,
+      color: 0xbfe6ff,
+      roughness: 0.06,
       metalness: 0.0,
-      ior: 1.35,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.04,
       iridescence: 1.0,
-      iridescenceIOR: 1.6,
+      iridescenceIOR: 1.7,
       iridescenceThicknessRange: [120, 520],
       transparent: true,
-      opacity: 0.92,
-      envMapIntensity: 1.6,
+      opacity: 0.34,
+      emissive: 0x1b3d5c,
+      emissiveIntensity: 0.5,
+      envMapIntensity: 2.2,
+      depthWrite: false,
       side: THREE.DoubleSide,
     });
+    // The core carries the read: unlit, un-tonemapped and bright enough to
+    // bloom a little, so a box is a point of light on the road from far away.
     this.boxCoreMaterial = new THREE.MeshBasicMaterial({
-      color: 0xffdd55, toneMapped: false, transparent: true, opacity: 0.9,
+      color: 0xffd23c, toneMapped: false, transparent: true, opacity: 0.95,
     });
     const coreGeo = new THREE.OctahedronGeometry(0.34, 0);
 
@@ -117,11 +130,20 @@ export class ItemSystem {
       holder.add(core);
       this.group.add(holder);
       this.boxes.push({
-        s: def.s, lateral: def.lateral, pos, mesh: holder, core,
-        active: true, respawn: 0, phase: this.rng() * TAU,
+        s: def.s, lateral: def.lateral, pos, mesh: holder, core, shell,
+        active: true, respawn: 0, phase: this.rng() * TAU, pop: 0,
       });
     }
   }
+
+  /**
+   * The effects layer, if it exists yet.
+   *
+   * Items are built before the FX pools are, so this is resolved lazily rather
+   * than injected. Going through the scene keeps the item code free of a
+   * constructor argument that would only ever have one possible value.
+   */
+  get fx() { return this.scene.userData.kartFX || null; }
 
   _buildPools() {
     // Shared geometry for projectiles/hazards, instantiated on demand.
@@ -311,29 +333,68 @@ export class ItemSystem {
   }
 
   _updateBoxes(dt, ctx, karts) {
+    const eye = karts.find((k) => k.isPlayer)?.pos ?? karts[0]?.pos ?? null;
     for (const b of this.boxes) {
+      b.phase += dt;
+
       if (!b.active) {
         b.respawn -= dt;
+        // Collection pop: the box keeps drawing for a beat while it blows
+        // outward, so a pickup is an event rather than a box that vanished.
+        if (b.pop > 0) {
+          b.pop = Math.max(0, b.pop - dt);
+          const k = 1 - b.pop / POP_TIME;
+          b.mesh.rotation.y += dt * 9;
+          b.mesh.scale.setScalar(lerp(1, 1.9, smoothstep(clamp01(k))) * (1 - k * k));
+          b.core.scale.setScalar(Math.max(0.001, 1 - k * 1.6));
+          if (b.pop <= 0) b.mesh.visible = false;
+        }
         if (b.respawn <= 0) {
           b.active = true;
           b.mesh.visible = true;
+          b.core.scale.setScalar(1);
         }
-        // Fade back in over the last moment of the respawn.
         continue;
       }
-      b.phase += dt;
+
+      // Respawn: snap back in with a short elastic overshoot rather than
+      // materialising at full size on a single frame.
+      const inT = clamp01((ctx.time - (b.bornAt ?? -99)) / 0.38);
+
       b.mesh.rotation.y = b.phase * 1.4;
       b.mesh.rotation.x = Math.sin(b.phase * 0.8) * 0.22;
       b.core.rotation.y = -b.phase * 3.0;
       b.core.rotation.z = b.phase * 1.7;
       b.mesh.position.y = b.pos.y + Math.sin(b.phase * 2.1) * 0.10;
+      // A slow breathe on the shell and a faster counter-beat on the core:
+      // two rates make it read as a container with something alive inside.
+      const breathe = 1 + Math.sin(b.phase * 2.1) * 0.045;
+      const pop = inT < 1 ? lerp(0.2, 1, smoothstep(inT)) * (1 + Math.sin(inT * Math.PI) * 0.22) : 1;
+      b.mesh.scale.setScalar(breathe * pop);
+      b.core.scale.setScalar((1 + Math.sin(b.phase * 5.3) * 0.14) * pop);
+
+      // A sparkle every third of a second, but only for boxes the player can
+      // actually see. A circuit carries dozens of boxes, and emitting for all
+      // of them fills the whole particle pool with confetti nobody is looking
+      // at — and starves the kart of its own sparks.
+      if (eye && b.mesh.position.distanceToSquared(eye) < 3600) {
+        b.spark = (b.spark || this.rng() * 0.5) + dt;
+        if (b.spark > 0.34) {
+          b.spark = 0;
+          this.fx?.trail(b.mesh.position, 0xffe27a, { size: 0.26, alpha: 0.30, life: 0.42, glow: 0.5 });
+        }
+      }
 
       for (const k of karts) {
         if (k.item || k.itemRoulette) continue;
         if (k.pos.distanceToSquared(b.mesh.position) < 3.2 * 3.2) {
           b.active = false;
           b.respawn = 3.0;
-          b.mesh.visible = false;
+          b.pop = POP_TIME;
+          b.bornAt = ctx.time + 3.0;
+          this.fx?.burst(b.mesh.position, 0xffdd55, {
+            count: 26, speed: 9, size: 0.55, life: 0.5, alpha: 0.85, ring: 1.4,
+          });
           this.startRoulette(k, karts.length);
           break;
         }
@@ -363,6 +424,9 @@ export class ItemSystem {
           p.lateralVel = -(p.lateralVel || 0);
           p.bounces--;
           this.events.push({ type: 'shellBounce', pos: p.mesh.position.clone() });
+          this.fx?.burst(p.mesh.position, 0x9bffc0, {
+            count: 12, speed: 8, size: 0.38, life: 0.3, alpha: 0.8, ring: 0.8, gravity: 9,
+          });
           if (p.bounces < 0) { this._removeProjectile(i); continue; }
         }
         p.lateral += (p.lateralVel || 0) * dt;
@@ -374,7 +438,24 @@ export class ItemSystem {
       p.mesh.rotation.y = p.spin;
       p.mesh.rotation.x = p.spin * 0.6;
 
-      if (p.life <= 0) { this._removeProjectile(i); continue; }
+      // Wake. A shell moving at 38 m/s with nothing behind it reads as a
+      // sliding prop; the trail is what makes it read as thrown.
+      p.wake = (p.wake || 0) + dt;
+      const step = p.type === 'redShell' ? 0.028 : 0.040;
+      while (p.wake > step) {
+        p.wake -= step;
+        this.fx?.trail(p.mesh.position, p.type === 'redShell' ? 0xff5a3c : 0x4bff6a, {
+          size: 0.30, alpha: p.type === 'redShell' ? 0.26 : 0.20, life: 0.26, glow: 0.62,
+        });
+      }
+
+      if (p.life <= 0) {
+        this.fx?.burst(p.mesh.position, p.type === 'redShell' ? 0xff5a3c : 0x4bff6a, {
+          count: 14, speed: 6, size: 0.42, life: 0.35, alpha: 0.7, ring: 0.9,
+        });
+        this._removeProjectile(i);
+        continue;
+      }
 
       // Hits
       let hit = false;
@@ -403,7 +484,12 @@ export class ItemSystem {
       const h = this.hazards[i];
       h.life -= dt;
       h.armed = Math.max(0, h.armed - dt);
+      // Bananas settle with a small bob so a dropped one is easy to spot
+      // against a busy road, and telegraph themselves before they expire.
       h.mesh.rotation.y += dt * 0.6;
+      h.mesh.position.y = (h.baseY ?? (h.baseY = h.mesh.position.y))
+        + Math.sin(h.life * 3.4) * 0.05;
+      if (h.life < 1.2) h.mesh.scale.setScalar(1 + Math.sin(h.life * 26) * 0.10 * (1.2 - h.life));
       if (h.life <= 0) {
         this.group.remove(h.mesh);
         this.hazards.splice(i, 1);
@@ -415,6 +501,9 @@ export class ItemSystem {
         if (k.pos.distanceToSquared(h.mesh.position) > 2.0 * 2.0) continue;
         if (k.spinout(1.0, 'banana')) {
           this.events.push({ type: 'hit', kart: k, by: 'banana', pos: k.pos.clone() });
+          this.fx?.burst(h.mesh.position, 0xf5d02a, {
+            count: 20, speed: 7, size: 0.5, life: 0.5, alpha: 0.8, ring: 1.1, gravity: 12,
+          });
           this.group.remove(h.mesh);
           this.hazards.splice(i, 1);
           break;
