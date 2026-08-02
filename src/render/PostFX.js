@@ -24,7 +24,7 @@ const CinematicShader = {
     uTime: { value: 0 },
     uSpeed: { value: 0 },          // 0..1, drives radial blur + aberration
     uCenter: { value: new THREE.Vector2(0.5, 0.5) },
-    uAberration: { value: 0.0016 },
+    uAberration: { value: 0.0009 },
     uVignette: { value: 0.42 },
     uGrain: { value: 0.028 },
     uSaturation: { value: 1.10 },
@@ -65,8 +65,11 @@ const CinematicShader = {
       // Radial motion blur: strength ramps from the centre outward so the
       // focal point stays readable while the periphery smears.
       float amt = uSpeed * smoothstep(0.10, 0.72, dist) * 0.085;
-      // Chromatic aberration scales with the same radial term.
-      float ca = (uAberration + uSpeed * 0.0035) * smoothstep(0.05, 0.9, dist);
+      // Chromatic aberration scales with the same radial term. Kept low: at the
+      // previous strength a high-contrast edge near the frame border — a
+      // barrier, a kerb — split into visibly separate red and cyan bands, which
+      // reads as a broken image rather than as a lens.
+      float ca = (uAberration + uSpeed * 0.0022) * smoothstep(0.05, 0.9, dist);
 
       vec3 acc = vec3(0.0);
       float wsum = 0.0;
@@ -93,16 +96,26 @@ const CinematicShader = {
       // Boost rush: a cool rim brightening that reads as speed, not as a
       // flat white flash over the whole frame.
       col += uBoostFlash * smoothstep(0.18, 0.85, dist) * vec3(0.28, 0.55, 1.0);
-      col += uHitFlash * vec3(1.0, 0.55, 0.35);
+      // The hit flash gets the same treatment the boost flash already had. Added
+      // flat across every pixel it washed out the middle of the screen — which
+      // is exactly where the player has to keep reading the road at the moment
+      // they have just been hit and most need to recover.
+      col += uHitFlash * smoothstep(0.06, 0.72, dist) * vec3(1.0, 0.55, 0.35);
 
       // --- Vignette ----------------------------------------------------
       float vig = smoothstep(0.92, 0.26, dist);
       col *= mix(1.0, vig, uVignette);
 
       // --- Grain -------------------------------------------------------
-      // Weighted toward the shadows, like real film.
+      // Weighted toward the shadows, like real film — but capped as a
+      // *fraction* of local luminance, not as an absolute amount. Unbounded,
+      // a fixed +-0.014 is a few percent on a mid-tone and a 28% modulation on
+      // a surface sitting at 0.05, so the darkest thing in frame visibly boils
+      // while everything else looks fine. The floor term keeps a trace of
+      // grain in true black rather than a hard edge where it switches off.
       float g = hash(gl_FragCoord.xy + fract(uTime) * 137.0) - 0.5;
-      col += g * uGrain * (1.0 - smoothstep(0.0, 0.7, luma));
+      float grainAmp = min(uGrain * (1.0 - smoothstep(0.0, 0.7, luma)), luma * 0.10 + 0.0015);
+      col += g * grainAmp;
 
       gl_FragColor = vec4(col, 1.0);
     }`,
@@ -206,13 +219,18 @@ export class PostFX {
         this.bloom.radius = 0.52;
         break;
       case 'rainbow':
-        this.u.uSaturation.value = 1.24;
-        this.u.uContrast.value = 1.05;
+        // Was strength 0.42 / threshold 0.80 — roughly three times the other
+        // tracks — which bleached the road's own emissive into a white haze
+        // that erased the left quarter of the frame including the player kart.
+        // On the one track where the road is the brightest thing in the world,
+        // the bloom threshold has to sit *above* it, not below.
+        this.u.uSaturation.value = 1.18;
+        this.u.uContrast.value = 1.08;
         this.u.uGain.value.setRGB(1.00, 1.00, 1.06);
         this.u.uLift.value.setRGB(0.004, 0.004, 0.018);
-        this.bloom.strength = 0.42;
-        this.bloom.threshold = 0.80;
-        this.bloom.radius = 0.75;
+        this.bloom.strength = 0.26;
+        this.bloom.threshold = 1.02;
+        this.bloom.radius = 0.70;
         break;
     }
   }

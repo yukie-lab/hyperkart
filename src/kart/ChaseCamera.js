@@ -56,6 +56,16 @@ export class ChaseCamera {
 
   snapTo(kart) {
     this.yaw = kart.yaw;
+    // Snap the rig parameters to the *current* mode, not just its position.
+    // They were seeded from `chase` in the constructor and only ever damped
+    // toward the selected mode at rate 4.5, so a snap into `bumper` — whose
+    // distance is 0.4 m — still sat 4-5 m back after settling. The screenshot
+    // harness snaps and captures within a few frames, which is why nobody had
+    // ever actually seen the bumper camera.
+    const cfg = MODES[this.mode] || MODES.chase;
+    this.dist = cfg.dist;
+    this.height = cfg.height;
+    this.fov = cfg.fov;
     this._initialised = false;
     this.update(0.016, kart, { intro: false });
     this._initialised = true;

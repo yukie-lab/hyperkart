@@ -6,12 +6,18 @@ import { skyPresetFor, linColor } from './SkyPresets.js';
  *
  * Rather than cascaded shadow maps over the whole circuit, this uses a single
  * high-resolution shadow map tightly fitted to a box that follows the player.
- * A kart camera never strays far from the action, so ~3 cm shadow texels over
- * a 130 m box beats three coarse cascades stretched across 600 m — sharper
- * contact shadows, one shadow pass, and no per-material patching.
+ * A kart camera never strays far from the action, so fine texels over a small
+ * box beat three coarse cascades stretched across 600 m — sharper contact
+ * shadows, one shadow pass, and no per-material patching.
+ *
+ * At SHADOW_EXTENT 62 the box is 124 m across, which on the 2048 map used at
+ * `high` is 6.1 cm per texel. (This comment previously claimed 3 cm over a
+ * 130 m box while the extent was 78 — a 156 m box at 7.6 cm. Do the arithmetic
+ * again if you change either number; the figure is load-bearing for judging
+ * whether contact shadows can read at all.)
  */
 
-const SHADOW_EXTENT = 78;      // half-size of the fitted shadow box, metres
+const SHADOW_EXTENT = 62;      // half-size of the fitted shadow box, metres
 const SHADOW_FORWARD = 34;     // bias the box ahead of the player
 
 export class Lighting {
@@ -27,7 +33,13 @@ export class Lighting {
     this.sun.shadow.camera.near = 1;
     this.sun.shadow.camera.far = 460;
     this.sun.shadow.bias = -0.0006;
-    this.sun.shadow.normalBias = 0.028;
+    // Halved. `normalBias` pushes the shadow lookup along the surface normal,
+    // and under a 16-degree sun that push translates into a large *lateral*
+    // shift of where the shadow lands — enough to leave a strip of lit road
+    // between a front wheel and its own shadow. It was set high to fight acne
+    // on a road that was almost black; with the ambient starvation fixed the
+    // road no longer needs it.
+    this.sun.shadow.normalBias = 0.014;
     // No `radius`/`blurSamples` here: both are ignored by PCFShadowMap, which
     // is what the renderer uses (see Renderer.js for why VSM was rejected).
     // Leaving them set would read as soft shadows being configured when they
