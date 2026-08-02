@@ -95,7 +95,7 @@ const CinematicShader = {
 
       // Boost rush: a cool rim brightening that reads as speed, not as a
       // flat white flash over the whole frame.
-      col += uBoostFlash * smoothstep(0.18, 0.85, dist) * vec3(0.28, 0.55, 1.0);
+      col += uBoostFlash * smoothstep(0.15, 0.82, dist) * vec3(0.28, 0.55, 1.0);
       // The hit flash gets the same treatment the boost flash already had. Added
       // flat across every pixel it washed out the middle of the screen — which
       // is exactly where the player has to keep reading the road at the moment
@@ -192,6 +192,9 @@ export class PostFX {
     this.u = this.cinematic.uniforms;
     this._speed = 0;
     this._boost = 0;
+    this._boostBase = 0;
+    this._boostKick = 0;
+    this._wasBoosting = false;
     this._cx = 0.5;
     this._cy = 0.5;
     this._hit = 0;
@@ -261,7 +264,28 @@ export class PostFX {
       this.u.uCenter.value.set(this._cx, this._cy);
     }
 
-    this._boost = damp(this._boost, state.boosting ? 0.10 : 0, state.boosting ? 12 : 4, dt);
+    // A boost has two phases and this only ever had one. The sustained level
+    // says "you are going fast"; the transient at the moment it engages says
+    // "you just got faster", and that punch is the entire reward. Measured on a
+    // 108-to-143 km/h boost, the old flat 0.10 contributed +22/255 at the frame
+    // corner and exactly zero in the centre 200 px — for the biggest payoff in
+    // the game. The kick decays in about half a second, like the FOV kick it
+    // is paired with.
+    if (state.boosting && !this._wasBoosting) this._boostKick = 1;
+    this._wasBoosting = !!state.boosting;
+    this._boostKick = damp(this._boostKick, 0, 4.5, dt);
+    // Weighted hard toward the transient. The drift fix made mini-turbos
+    // frequent, so `boosting` is now a common state rather than an occasional
+    // one — and a strong sustained tint on a common state stops reading as a
+    // reward and starts reading as a filter over the whole game. Measured:
+    // holding the sustained level at 0.13 took canyonRush frames from luma
+    // 0.50 to 0.64 and dropped saturation from 0.30 to 0.18.
+    // The sustained level and the transient are kept in separate accumulators.
+    // Folding the kick into `_boost` and then damping `_boost` toward the
+    // target next frame feeds the kick back into itself: traced across one
+    // onset that compounded a 0.335 ceiling into a measured peak of 0.764.
+    this._boostBase = damp(this._boostBase, state.boosting ? 0.075 : 0, state.boosting ? 14 : 5, dt);
+    this._boost = this._boostBase + this._boostKick * 0.26;
     // Both flashes are added straight onto every pixel, so they are clamped to
     // their authored ceiling rather than trusted to decay — an out-of-range
     // value here whites out the whole frame.
