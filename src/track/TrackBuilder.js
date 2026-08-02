@@ -441,7 +441,13 @@ export class TrackMesh {
       });
       this._asphaltWear(mat, t);
     }
-    this.road = this._add(geo, mat, { receive: true });
+    // A road that emits its own light does not take a shadow. Rainbow Skyway
+    // runs at emissiveIntensity 1.35 and is the brightest thing in its own
+    // frame, but it was still receiving the karts' shadow multiply — so the
+    // twelve brightest metres of the circuit carried grey smudges that read as
+    // dirt on a light source. Asphalt keeps its shadows; the light strip does
+    // not.
+    this.road = this._add(geo, mat, { receive: !isRainbow });
     this.road.name = 'road';
   }
 
