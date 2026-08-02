@@ -17,6 +17,14 @@ const TERRAIN_STEP = 6.4;     // terrain rings are coarser than road rings
 const TERRAIN_COLS = 22;
 const TERRAIN_REACH = 260;    // how far the surrounding land extends
 const CURB_COLS = 6;          // enough columns to shape a crown and an outer lip
+// Metres of kerb per texture tile, and stripes per tile. The product is the
+// stripe length, which stays at the 1 m every circuit uses; splitting it this
+// way is what makes the tile's texel density nearly square in world space.
+// See the note on `Tex.curb` — an 8 m tile put the sampling footprint's long
+// axis across the kerb, where there is nothing to resolve, and that is what
+// made the stripes crawl.
+const CURB_TILE = 2;
+const CURB_STRIPES = 2;
 
 // -- boost strips ------------------------------------------------------------
 // Metres of road per chevron. At 3 m a 12 m pad carries four arrows, which is
@@ -42,8 +50,35 @@ const BOOST_EMISSIVE_NEON = 1.25;
 // How far the glow pool reaches past the pad, as a fraction of the pad's own
 // half-extent. Proportional rather than absolute so the margin lands at the
 // same place in the spill texture on both axes — one texture, one plateau.
-const BOOST_SPILL_RATIO = 0.48;
-const BOOST_SPILL_TINT = 0x3d7899;
+// Was 0.48, which put the falloff 2.9 m out from a 12 m pad: far enough that
+// the pool stopped reading as light lying on the road and started reading as a
+// patch of blue haze hanging over it.
+const BOOST_SPILL_RATIO = 0.28;
+// Was 0x3d7899, which decodes to 0.32 linear blue and was being added to a road
+// sitting at 0.05-0.15 — two to six times the surface's own value, on a pool
+// three metres wider than the pad. A/B against a capture with the pool hidden:
+// the pad without it read as paint on tarmac, the pad with it read as a patch
+// of haze, and the chevrons lost contrast to their own glow. A third of that,
+// over a tighter footprint, lifts the tarmac without competing with the arms.
+const BOOST_SPILL_TINT = 0x1b3c52;
+// Plate colour, and how much of it covers the road. Tarmac sits near 0.075
+// linear albedo and the old plate at 0x123c56 decodes to 0.006/0.045/0.093 —
+// darker than the road in red and green and level with it in blue, so on every
+// tarmac circuit the bed was invisible and the pad read as stripes with nothing
+// under them. This one is lighter than the tarmac and unmistakably blue.
+const BOOST_PLATE = 0x2a5c78;
+const BOOST_PLATE_ALPHA = 0.86;
+// Rainbow Skyway's bed cannot be dark: the road under it emits, so an opaque
+// dark plate is a hole cut in the ribbon, which reads as a hazard and not as a
+// boost. A light-handed indigo tint that the road still glows through gives the
+// arms something to sit on without taking the ribbon away.
+const BOOST_PLATE_NEON = 0x1d2a63;
+const BOOST_PLATE_ALPHA_NEON = 0.56;
+
+// Checker squares per 3.2 m of start line, which is also its depth — so this is
+// both the square size in metres (3.2 / n) and the number of rows.
+const START_SQUARES = 4;
+const START_DEPTH = 3.2;
 
 /**
  * Cross-section of a rumble strip, `u` running from the tarmac edge outward.
@@ -362,7 +397,11 @@ normal = normalize( tbn * vec3( rN * normalScale, 1.0 ) );`);
     if (this.theme.shoulder === 'none' && this.track.isVoid) return;
     const rings = this._roadRings();
     const curbW = TRACK_LAYOUT.curbWidth;
-    const t = Tex.curb({ size: 512, dirtTint: this.theme.groundColor ?? 0x8a7a5c });
+    const t = Tex.curb({
+      size: 512,
+      dirtTint: this.theme.groundColor ?? 0x8a7a5c,
+      stripes: CURB_STRIPES,
+    });
     const mat = this._mat({
       map: t.map,
       normalMap: t.normalMap,
@@ -372,6 +411,7 @@ normal = normalize( tbn * vec3( rN * normalScale, 1.0 ) );`);
       roughness: 1.0,
       envMapIntensity: 0.5,
     });
+    this._curbWear(mat, t);
 
     for (const side of [-1, 1]) {
       const geo = this._strip(
@@ -379,12 +419,84 @@ normal = normalize( tbn * vec3( rN * normalScale, 1.0 ) );`);
         (s, half) => side * (half - curbW),
         (s, half) => side * half,
         CURB_COLS,
-        // 8 stripes per texture tile, tiled every 8 m => 1 m stripes.
-        (u, s) => [u, s / 8],
+        (u, s) => [u, s / CURB_TILE],
         (s, lat, u) => curbY(u),
+        // Metres round the lap, and how far across the strip — everything that
+        // has to differ between one kerb and the next needs both.
+        { name: 'aCurb', size: 2, fn: (u, s) => [s, u] },
       );
       this._add(geo, mat).name = `curb_${side}`;
     }
+  }
+
+  /**
+   * The part of a kerb's history that cannot live in a two-metre tile.
+   *
+   * Shrinking the tile to fix the crawl cost the texture its per-stripe
+   * variety: with one red and one white to a tile, every red was the same red.
+   * That variety was never really the tile's job — an eight metre tile repeated
+   * too, just more slowly — so it moves here, alongside the two things that
+   * were always wrong in tile space. Paint ages by the *length* of kerb, not by
+   * the stripe: a run in the sun bleaches and a shaded one does not. And rubber
+   * lands where the field actually rides the inside of a corner, which is a
+   * property of the circuit, not of the texture.
+   *
+   * It also carries the other half of the crawl fix. Past sixty metres or so a
+   * 1 m stripe is worth a pixel on a kerb that is itself a pixel tall, and no
+   * filter makes a pattern at that scale hold still — every pixel simply flips
+   * between red and white as the circuit slides under it. Measured on the far
+   * kerb at canyonRush: 89/255 peak swing over one scroll period. So the
+   * stripes are faded to the colour they average to, which is what a perfect
+   * filter would have produced anyway, and they get there before they are small
+   * enough to strobe. Same reasoning, and nearly the same distances, as the
+   * two-scale fades already on the road and the terrain.
+   */
+  _curbWear(mat, tex) {
+    mat.customProgramCacheKey = () => 'hk-curb';
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uCurbFar = { value: tex.meanColor ?? new THREE.Color(0.4, 0.3, 0.3) };
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <common>', `#include <common>
+attribute vec2 aCurb;
+varying vec2 vCurb;`)
+        .replace('#include <begin_vertex>', `#include <begin_vertex>
+vCurb = aCurb;`);
+
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <common>', `#include <common>
+varying vec2 vCurb;
+uniform vec3 uCurbFar;`)
+        .replace('#include <map_fragment>', `#include <map_fragment>
+float kArc = vCurb.x;             // metres round the lap
+float kU   = vCurb.y;             // 0 at the tarmac joint, 1 at the outer lip
+float kDist = length( vViewPosition );
+
+// The stripes are resolved, then they are not. Crossing that line with the
+// pattern still at full contrast is the crawl; crossing it having already
+// converged to the average is just a kerb going soft with distance.
+float kFar = smoothstep( 42.0, 105.0, kDist );
+diffuseColor.rgb = mix( diffuseColor.rgb, uCurbFar, kFar );
+
+// Two incommensurate periods, neither of them a multiple of the tile, so no
+// two lengths of kerb wear alike anywhere on a 1.4-1.7 km circuit.
+float kAge = 0.5 + 0.30 * sin( kArc * 0.1370 ) + 0.20 * sin( kArc * 0.0413 + 2.1 );
+diffuseColor.rgb *= mix( 0.78, 1.06, kAge );
+
+// Karts ride the kerb at the corners and nowhere else, and they only ever
+// touch the crown — the outer roll stays clean, which is what makes the rubber
+// read as tyre marks rather than as a dirty texture.
+float kRide  = smoothstep( 0.45, 1.0, 0.5 + 0.5 * sin( kArc * 0.0327 + 0.7 ) );
+float kCrown = 1.0 - smoothstep( 0.0, 0.50, abs( kU - 0.34 ) );
+float kRub   = kRide * kCrown * ( 1.0 - kFar );
+diffuseColor.rgb *= mix( 1.0, 0.62, kRub );`)
+        .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+roughnessFactor = clamp( mix( roughnessFactor, 0.99, kRub * 0.7 ), 0.05, 1.0 );`)
+        // Chipped paint and coarse concrete are millimetres of relief. Once
+        // they stop resolving the normal map only supplies specular sparkle,
+        // which crawls for the same reason the albedo did.
+        .replace('#include <normal_fragment_maps>', `vec3 kMapN = texture2D( normalMap, vNormalMapUv ).xyz * 2.0 - 1.0;
+normal = normalize( tbn * vec3( kMapN.xy * normalScale * ( 1.0 - kFar ), 1.0 ) );`);
+    };
   }
 
   _buildMarkings() {
@@ -633,7 +745,8 @@ normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
     const t = Tex.boostPad({
       size: 512,
       wear: isNeon ? 0.15 : 1,
-      plate: isNeon ? 0x081426 : 0x123c56,
+      plate: isNeon ? BOOST_PLATE_NEON : BOOST_PLATE,
+      plateAlpha: isNeon ? BOOST_PLATE_ALPHA_NEON : BOOST_PLATE_ALPHA,
     });
     // Chevrons are authored one per texture tile, and the tile is mapped to a
     // fixed number of metres of road — so every pad gets the same size arrow
@@ -667,6 +780,17 @@ normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
     this.boostPadMaterial = mat;
     this._boostMaps = [t.map, t.emissiveMap, t.alphaMap, t.normalMap, t.roughnessMap];
 
+    const padParts = [];
+    for (const pad of this.track.boostPads) padParts.push(this._boostPadStrip(pad));
+    this._add(mergeStrips(padParts), mat, { receive: false, renderOrder: 3 }).name = 'boostPad';
+
+    // The pool exists to put the arms' light onto the dark surface around them.
+    // Rainbow Skyway has no dark surface — its road emits more than the pad does
+    // — so there is nothing for a bounce to land on, and shot against a capture
+    // with the pool hidden all it did was wash the ribbon pale and take the
+    // chevrons' contrast with it. One surface, one reason, no pool here.
+    if (isNeon) return;
+
     const ts = Tex.boostSpill({ size: 256, core: 1 / (1 + BOOST_SPILL_RATIO) });
     const spillMat = new THREE.MeshBasicMaterial({
       alphaMap: ts.alphaMap,
@@ -683,12 +807,8 @@ normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
     });
     this.materials.push(spillMat);
 
-    const padParts = [], spillParts = [];
-    for (const pad of this.track.boostPads) {
-      padParts.push(this._boostPadStrip(pad));
-      spillParts.push(this._boostSpillStrip(pad));
-    }
-    this._add(mergeStrips(padParts), mat, { receive: false, renderOrder: 3 }).name = 'boostPad';
+    const spillParts = [];
+    for (const pad of this.track.boostPads) spillParts.push(this._boostSpillStrip(pad));
     this._add(mergeStrips(spillParts), spillMat, { receive: false, renderOrder: 2 }).name = 'boostPadSpill';
   }
 
@@ -763,7 +883,13 @@ normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
   }
 
   _buildStartLine() {
-    const t = Tex.checker({ size: 512, squares: 10 });
+    // Four squares to the 3.2 m tile, so the checker is laid in 80 cm squares
+    // and the strip is exactly four rows deep. It was ten, which is 32 cm — the
+    // size of a bathroom tile, not of a start line — and at any distance past
+    // the braking zone a 32 cm square is under a pixel, so the whole band
+    // collapsed into moire and read as a grey mesh laid across the road. The
+    // depth is unchanged: this only changes how the strip is divided up.
+    const t = Tex.checker({ size: 512, squares: START_SQUARES });
     t.map.repeat.set(1, 1);
     const mat = new THREE.MeshStandardMaterial({
       map: t.map,
@@ -779,7 +905,7 @@ normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
     });
     this.materials.push(mat);
     const s0 = this.track.startS;
-    const depth = 3.2;
+    const depth = START_DEPTH;
     const steps = 4;
     const sList = [];
     for (let i = 0; i <= steps; i++) sList.push(s0 - depth * 0.5 + (i / steps) * depth);
@@ -803,7 +929,7 @@ normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
         const tt = (i * m + j) * 2;
         // Squares stay square in world space: one texture tile every 3.2 m on
         // both axes, which is also exactly the depth of the strip.
-        uvs[tt] = u * (2 * hw / 3.2); uvs[tt + 1] = i / (n - 1);
+        uvs[tt] = u * (2 * hw / START_DEPTH); uvs[tt + 1] = i / (n - 1);
       }
     }
     const idx = [];
@@ -864,19 +990,60 @@ normal = normalize( tbn * vec3( gNxy * normalScale, 1.0 ) );`);
     const uvs = new Float32Array(n * m * 2);
     const ground = new Float32Array(n * m * 2);
     const p = new THREE.Vector3();
+    const edge = new THREE.Vector3();
+    const frame = {};
+    const outward = new THREE.Vector3();
 
     for (let i = 0; i < n; i++) {
       const s = sList[i];
       const half = this.track.halfWidthAt(s);
+      const f = this.track.spline.frameAt(s, frame);
+      // The road's own right vector is *banked* — up to 0.30 rad of roll on
+      // this circuit. Riding it out to the far columns tilts the whole
+      // landscape with the corner, and 260 m of lever arm turns 0.30 rad into a
+      // 104 m rise (measured, canyonRush s=1077). Where the bank changes sign
+      // between two corners the outer terrain therefore swings from +80 m to
+      // -80 m over a few metres of arc, and what that draws is a several-
+      // hundred-metre near-vertical face silhouetted against the sky. Land
+      // beside a banked corner is not itself banked: past the barrier the
+      // terrain leaves the road frame and goes out horizontally.
+      outward.set(f.right.x, 0, f.right.z);
+      if (outward.lengthSq() < 1e-8) outward.set(1, 0, 0);
+      outward.normalize();
+      // How far the inside of this corner can be offset before the surface
+      // passes through the centre of curvature and turns itself inside out.
+      // Corners here get down to a 36 m radius against a 260 m reach, so this
+      // is not a corner case, it is most of the lap. Past the fold the winding
+      // inverts and the triangles are culled, which is why the run-off simply
+      // stopped and left the road ribbon hanging over the sea at sunsetCoast
+      // and over open sky at canyonRush. The reach is *rescaled* rather than
+      // clipped: clipping stacks every outer column on the fold line and the
+      // quads between them span the whole infield as one flat sheet.
+      // `side * curvature` is positive on the inside of the corner and negative
+      // on the outside, and it passes through zero on a straight — so deriving
+      // the reach from it directly is continuous, where testing which side is
+      // "the inside" is not. That test flips at every corner exit, and a side
+      // that jumps from a 12 m reach to a 260 m one between two rings 6.4 m
+      // apart draws a sliver of terrain a hundred metres into the sky.
+      // Verified against ring spacing: at canyonRush s=304 (R=36 m) consecutive
+      // rings 30 m to the negative side are 1.04 m apart where the centreline
+      // gives 6.4 m, so negative is the inside there and curvature is negative.
+      const reachFor = (side) => {
+        const kap = side * f.curvature;
+        if (kap <= 1e-5) return TERRAIN_REACH;
+        return Math.max(12, Math.min(TERRAIN_REACH, 0.86 / kap - wallOffset - half));
+      };
+      const reachL = reachFor(-1), reachR = reachFor(1);
+
       for (let j = 0; j < m; j++) {
         // Two-sided: columns run from far-left, across the track, to far-right.
         const u = j / cols;
         const side = u < 0.5 ? -1 : 1;
         const k01 = Math.abs(u - 0.5) * 2;                     // 0 at track, 1 far out
-        const d = Math.pow(k01, 1.7) * TERRAIN_REACH;
-        const lat = side * (half + wallOffset + d);
-        this._point(s, lat, p);
-        const edgeY = p.y;
+        const d = Math.pow(k01, 1.7) * (side < 0 ? reachL : reachR);
+        this._point(s, side * (half + wallOffset), edge);
+        const edgeY = edge.y;
+        p.copy(edge).addScaledVector(outward, side * d);
         if (d > 0.5) p.y = profile(d, p.x, p.z, edgeY);
         else p.y = edgeY - 0.42;
         const kk = (i * m + j) * 3;

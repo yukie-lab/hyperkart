@@ -150,6 +150,28 @@ function meanLinearLuma(canvasEl) {
   return sum / (size * size);
 }
 
+/**
+ * Mean *linear* colour of a painted canvas.
+ *
+ * What a texture converges to under infinite minification, and therefore the
+ * only honest colour to fade a pattern towards once its features drop below a
+ * pixel. Averaged in linear light because that is the space the shader will be
+ * mixing in — averaging the sRGB bytes instead lands a red/white kerb about
+ * 20% too dark, which reads as a distant kerb going grey.
+ */
+function meanLinearColor(canvasEl) {
+  const size = canvasEl.width;
+  const d = canvasEl.getContext('2d').getImageData(0, 0, size, size).data;
+  let r = 0, g = 0, b = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    r += srgbToLinear(d[i] / 255);
+    g += srgbToLinear(d[i + 1] / 255);
+    b += srgbToLinear(d[i + 2] / 255);
+  }
+  const n = size * size;
+  return new THREE.Color(r / n, g / n, b / n);
+}
+
 // ---------------------------------------------------------------------------
 // Material generators. Each returns { map, normalMap, roughnessMap, ... }.
 // ---------------------------------------------------------------------------
@@ -392,16 +414,31 @@ export function laneMarkings({ size = 512, tint = 0xeae5d6 } = {}) {
  * outer roll and into the joint with the tarmac, and the crown carries rubber
  * where karts cut across it. `dirtTint` is the surrounding ground colour, so
  * the grime belongs to the place the circuit is in.
+ *
+ * `stripes` is deliberately small, and that is the fix for the reported crawl.
+ * A square texture on a strip 1.35 m wide and eight metres long carried 379
+ * texels per metre across and 64 along it, so the *across* axis was always the
+ * long side of the sampling footprint. Anisotropic filtering therefore lowered
+ * the mip level to suit an axis with nothing on it and spent all sixteen taps
+ * there, leaving the stripes — which live entirely on the other axis —
+ * undersampled at every distance past about forty metres. Measured: forcing
+ * anisotropy to 1 took the far kerb's peak flicker from 89/255 to 1/255, which
+ * is the whole defect. Two stripes to a tile puts the density at 256 texels
+ * per metre along and 379 across, near enough square that the footprint's long
+ * axis is the one the stripes are on and anisotropy starts helping instead.
+ * Per-kerb variety moves to road space in TrackBuilder, which is where it
+ * belonged anyway — an eight metre tile repeated too.
  */
-export function curb({ size = 512, colorA = 0xd8352a, colorB = 0xf2f2f2, dirtTint = 0x8a7a5c } = {}) {
-  const key = `curb_${size}_${colorA}_${colorB}_${dirtTint}`;
+export function curb({ size = 512, colorA = 0xd8352a, colorB = 0xf2f2f2, dirtTint = 0x8a7a5c, stripes = 2 } = {}) {
+  const key = `curb_${size}_${colorA}_${colorB}_${dirtTint}_${stripes}`;
   if (_textureCache.has(key)) return _textureCache.get(key);
-  // Only V has to tile here — U runs across the strip exactly once — but the
-  // strip repeats every 8 m, so a V seam would strobe past twice a second.
-  const paintN = tiling(17, size, 16);
-  const chipN = tiling(53, size, 8);
-  const rubN = tiling(71, size, 4);
-  const gritN = tiling(89, size, 2);
+  // Only V has to tile here — U runs across the strip exactly once. Scales are
+  // quoted in texels, and one texel is now ~3 mm across the kerb and ~4 mm
+  // along it, so these are real millimetre figures rather than tile fractions.
+  const paintN = tiling(17, size, 96);   // ~30 cm: how thick each pass was laid
+  const chipN = tiling(53, size, 24);    // ~7 cm: patches where the film lifted
+  const rubN = tiling(71, size, 128);    // ~40 cm: rubber smeared along the crown
+  const gritN = tiling(89, size, 6);     // ~2 cm: the coarse face of the concrete
   const A = paintTint(colorA), B = paintTint(colorB);
   const D = paintTint(dirtTint), CONCRETE = paintTint(0xc2bcb1);
 
@@ -414,10 +451,12 @@ export function curb({ size = 512, colorA = 0xd8352a, colorB = 0xf2f2f2, dirtTin
     for (let x = 0; x < size; x++) {
       const i = y * size + x;
       const v = y / size;
-      const grit = fbm2D(gritN.n, x / gritN.k, y / gritN.k, 3);
+      // Two octaves, not three: a third puts energy at 1.5 texels, and relief
+      // at the Nyquist limit is the other half of why this surface crawled.
+      const grit = fbm2D(gritN.n, x / gritN.k, y / gritN.k, 2);
       // Distance to the nearest stripe joint, in stripe units. Kerb paint is
       // laid one stripe at a time and always lifts at those seams first.
-      const f = mod(v * 8, 1);
+      const f = mod(v * stripes, 1);
       const joint = Math.min(f, 1 - f);
       let p = smoothstep(joint / 0.055);
       p *= 1 - clamp01((fbm2D(chipN.n, x / chipN.k, y / chipN.k, 3) - 0.70) * 5.0);
@@ -426,7 +465,7 @@ export function curb({ size = 512, colorA = 0xd8352a, colorB = 0xf2f2f2, dirtTin
       gritBuf[i] = grit;
       // Two coats of paint stand a fraction of a millimetre proud of the
       // concrete; at grazing light that lip is the whole read of "chipped".
-      height[i] = grit * 0.34 + p * 0.30 + 0.2;
+      height[i] = grit * 0.26 + p * 0.34 + 0.2;
     }
   }
 
@@ -434,10 +473,13 @@ export function curb({ size = 512, colorA = 0xd8352a, colorB = 0xf2f2f2, dirtTin
     const i = y * size + x;
     const u = x / size, v = y / size;
     const p = paintBuf[i], grit = gritBuf[i];
-    const col = Math.floor(v * 8) % 2 === 0 ? A : B;
-    // Each stripe weathers on its own schedule — a kerb where every red is the
-    // same red is the giveaway that it came out of a texture generator.
-    const fade = lerp(0.66, 1.02, fbm2D(paintN.n, 3.7, y / paintN.k, 2));
+    const col = Math.floor(v * stripes) % 2 === 0 ? A : B;
+    // How evenly the machine laid this pass, across the stripe rather than
+    // along it. Which *lengths* of kerb are faded is decided in road space now
+    // — a kerb where every red is the same red is the giveaway that it came out
+    // of a texture generator, and with two stripes to a tile no in-tile
+    // variation could have told them apart.
+    const fade = lerp(0.80, 1.04, fbm2D(paintN.n, x / paintN.k, y / paintN.k, 2));
     const cl = lerp(0.80, 1.06, grit);
     let r = lerp(CONCRETE.r * cl, col.r * fade, p);
     let g = lerp(CONCRETE.g * cl, col.g * fade, p);
@@ -472,6 +514,10 @@ export function curb({ size = 512, colorA = 0xd8352a, colorB = 0xf2f2f2, dirtTin
     normalMap: makeTexture(heightToNormal(height, size, 2.2)),
     roughnessMap: makeTexture(roughC),
     normalScale: 0.75,
+    // What the stripes average to. TrackBuilder fades the kerb towards this
+    // once a stripe is worth less than a couple of pixels, which is the only
+    // way to stop a 1 m pattern strobing on a 1 px line at the horizon.
+    meanColor: meanLinearColor(c),
   };
   _textureCache.set(key, result);
   return result;
@@ -680,19 +726,38 @@ export function grass({ size = 1024, seed = 61, tint = 0x4e8a3c } = {}) {
  * the player's own kart. Confining the glow to 40% of the area buys back all of
  * that mean brightness and spends it on local contrast, where it does the
  * reading work.
+ *
+ * The arms *taper*, and that is what turns a zig-zag into an arrow. With bands
+ * of constant thickness the apex is no wider than the tips, so from a chase
+ * camera — where perspective flattens the arms towards the horizontal anyway —
+ * the pad reads as a set of slightly bent stripes and the direction has to be
+ * inferred. Widening the band at the centreline and thinning it towards the
+ * pad edge puts the visual weight on the point, which is the one part of a
+ * chevron that carries the meaning.
+ *
+ * `plateAlpha` keeps the bed and the arms on separate coverage budgets. The
+ * arms are always solid; the bed is thin paint that has been driven over, and
+ * on Rainbow Skyway it has to be thin enough for the road to glow through —
+ * an opaque bed there is a black hole punched in the ribbon, which is a worse
+ * failure than the flat cyan slab this rework replaced.
  */
-export function boostPad({ size = 512, aspect = 2.0, plate = 0x123c56, glow = 0x2ecdff, wear = 1 } = {}) {
-  const key = `boost_${size}_${aspect}_${plate}_${glow}_${wear}`;
+export function boostPad({ size = 512, aspect = 2.0, plate = 0x2a5c78, glow = 0x2ecdff, wear = 1, plateAlpha = 0.85 } = {}) {
+  const key = `boost_${size}_${aspect}_${plate}_${glow}_${wear}_${plateAlpha}`;
   if (_textureCache.has(key)) return _textureCache.get(key);
 
-  const wearN = tiling(211, size, 4);    // tyre scuffing, over centimetres
-  const gritN = tiling(233, size, 2);    // road grit trodden into the film
+  const wearN = tiling(211, size, 6);    // tyre scuffing, over centimetres
+  const gritN = tiling(233, size, 5);    // road grit trodden into the film
   const filmN = tiling(251, size, 16);   // how thick the machine laid it, over metres
   const P = paintTint(plate), G = paintTint(glow);
 
-  // Arm thickness as a fraction of the pitch. Much above 0.45 and the gaps
-  // close up into a solid slab again — the gap is what makes it an arrow.
-  const ARM = 0.40;
+  // Arm thickness at the apex, as a fraction of the pitch. Much above 0.45 and
+  // the gaps close up into a solid slab again — the gap is what makes it an
+  // arrow — and the taper below only ever takes thickness away.
+  const ARM = 0.44;
+  // How much of that thickness survives at the pad edge. Below about a half the
+  // arms break up before they reach the feathered border and the chevron stops
+  // reading as one continuous mark.
+  const TIP = 0.56;
   // Softening the band edges by a couple of texels is not cosmetic: this
   // surface is viewed at the most grazing angle of anything on the circuit, and
   // a hard step is exactly the high-frequency energy the mip chain cannot hold.
@@ -717,17 +782,22 @@ export function boostPad({ size = 512, aspect = 2.0, plate = 0x123c56, glow = 0x
       // `+|wx|` puts the apex at the centre and the arms trailing behind it.
       // `-|wx|` draws the same chevron pointing backwards.
       const phase = mod(v + Math.abs(wx), 1);
+      // Thickness falls off towards the tips. The band's *centre* stays put so
+      // the arms still meet the next chevron's cleanly at the pad edge; only
+      // the weight moves, onto the apex.
+      const taper = lerp(1.0, TIP, clamp01(Math.abs(wx) / (aspect * 0.5)));
+      const armHalf = ARM * 0.5 * taper;
       // Wrapped signed distance to the arm's centre, so both edges of the band
       // soften and the band crossing the tile seam does not tear.
       let dp = phase - ARM * 0.5;
       dp -= Math.round(dp);
-      const a = 1 - smoothstep((Math.abs(dp) - ARM * 0.5) / SOFT);
+      const a = 1 - smoothstep((Math.abs(dp) - armHalf) / SOFT);
       // A narrow bloom rim just outside each arm — real light on wet-look paint
       // does not stop dead at the edge of the paint. It has to die out well
       // before the midpoint between two arms: a wide falloff here does not read
       // as a rim at all, it silently relights the entire plate, which is the
       // uniform glow this whole rework exists to remove.
-      const h = 1 - smoothstep((Math.abs(dp) - ARM * 0.6) / 0.075);
+      const h = 1 - smoothstep((Math.abs(dp) - armHalf * 1.2) / 0.075);
 
       // Karts cross a boost pad at full throttle and nothing else on the
       // circuit gets scrubbed as hard, so the film is thin down the middle.
@@ -741,7 +811,7 @@ export function boostPad({ size = 512, aspect = 2.0, plate = 0x123c56, glow = 0x
       arm[i] = a * lerp(1.0, 0.55, sc);
       // Leading half of each arm brighter than the trailing half. It is a small
       // thing, but it is the only cue that survives a single frozen frame.
-      lead[i] = clamp01(dp / (ARM * 0.5)) * a;
+      lead[i] = clamp01(dp / armHalf) * a;
       halo[i] = h;
       scuff[i] = sc;
 
@@ -751,9 +821,18 @@ export function boostPad({ size = 512, aspect = 2.0, plate = 0x123c56, glow = 0x
       const edge = 1 - smoothstep((Math.abs(wx) / (aspect * 0.5) - 0.86) / 0.14);
       // Feathering with a clean ramp reads as an airbrush; overspray and
       // flaking at the border is what a real painted edge looks like.
-      const flake = smoothstep((fbm2D(wearN.n, x / wearN.k + 31, y / wearN.k, 4) - 0.26) * 3.2);
-      const patchy = lerp(1, lerp(0.42, 1.0, flake) * lerp(0.86, 1.0, fbm2D(gritN.n, x / gritN.k, y / gritN.k, 2)), wear);
-      alpha[i] = clamp01(edge * patchy);
+      // Flaking belongs at the border, where the paint has an edge to lift
+      // from. Spread evenly over the whole pad — as it was — it just punches
+      // 15% of the bed out at random and the plate stops existing: over dark
+      // tarmac what was left read as glowing stripes floating on the road,
+      // with nothing painted underneath them.
+      const flake = smoothstep((fbm2D(wearN.n, x / wearN.k + 31, y / wearN.k, 3) - 0.26) * 3.2);
+      const border = smoothstep((Math.abs(wx) / (aspect * 0.5) - 0.45) / 0.45);
+      const patchy = lerp(1, lerp(1.0, lerp(0.42, 1.0, flake), border)
+        * lerp(0.93, 1.0, fbm2D(gritN.n, x / gritN.k, y / gritN.k, 2)), wear);
+      // Arms are solid paint; the bed under them is thin enough to be a tint on
+      // whatever it is painted on rather than a lid over it.
+      alpha[i] = clamp01(edge * patchy * lerp(plateAlpha, 1.0, a));
 
       // Two coats of thermoplastic, so the arms stand proudest and the scuffed
       // centreline has been worn back down towards the tarmac.
@@ -813,8 +892,8 @@ export function boostPad({ size = 512, aspect = 2.0, plate = 0x123c56, glow = 0x
  * little larger than the pad, with no hard boundary anywhere in it, is the
  * cheapest honest stand-in for the bounce.
  */
-export function boostSpill({ size = 256, core = 0.65 } = {}) {
-  const key = `boostspill_${size}_${core}`;
+export function boostSpill({ size = 256, core = 0.65, hollow = 0.30 } = {}) {
+  const key = `boostspill_${size}_${core}_${hollow}`;
   if (_textureCache.has(key)) return _textureCache.get(key);
   const n = tiling(307, size, 8);
   const c = paint(size, (x, y, o) => {
@@ -828,6 +907,13 @@ export function boostSpill({ size = 256, core = 0.65 } = {}) {
     // is a rectangle and its glow has to be one too.
     const d = Math.max(Math.abs(u), Math.abs(v));
     let g = Math.pow(1 - smoothstep((d - core) / (1 - core)), 1.7);
+    // Hollowed out over the pad's own footprint. The pad is part-transparent by
+    // design, so a full-strength plateau underneath it added blue to the gaps
+    // between the chevrons as well as to the road around them — it was washing
+    // out the very contrast it exists to support, and at a distance the whole
+    // thing read as a patch of haze rather than as light on tarmac. Light does
+    // land between the arms, so this is a floor rather than a hole.
+    g *= lerp(hollow, 1.0, smoothstep(d / core));
     // Rounded corners, so the pool never shows a rectangle's vertex.
     g *= 1 - smoothstep((Math.hypot(Math.max(0, Math.abs(u) - core), Math.max(0, Math.abs(v) - core)) - (1 - core) * 0.55) / ((1 - core) * 0.6));
     // A perfectly smooth airbrush is the tell. Break it on the same scale the
