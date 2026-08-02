@@ -27,7 +27,27 @@ export const SHAPE = {
   EMBER: 6,    // tapered comet along the velocity — drift sparks, debris
   FLAME: 7,    // crisp teardrop with a white-hot axis — jet plumes
   SHARD: 8,    // hard-edged tumbling chip with a lit facet — impact debris
+  GROUND: 9,   // circle lying in the ground plane — shock fronts, spill light
 };
+
+/**
+ * How much of a GROUND sprite's radius is pulled toward the camera.
+ *
+ * A point sprite has one depth for the whole quad, so a circle drawn flat on
+ * the road is depth-tested against the road at a single distance: the far half
+ * of the ellipse passes and the near half — which is genuinely closer than the
+ * sprite's centre — is rejected by the tarmac it is lying on. Half a ring is
+ * worse than no ring. Sliding the sprite along its own view ray by the depth
+ * the near edge would have had costs nothing on screen (position and size are
+ * both preserved) and puts the whole front in front of the road.
+ *
+ * Not the full 1.0, because that also puts it in front of anything within a
+ * radius — including the kart, and an impact ring that draws over the vehicle
+ * it hit is the defect this shape exists to fix. At 0.82 the kart keeps the
+ * last fifth of the front and the road takes a nibble out of the nearest edge,
+ * which reads as the ring sinking into the surface.
+ */
+const GROUND_BIAS = 0.82;
 
 const VERT = /* glsl */`
   attribute vec3 aVel;
@@ -49,6 +69,8 @@ const VERT = /* glsl */`
   varying float vGround;
   varying float vFade;
   varying vec3 vWorld;
+  varying vec4 vGB;        // ground plane -> sprite-local basis, GROUND only
+  varying float vGAA;      // edge softness needed to keep a flat ellipse smooth
 
   uniform float uPixelScale;
   uniform vec2 uNear;      // distance at which a sprite is fully faded / fully visible
@@ -65,7 +87,6 @@ const VERT = /* glsl */`
     vec4 world = modelMatrix * vec4(position, 1.0);
     vWorld = world.xyz;
     vec4 mv = viewMatrix * world;
-    gl_Position = projectionMatrix * mv;
 
     // Size envelope. Particles that appear at full size pop; every shipped
     // system eases them in over the first slice of life and settles them out
@@ -97,7 +118,57 @@ const VERT = /* glsl */`
     // runway to disappear and a spark needs centimetres.
     vFade = smoothstep(uNear.x, uNear.y, d);
 
-    gl_PointSize = clamp(sz * uPixelScale / d, 1.0, uMaxPx);
+    // Ground fronts get their own ceiling. uMaxPx exists to stop a sprite that
+    // sweeps the lens from becoming the whole frame, and a metre-wide puff at
+    // arm's length is exactly that — but a shock front is a *large flat thing
+    // seen from above*, and at the moment it is most worth looking at it is
+    // legitimately eight metres across six metres away. Clamped to the common
+    // ceiling it overflowed its own quad and came out as a stadium: an ellipse
+    // with the top and bottom sliced off square.
+    float cap = aShape > 8.5 ? uMaxPx * 2.2 : uMaxPx;
+    float px = clamp(sz * uPixelScale / d, 1.0, cap);
+    gl_PointSize = px;
+
+    vGB = vec4(0.0);
+    vGAA = 0.05;
+    if (aShape > 8.5) {
+      // A circle lying flat on the road, drawn inside a screen-aligned quad.
+      //
+      // The projection of a ground offset into sprite-local coordinates is
+      // exact and costs two matrix-vector products: a view-space xy offset
+      // lands at offset * uPixelScale / d pixels, which is the same factor
+      // gl_PointSize is built from — so the perspective divide, the field of
+      // view and the viewport all cancel and never have to be uploaded. The
+      // clamp on gl_PointSize does not cancel, hence k.
+      // Never above 1: past the ceiling the ellipse would be wider than the
+      // quad drawing it, and a front that gets its corners cut off is worse
+      // than a front that stops growing.
+      float k = min((sz * uPixelScale / d) / px, 1.0);
+      vec2 gx = (viewMatrix * vec4(1.0, 0.0, 0.0, 0.0)).xy;
+      vec2 gz = (viewMatrix * vec4(0.0, 0.0, 1.0, 0.0)).xy;
+      vGB = 0.5 * k * vec4(gx, gz);
+
+      // The ellipse collapses toward a line as the camera drops toward the
+      // surface, and its short axis is what decides whether the front's edge
+      // is a clean curve or a stack of jaggies. Widen the edge to at least a
+      // pixel and a half measured along that axis.
+      float det = abs(vGB.x * vGB.w - vGB.y * vGB.z);
+      float smax = max(max(length(vGB.xy), length(vGB.zw)), 1e-4);
+      vGAA = clamp(1.5 * smax / (px * max(det, 1e-5)), 0.02, 0.55);
+
+      // Depth: see GROUND_BIAS. Sliding along the view ray leaves the sprite
+      // in exactly the same place on screen at exactly the same size, because
+      // the ray is the set of points that project there — only the depth the
+      // test sees changes, and gl_PointSize is computed from the original d.
+      vec3 nv = (viewMatrix * vec4(0.0, 1.0, 0.0, 0.0)).xyz;
+      vec3 dv = normalize(mv.xyz);
+      vec3 hv = dv - nv * dot(dv, nv);
+      float hl = length(hv);
+      float bias = (sz * 0.5) * (hl > 1e-4 ? abs(hv.z) / hl : 0.0) * ${GROUND_BIAS.toFixed(2)};
+      mv.xyz *= max(1.0 - bias / d, 0.15);
+    }
+
+    gl_Position = projectionMatrix * mv;
   }`;
 
 const FRAG = /* glsl */`
@@ -112,6 +183,8 @@ const FRAG = /* glsl */`
   varying float vGround;
   varying float vFade;
   varying vec3 vWorld;
+  varying vec4 vGB;
+  varying float vGAA;
 
   uniform float uTime;
   // World-space Y of the camera's right and up basis vectors: enough to
@@ -119,6 +192,22 @@ const FRAG = /* glsl */`
   uniform vec2 uBillY;
 
   float hash(vec2 p){ p = fract(p*vec2(443.897,441.423)); p += dot(p,p.yx+19.19); return fract((p.x+p.y)*p.x); }
+
+  /**
+   * Interpolated value noise.
+   *
+   * The shapes below used hash(floor(uv * 9.0)) directly, which is a nine by
+   * nine grid of constants — so every sprite that perturbed its edge with it
+   * got a staircase, and a mushroom plume three hundred pixels across rendered
+   * as a stepped polygon with visibly quantised alpha. Four taps and a smooth
+   * interpolant is the difference between "boiling edge" and "low-res sprite".
+   */
+  float vnoise(vec2 p){
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x),
+               mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
+  }
   mat2 rot(float a){ float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
 
   void main() {
@@ -148,8 +237,8 @@ const FRAG = /* glsl */`
     } else if (vShape < 2.5) {
       // Puff with a noisy, dissolving edge so smoke doesn't look like a disc.
       vec2 uv = rot(vRot) * local;
-      float n = hash(floor((uv + 0.5) * 13.0) + floor(vLife * 6.0));
-      float edge = smoothstep(1.0, 0.32, r + n * 0.30 * (1.0 - vLife));
+      float n = vnoise((uv + 0.5) * 6.5 + floor(vLife * 6.0) * 17.0);
+      float edge = smoothstep(1.0, 0.32, r + n * 0.34 * (1.0 - vLife));
       a = edge * 0.92;
     } else if (vShape < 3.5) {
       // Velocity-aligned streak with a hot head — the speed-line primitive.
@@ -212,19 +301,39 @@ const FRAG = /* glsl */`
       float t = clamp((q.x + 0.46) / 0.92, 0.0, 1.0);
       // Fat behind the head, closing to a point at the tail.
       float w = 0.30 * pow(t, 0.45) * (0.30 + 0.70 * t);
-      float n = hash(floor((q + 0.5) * 9.0) + floor(vLife * 6.0));
+      // Interpolated, not a 9x9 grid of constants. The old lookup quantised
+      // the edge into cells an eleventh of the sprite across, which on a
+      // mushroom plume filling a third of the frame's width is a stepped
+      // polygon with staircase alpha — reported as such, and correctly.
+      float n = vnoise((q + 0.5) * 5.0 + floor(vLife * 6.0) * 23.0);
       // Ragged along the whole length, not only the tail: a clean-edged wedge
       // reads as a piece of geometry, and thirty pieces of geometry is not a
       // fire however hot the middle of each one is.
       float d = abs(q.y) / max(w, 1e-4) + n * 0.34 * (0.35 + 0.65 * (1.0 - t));
-      a = smoothstep(1.0, 0.74, d) * smoothstep(0.0, 0.07, t);
+      // Hard boundary, bright axis. A plateau — everything inside the edge at
+      // one alpha, which is what this was — is a translucent chip, and half a
+      // dozen of them beside a rear wheel read as ice, not as fire. The
+      // silhouette has to stay crisp *and* the inside has to fall away from
+      // the axis, so that a stack of them sums into one plume with a hot line
+      // down the middle rather than into a heap of flat facets.
+      float axis = smoothstep(1.0, 0.0, d);
+      float body = smoothstep(1.0, 0.87, d) * smoothstep(0.0, 0.07, t);
+      // A brighter ridge just inside the boundary. An additive sprite whose
+      // alpha only falls off toward its edge has no *outline*: stack six of
+      // them and the sum is a smooth blob, which is how a jet exhaust ends up
+      // reading as two translucent quads. A ridge at the edge survives being
+      // summed, because every layer puts its ridge somewhere different — and
+      // an edge you can trace is the whole of what "shaped" means here. Thin,
+      // though: wide enough to see and it becomes a facet.
+      float rim = smoothstep(1.0, 0.94, d) * smoothstep(0.80, 0.94, d);
+      a = clamp(body * (0.26 + 0.74 * axis * axis) + rim * 0.30, 0.0, 1.0);
       // aRot is free on a velocity-oriented shape, so FLAME spends it on how
       // white-hot its axis runs. Without a per-particle knob every layer of the
       // plume gets the same white core, and a jet whose *coloured* layer is
       // also white in the middle is a white blob with a coloured fringe —
       // which is what a single hard-coded value produced on the first attempt.
       hot = smoothstep(0.50, 0.0, d) * smoothstep(0.10, 0.55, t) * vRot;
-    } else {
+    } else if (vShape < 8.5) {
       // Impact debris: a hard-edged chip that tumbles on aRot, with one facet
       // catching the light. Impacts read from silhouettes — a piece you can
       // trace the outline of says "something broke", and no number of soft
@@ -234,6 +343,49 @@ const FRAG = /* glsl */`
                     abs(uv.x * 0.72 + uv.y * 0.70) * 1.60);
       a = smoothstep(0.88, 0.74, d);
       hot = a * step(0.0, uv.x * 0.52 + uv.y * 0.86) * 0.42;
+    } else {
+      // A front expanding across the ground, seen in perspective.
+      //
+      // Every shockwave in this game used to be a screen-facing annulus: two
+      // hoops threaded around the rear wheels at an impact, aligned to nothing
+      // in the world and passing in front of the tyres. A circle *on the road*
+      // is a different object entirely — it says where the blast reached and
+      // it says the road is where it happened, and it can do both from one
+      // frozen frame. vGB maps the ground plane into this quad, so the whole
+      // shape below is authored in metres-from-the-centre and comes out as
+      // whatever ellipse the camera is entitled to see.
+      float det = vGB.x * vGB.w - vGB.y * vGB.z;
+      det = det >= 0.0 ? max(det, 1e-4) : min(det, -1e-4);
+      vec2 g = vec2(local.x * vGB.w - local.y * vGB.z,
+                    vGB.x * local.y - vGB.y * local.x) / det;
+      float rg = min(length(g), 3.0);
+
+      // Two things live in this shape, and aRot picks between them, because a
+      // shape with no orientation has that attribute going spare.
+      //
+      // At 0 it is a *front*: a hard leading edge with the fill trailing
+      // inward behind it, thinning as it expands the way a pressure wave does.
+      // The edge must not be soft — an impact ring that cannot be located in
+      // one frame does not exist in peripheral vision.
+      //
+      // At 1 it is *spill*: the pool a light source lays on the road under
+      // itself. That one must have no rim whatsoever. A filled disc that keeps
+      // the front's hard boundary is a decal, not light, and a boost that
+      // paints a crisp circle on the tarmac behind it reads as a sticker being
+      // dragged along.
+      float aa = vGAA;
+      float hard = smoothstep(1.0 + aa, 1.0 - aa, rg);
+      float w = mix(0.62, 0.16, 1.0 - vLife);
+      float wall = hard * smoothstep(1.0 - w - aa, 1.0 - w * 0.35, rg) * (1.0 - vRot * 0.80);
+      float pool = smoothstep(1.0, 0.10, rg);
+      pool *= 0.38 + 0.62 * pool;   // rimless, but still spread out to the edge
+      a = clamp(wall + pool * vRot, 0.0, 1.0);
+      // Only a third of the way to white. The leading edge is the brightest
+      // part of the front and therefore the part the eye samples the colour
+      // from — push it further and every impact, every drift tier and every
+      // pickup fires the same white ellipse, which is one hue short of the
+      // hoops these replaced.
+      hot = wall * smoothstep(1.0 - w * 0.55, 1.0, rg) * 0.34;
     }
 
     if (a <= 0.003) discard;

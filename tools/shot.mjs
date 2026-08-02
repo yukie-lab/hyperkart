@@ -168,6 +168,7 @@ async function main() {
     : [CFG.t];
 
   const results = [];
+  let blackFrames = 0;
   let simTime = 0;
 
   for (let i = 0; i < times.length; i++) {
@@ -189,6 +190,27 @@ async function main() {
       ? resolve(CFG.outdir, `${CFG.track}_t${String(target).padStart(3, '0')}.png`)
       : resolve(CFG.out);
     await mkdir(dirname(outPath), { recursive: true });
+    // A black frame currently exits 0 and reports plausible draw counts. One
+    // was observed mid-session and never reproduced — almost certainly a vite
+    // reload landing inside a capture — and it was only caught because two
+    // runs happened to be diffed. Sample the framebuffer and fail loudly
+    // instead, because a silently black capture is a review of nothing.
+    const lit = await page.evaluate(() => {
+      const c = window.__hk.rs.renderer.domElement;
+      const s = document.createElement('canvas');
+      s.width = 64; s.height = 36;
+      const ctx = s.getContext('2d');
+      ctx.drawImage(c, 0, 0, s.width, s.height);
+      const d = ctx.getImageData(0, 0, s.width, s.height).data;
+      let sum = 0;
+      for (let i = 0; i < d.length; i += 4) sum += d[i] + d[i + 1] + d[i + 2];
+      return sum / (d.length / 4 * 3);
+    });
+    if (lit < 2) {
+      process.stdout.write(`  ! BLACK FRAME at t=${target} (mean channel ${lit.toFixed(2)}) — capture discarded\n`);
+      blackFrames++;
+    }
+
     await page.screenshot({ path: outPath, type: 'png' });
 
     results.push({ t: target, path: outPath, stats, errors: errs });
@@ -215,6 +237,7 @@ async function main() {
 
   await browser.close();
   if (allErrors.length) process.exitCode = 2;
+  if (blackFrames) process.exitCode = 3;
 }
 
 main().catch((e) => {

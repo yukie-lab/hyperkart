@@ -106,7 +106,14 @@ const BOX_SHELL_FRAG = /* glsl */`
     vec3 film = hue(0.44 + vHueOff * 0.5 + f * 0.72 + vObj.y * 0.20 + normalize(vNrm).x * 0.09 + uTime * 0.05);
     // Pull toward white by the film's own strength: fully saturated rainbow
     // across a whole face reads as a beach ball, not as a coating.
-    film = mix(vec3(0.74, 0.94, 1.00), film, 0.52);
+    //
+    // The white it was pulled toward was itself a pale cyan, and it took away
+    // half the hue — so every box on the circuit landed on the same washed
+    // mint, and at road distance a row of them read as blocks of ice. Warm
+    // white, and a third less of it: the film has to be able to say which way
+    // round the box is facing from forty metres, and it can only do that if
+    // the faces are actually different colours.
+    film = mix(vec3(1.00, 0.96, 0.86), film, 0.72);
 
     // Face shading from the world normal alone. There is no light here on
     // purpose: a magic prop that samples the scene's sun picks up the sun's
@@ -117,10 +124,17 @@ const BOX_SHELL_FRAG = /* glsl */`
 
     // Moulded frame along the cube edges. Two of the three object-space axes
     // being near the surface means "edge"; all three means "corner".
+    //
+    // Twice as thick as it was, because this is the box's silhouette and a
+    // silhouette that is one screen pixel wide at forty metres is a silhouette
+    // that the minification filter averages into the road behind it. The frame
+    // is the one part of a box a player picks out of a busy frame at the far
+    // end of a straight — it is what they change line for — and it has to
+    // survive being small before anything else about the prop matters.
     vec3 e = abs(vObj) / 0.55;
     float m1 = max(max(e.x, e.y), e.z);
     float m2 = max(min(e.x, e.y), min(max(e.x, e.y), e.z));   // second largest
-    float edge = smoothstep(0.87, 0.995, m2) * step(0.86, m1);
+    float edge = smoothstep(0.76, 0.96, m2) * step(0.78, m1);
 
     // Depth attenuation for the far wall.
     //
@@ -143,7 +157,11 @@ const BOX_SHELL_FRAG = /* glsl */`
     // turned the pattern into a flat gradient.
     float caustic = 0.5 + 0.5 * sin(vObj.x * 10.0 + vObj.z * 7.0 - uTime * 1.7);
 
-    float a = (mix(0.19, 0.74, f) + caustic * 0.04) * far;
+    // Face-on opacity nearly doubled. At 0.19 the flat of a face was almost
+    // entirely the road behind it, which is exactly why these read as glass
+    // blocks rather than as objects: a prop you can see through has no mass
+    // and no colour of its own at any distance where it is only a few pixels.
+    float a = (mix(0.34, 0.86, f) + caustic * 0.04) * far;
     vec3 col = body * (1.05 + caustic * 0.15);
     // The frame is the only part allowed past the bloom threshold, and it is
     // thin enough that it costs a fraction of a percent of the frame.
@@ -221,8 +239,12 @@ const BOX_CORE_FRAG = /* glsl */`
     // a container read as holding something alive.
     float pulse = 0.82 + 0.18 * sin(uTime * 7.0);
 
-    vec3 col = tint * (halo * 0.40 + nucleus * 0.55 + glyph * 2.40) * pulse;
-    float a = clamp(halo * 0.16 + nucleus * 0.18 + glyph * 1.0, 0.0, 1.0);
+    // The halo carries the box past about twenty metres, where the glyph is
+    // sub-pixel and the shell is a dozen pixels of translucent nothing — so
+    // it is the term that decides whether a box is findable down a straight,
+    // and it was the faintest thing in the shader. Doubled.
+    vec3 col = tint * (halo * 0.85 + nucleus * 0.70 + glyph * 2.40) * pulse;
+    float a = clamp(halo * 0.30 + nucleus * 0.24 + glyph * 1.0, 0.0, 1.0);
     if (a < 0.004) discard;
     gl_FragColor = vec4(col, a);
   }`;
@@ -703,9 +725,11 @@ export class ItemSystem {
           b.respawn = 3.0;
           b.pop = POP_TIME;
           b.bornAt = ctx.time + 3.0;
-          this.fx?.burst(b.mesh.position, 0xffdd55, {
-            count: 26, speed: 9, size: 0.55, life: 0.5, alpha: 0.85, ring: 1.4,
-          });
+          // A dedicated effect, not the generic pop. `burst` is the shared
+          // "something happened here" and it is right for a shell expiring;
+          // a box is a *container*, and the whole of what makes taking one
+          // feel like a reward is that it visibly comes apart.
+          this.fx?.itemBreak(b.mesh.position);
           this.startRoulette(k, karts.length);
           break;
         }

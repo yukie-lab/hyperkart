@@ -22,6 +22,7 @@ import { clamp01, lerp, makeRng, TAU } from '../core/MathX.js';
  */
 
 const _p = new THREE.Vector3();
+const _q = new THREE.Vector3();
 const _v = new THREE.Vector3();
 const _w = new THREE.Vector3();
 const _side = new THREE.Vector3();
@@ -99,7 +100,24 @@ const SHADOW_BOX = 78;
  * which is what makes an impact locatable in one frame — and the same eight
  * metres of a hard-edged circle is a drawn shape sitting on the road. The
  * numbers here are sized against the new primitive, not the old one.
+ *
+ * Every shockwave then moved to SHAPE.GROUND, which is the same front lying in
+ * the road plane instead of facing the lens, and nothing in the game emits a
+ * RING any more. The exhaust pulse was kept longest, on the argument that its
+ * plane genuinely is perpendicular to the chase camera — and at exhaust scale
+ * it was still a thin hoop drawn round the flame, which is the exact thing
+ * being fixed everywhere else. The surface a blast expands across is the road;
+ * a screen-facing circle drawn at a wheel is a hoop threaded round the wheel.
+ * RING stays in the primitive set unused, because the next effect that wants a
+ * ring in a plane that is not the ground will want it back.
+ *
+ * The rings also grew. A front is a *reward*, and a reward that is 45 cm wide
+ * two frames after it fires is a detail; the numbers below are sized so the
+ * front leaves the kart's own silhouette inside the first sixth of a second.
  */
+
+/** Seats a ground front on the surface: the plane it expands across is the road. */
+function onRoad(p, gy) { if (gy != null) p.y = gy + 0.06; return p; }
 
 /** Dust colour per off-road surface id (see SURFACE in track/Tracks.js). */
 const DUST_COLOR = { 2: 0xbdb6ad, 3: 0xa87c50, 4: 0xdcc79a, 5: 0x8f9a5e };
@@ -334,19 +352,21 @@ export class KartFX {
     const gy = this._groundY(kart);
     for (const side of ['driftL', 'driftR']) {
       model.anchors[side].getWorldPosition(_p);
-      // Two rings at different rates so the shock has depth rather than being
+      onRoad(_p, gy);
+      // Two fronts at different rates so the shock has depth rather than being
       // one expanding circle.
       for (let r = 0; r < 2; r++) {
-        _v.set(0, 0.3, 0);
         _c.setHex(col);
         // Sized independently of the tier's continuous ring, which is now a
         // small contact pop: a stage-up is a one-frame event and is allowed to
         // be the biggest thing on screen for two frames.
-        this.additive.spawn(_p, _v, _c, {
-          shape: SHAPE.RING, size: (0.9 + stage * 0.35) * (0.8 + r * 0.5), sizeGrow: 7 + r * 4,
-          life: 0.22 + r * 0.10, alpha: tier.ringA * 1.6, drag: 3, colorB: 0x101018,
+        this.additive.spawn(_p, _ZERO, _c, {
+          shape: SHAPE.GROUND, size: (1.5 + stage * 0.6) * (0.8 + r * 0.5), sizeGrow: 11 + r * 6,
+          life: 0.22 + r * 0.10, alpha: tier.ringA * 1.5, drag: 3, colorB: 0x101018,
+          rot: 0.30 - r * 0.16,
         });
       }
+      model.anchors[side].getWorldPosition(_p);
       const n = 10 + stage * 7;
       for (let i = 0; i < n; i++) {
         const a = this.rng() * TAU;
@@ -392,12 +412,21 @@ export class KartFX {
         rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 16, colorB: 0x180a20,
       });
     }
-    // A single wide ring reads as the "pop" that the sparks are the debris of.
-    _v.set(0, 0.5, 0);
+    // The payout front. Two of them: a fast thin one that is already past the
+    // kart by the time the eye arrives, and a slower filled one that is still
+    // there when it does. Both lie on the road, which is what makes a release
+    // read as the kart having *shoved* the surface rather than as a circle
+    // drawn over the scene.
+    onRoad(_p, gy);
     _c.setHex(col);
-    this.additive.spawn(_p, _v, _c, {
-      shape: SHAPE.RING, size: 1.6 + stage * 0.6, sizeGrow: 7 + stage * 3,
-      life: 0.30, alpha: 0.50, drag: 4, colorB: 0x0c0c14,
+    this.additive.spawn(_p, _ZERO, _c, {
+      shape: SHAPE.GROUND, size: 2.2 + stage * 0.8, sizeGrow: 18 + stage * 7,
+      life: 0.26, alpha: 0.62, drag: 4, colorB: 0x0c0c14, rot: 0.14,
+    });
+    _c2.setHex(col).lerp(_WHITE, 0.30);
+    this.additive.spawn(_p, _ZERO, _c2, {
+      shape: SHAPE.GROUND, size: 1.5 + stage * 0.5, sizeGrow: 9 + stage * 3,
+      life: 0.36, alpha: 0.40, drag: 4, colorB: col, rot: 0.42,
     });
   }
 
@@ -562,11 +591,12 @@ export class KartFX {
       st.ringPhase -= Math.floor(st.ringPhase);
       for (const side of ['driftL', 'driftR']) {
         model.anchors[side].getWorldPosition(_p);
-        _v.set(0, 0.8, 0);
+        onRoad(_p, gy);
         _c.setHex(col).lerp(_WHITE, hot * 0.35);
-        this.additive.spawn(_p, _v, _c, {
-          shape: SHAPE.RING, size: tier.ring * 0.5, sizeGrow: 5.5 + stage * 2,
+        this.additive.spawn(_p, _ZERO, _c, {
+          shape: SHAPE.GROUND, size: tier.ring, sizeGrow: 7 + stage * 3,
           life: 0.17, alpha: tier.ringA * (0.7 + hot * 0.5), drag: 4, colorB: 0x0a0a12,
+          rot: 0.34,
         });
       }
     }
@@ -721,7 +751,7 @@ export class KartFX {
     // clears them, and the chase camera looks down, so it also drops the plume
     // onto the road where its colour has something to sit against.
     const OUT = 0.48;
-    const BACK = 0.50;
+    const BACK = 0.78;
     /** Seats `_p` at jet `i`'s mouth and returns which side it is. */
     const jet = (i) => {
       const sgn = i % 2 === 0 ? -1 : 1;
@@ -731,6 +761,36 @@ export class KartFX {
       return sgn;
     };
 
+    // 0. Spill light on the road under the pipes.
+    //
+    // The one thing missing from a boost that a still frame could never fake
+    // with more sprites. A jet is a light source, and a light source that
+    // leaves the surface beneath it unchanged is a decal. This is a flat pool
+    // of the plume's own colour laid on the tarmac and left behind, so the
+    // road under an accelerating kart runs blue (or orange, or whatever the
+    // star is doing) for the metre and a half behind it.
+    //
+    // It is also the cheapest footprint in the file per unit of read: a wide
+    // low-alpha coloured wash over dark asphalt moves a lot of pixels a little
+    // way, which is what "the reward moment barely exists" was measuring, and
+    // it cannot clip because it never touches more than one channel hard.
+    const gy = this._groundY(kart);
+    if (gy != null) {
+      const poolN = emit('boostPool', 30);
+      for (let i = 0; i < poolN; i++) {
+        const sgn = jet(i);
+        onRoad(_p, gy);
+        _p.addScaledVector(_side, sgn * 0.1);
+        _v.copy(_w).multiplyScalar(sp * 0.10);
+        _c.copy(mid);
+        this.additive.spawn(_p, _v, _c, {
+          shape: SHAPE.GROUND, size: 2.7 + this.rng() * 1.1, sizeGrow: 2.6,
+          life: 0.24 + this.rng() * 0.14, alpha: 0.26, drag: 0.6,
+          rot: 1.0, colorB: tail,   // GROUND reads aRot as how filled it is
+        });
+      }
+    }
+
     // 1. Core — a short hard flame sitting on the pipe mouth.
     //
     // This layer used to be eighteen soft round glows at alpha 0.72 stacked on
@@ -739,7 +799,16 @@ export class KartFX {
     // being read as. Fewer, dimmer, and crisp: a FLAME sprite has a silhouette
     // and a white-hot axis of its own, so one of them already says "jet" and
     // five of them do not have to sum past white to do it.
-    const coreN = emit('boostCore', 110);
+    //
+    // Then it went too far the other way. At 0.46 alpha and a quarter metre
+    // across, the hottest part of a 143 km/h boost was a pale wedge you had to
+    // be told about — the previous pass measured its own restraint as a win
+    // and it was the wrong direction for a *reward*. Doubled and enlarged. The
+    // budget it has to respect is clipping, and clipping counts pixels that
+    // are saturated on all three channels: a small white-hot core costs
+    // hundredths of a percent of the frame, and it is the single thing that
+    // makes the effect read as thrust rather than as vapour.
+    const coreN = emit('boostCore', 130);
     for (let i = 0; i < coreN; i++) {
       jet(i);
       _v.copy(_w).multiplyScalar(sp * 0.86 - (2 + this.rng() * 3));
@@ -750,8 +819,8 @@ export class KartFX {
       _c.copy(_CORE);
       if (kart.star > 0) _c.lerp(mid, 0.45);
       this.additive.spawn(_p, _v, _c, {
-        shape: SHAPE.FLAME, size: 0.24 + this.rng() * 0.12,
-        life: 0.075 + this.rng() * 0.05, alpha: 0.46, drag: 4, sizeGrow: 0.5,
+        shape: SHAPE.FLAME, size: 0.44 + this.rng() * 0.20,
+        life: 0.095 + this.rng() * 0.06, alpha: 1.10, drag: 4, sizeGrow: 0.7,
         rot: 0.90, colorB: mid,   // FLAME reads aRot as its white-hot fraction
       });
     }
@@ -778,10 +847,15 @@ export class KartFX {
       _v.y += (this.rng() - 0.5) * 0.5 + 0.30;
       _v.z += (this.rng() - 0.5) * 0.5;
       _c.copy(mid);
+      // Bigger and stronger than the restraint pass left it, and the hue
+      // survives it because the numbers that blow a hue out are *count* and
+      // *overlap depth*, not one sprite's alpha: the rate is unchanged, so the
+      // stack is the same three deep it was tuned to. What changed is that
+      // each lick in the stack now has an edge you can find.
       this.additive.spawn(_p, _v, _c, {
-        shape: SHAPE.FLAME, size: 0.26 + this.rng() * 0.24,
-        life: 0.13 + this.rng() * 0.10, alpha: 0.42, drag: 3.2, sizeGrow: 0.7,
-        rot: 0.10, colorB: tail,   // barely any white: this layer *is* the hue
+        shape: SHAPE.FLAME, size: 0.48 + this.rng() * 0.38,
+        life: 0.16 + this.rng() * 0.13, alpha: 0.62, drag: 3.2, sizeGrow: 1.0,
+        rot: 0.14, colorB: tail,   // barely any white: this layer *is* the hue
       });
     }
 
@@ -817,8 +891,8 @@ export class KartFX {
       // particles as crisp licks read as *things* being shed, which is the
       // only version of a trail that says the kart is under thrust.
       this.additive.spawn(_p, _v, _c, {
-        shape: SHAPE.FLAME, size: 0.40 + this.rng() * 0.30,
-        life: 0.20 + this.rng() * 0.16, alpha: 0.17, drag: 1.2, sizeGrow: 0.7,
+        shape: SHAPE.FLAME, size: 0.56 + this.rng() * 0.36,
+        life: 0.22 + this.rng() * 0.18, alpha: 0.21, drag: 1.2, sizeGrow: 0.9,
         rot: 0.0, colorB: tail,
       });
       // A normal-blended twin gives the trail body against a bright sky, where
@@ -828,11 +902,19 @@ export class KartFX {
       // total coverage, whatever each one's alpha said. This layer is the only
       // thing here that can hide the kart outright rather than wash it out, so
       // it is the one that has to stay thin.
+      //
+      // It is also the only layer that can give the plume *contrast*. An
+      // additive jet on a sunlit tan road is two brightish shapes on a bright
+      // background: there is nothing for the hot core to be hot against, and
+      // that — not the size of the plume — is why a boost over lit tarmac
+      // reads as pale. A dark saturated version of the tail colour sitting
+      // behind the flame is the backing every hand-painted fire has, and at
+      // this rate it is five puffs deep, not seventy.
       if (i % 4 !== 0) continue;
-      _c2.copy(halo);
+      _c2.copy(tail);
       this.smoke.spawn(_p, _v, _c2, {
-        shape: SHAPE.SMOKE, size: 0.34 + this.rng() * 0.26,
-        life: 0.26 + this.rng() * 0.20, alpha: 0.030, drag: 1.0, sizeGrow: 0.5,
+        shape: SHAPE.SMOKE, size: 0.42 + this.rng() * 0.30,
+        life: 0.26 + this.rng() * 0.20, alpha: 0.085, drag: 1.0, sizeGrow: 0.5,
         gravity: -0.5, rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 2,
         colorB: tail,
       });
@@ -878,21 +960,27 @@ export class KartFX {
       });
     }
 
-    // Thrust pulses: a ring leaving each pipe at a fixed rate reads as an
-    // engine doing work rather than a light that has been switched on.
+    // Thrust pulses: a beat at a fixed rate reads as an engine doing work
+    // rather than as a light that has been switched on.
+    //
+    // The beat used to be a screen-facing ring leaving each pipe, and at
+    // exhaust scale a screen-facing ring is a thin hoop drawn round the flame
+    // — the same hoop the impacts and the drift releases were just taken off.
+    // The beat now lands on the road instead, as a hard bright flare inside
+    // the spill: a pulse of light under the kart, which is what an engine
+    // pulsing actually does to a surface, and which nothing has to be drawn
+    // in front of the plume to say.
     st.boostPhase += dt * 18;
     if (st.boostPhase >= 1) {
       st.boostPhase -= Math.floor(st.boostPhase);
-      for (let s = 0; s < 2; s++) {
+      for (let s = 0; gy != null && s < 2; s++) {
         jet(s);
-        _v.copy(_w).multiplyScalar(sp * 0.35);
-        _c.copy(mid);
-        // Small. The ring front is crisp now, and at the old 1.5 m these read
-        // as two drawn circles the size of the rear wheels rather than as a
-        // pressure pulse leaving a pipe.
+        onRoad(_p, gy);
+        _v.copy(_w).multiplyScalar(sp * 0.30);
+        _c.copy(mid).lerp(_WHITE, 0.30);
         this.additive.spawn(_p, _v, _c, {
-          shape: SHAPE.RING, size: 0.20, sizeGrow: 3.0,
-          life: 0.13, alpha: 0.26, drag: 3, colorB: tail,
+          shape: SHAPE.GROUND, size: 1.5, sizeGrow: 5.5,
+          life: 0.14, alpha: 0.30, drag: 3, colorB: tail, rot: 0.85,
         });
       }
     }
@@ -906,19 +994,23 @@ export class KartFX {
     // their way past. The ring now starts outside the kart's own silhouette
     // and they are seeded close enough that they leave frame before growing.
     if (kart.isPlayer) {
-      const lines = emit('speedLine', 52);
+      const lines = emit('speedLine', 34);
       for (let i = 0; i < lines; i++) {
         const a = this.rng() * TAU;
-        const r = 4.6 + this.rng() * 4.0;
+        const r = 5.6 + this.rng() * 4.4;
         model.anchors.center.getWorldPosition(_p);
         _p.addScaledVector(_side, Math.cos(a) * r);
         _p.y += Math.sin(a) * r * 0.55 + 0.4;
         _p.addScaledVector(_w, 1.5 + this.rng() * 4.5);
         _v.copy(_w).multiplyScalar(-(20 + this.rng() * 18));
-        _c.copy(mid).lerp(_WHITE, 0.55);
+        // Mostly the boost's own hue. At 55% white on a sunlit tan road these
+        // were pale scratches lying across the tarmac that read as scuffs in
+        // the surface rather than as air going past — a speed line has to
+        // belong to the effect that spawned it or it is dirt on the lens.
+        _c.copy(mid).lerp(_WHITE, 0.22);
         this.additive.spawn(_p, _v, _c, {
           shape: SHAPE.STREAK, size: 2.0 + this.rng() * 1.8,
-          life: 0.10 + this.rng() * 0.07, alpha: 0.075, drag: 0.6, colorB: mid,
+          life: 0.10 + this.rng() * 0.07, alpha: 0.10, drag: 0.6, colorB: mid,
         });
       }
     }
@@ -1023,18 +1115,34 @@ export class KartFX {
       drag: 8, colorB: color,
     });
 
-    // 2. Two shock fronts at different rates. One ring is a circle; two moving
-    //    apart is a blast, and the gap between them is what carries the speed.
+    // 2. Two shock fronts at different rates, lying on the road. One ring is a
+    //    circle; two moving apart is a blast, and the gap between them is what
+    //    carries the speed.
+    //
+    //    Both used to be screen-facing annuli centred on the kart, so an
+    //    impact rendered as two concentric hairline hoops threaded round the
+    //    vehicle — aligned to nothing, occluding the tyres, and impossible to
+    //    place in the world. On the ground they say *where* as well as *what*,
+    //    and the kart in the middle of them stays in front.
+    const fg = gy == null ? null : gy;
+    _q.copy(pos); onRoad(_q, fg); if (fg == null) _q.y = pos.y;
     _c.setHex(color);
-    _v.set(0, 0.4, 0);
-    this.additive.spawn(_p, _v, _c, {
-      shape: SHAPE.RING, size: 0.55, sizeGrow: 20, life: 0.21, alpha: 0.95,
-      drag: 4, colorB: 0x1a0a0c,
+    this.additive.spawn(_q, _ZERO, _c, {
+      shape: SHAPE.GROUND, size: 1.1, sizeGrow: 23, life: 0.24, alpha: 0.72,
+      drag: 4, colorB: 0x1a0a0c, rot: 0.26,
     });
     _c2.copy(_FLASH).lerp(_c, 0.35);
-    this.additive.spawn(_p, _v, _c2, {
-      shape: SHAPE.RING, size: 0.35, sizeGrow: 11, life: 0.13, alpha: 0.80,
-      drag: 4, colorB: color,
+    this.additive.spawn(_q, _ZERO, _c2, {
+      shape: SHAPE.GROUND, size: 0.7, sizeGrow: 15, life: 0.15, alpha: 0.95,
+      drag: 4, colorB: color, rot: 0.62,
+    });
+    // A pool of the hit's own colour left burning on the tarmac under it. The
+    // fronts are gone in a quarter second; this is what is still saying "you
+    // were hit here" when the eye arrives, and it is the only part of the
+    // effect that puts light on the road instead of over it.
+    this.additive.spawn(_q, _ZERO, _c, {
+      shape: SHAPE.GROUND, size: 4.4, sizeGrow: 3.5, life: 0.44, alpha: 0.48,
+      drag: 4, colorB: 0x120608, rot: 1.0,
     });
 
     // 3. Debris. Eight pieces, not thirty: you have to be able to *track* a
@@ -1107,11 +1215,11 @@ export class KartFX {
       });
     }
     if (strength > 0.35) {
-      _v.set(0, 0.2, 0);
       _c.setRGB(0.55, 0.50, 0.42);
-      this.smoke.spawn(pos, _v, _c, {
-        shape: SHAPE.RING, size: 1.1, sizeGrow: 7, life: 0.30,
-        alpha: 0.28 * strength, drag: 5, colorB: 0x6a6259,
+      _q.copy(pos); onRoad(_q, gy);
+      this.smoke.spawn(_q, _ZERO, _c, {
+        shape: SHAPE.GROUND, size: 2.0, sizeGrow: 13, life: 0.30,
+        alpha: 0.34 * strength, drag: 5, colorB: 0x6a6259, rot: 0.10,
       });
     }
   }
@@ -1123,9 +1231,10 @@ export class KartFX {
     const gy = this._groundNear(pos);
     if (ring > 0) {
       _c.setHex(color);
-      this.additive.spawn(pos, _ZERO, _c, {
-        shape: SHAPE.RING, size: ring * 0.7, sizeGrow: ring * 6, life: 0.26,
-        alpha: 0.50, drag: 4, colorB: 0x0c0c12,
+      _q.copy(pos); onRoad(_q, gy);
+      this.additive.spawn(_q, _ZERO, _c, {
+        shape: SHAPE.GROUND, size: ring * 1.2, sizeGrow: ring * 14, life: 0.26,
+        alpha: 0.60, drag: 4, colorB: 0x0c0c12, rot: 0.22,
       });
     }
     for (let i = 0; i < count; i++) {
@@ -1137,6 +1246,81 @@ export class KartFX {
         life: life * (0.6 + this.rng() * 0.8), alpha, gravity, drag: 1.6,
         ground: gy, bounce: 0.35,
         rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 16, colorB: 0x1a0a14,
+      });
+    }
+  }
+
+  /**
+   * An item box being collected — the moment the box stops existing.
+   *
+   * This used to be `burst()`: roughly eight four-pixel star sprites and
+   * nothing else. No shatter, no flash, no front. Taking a box was therefore
+   * the one event in the game with a *worse* presentation than driving in a
+   * straight line, and a pickup a player will not change line for is a pickup
+   * that is not doing its job on the track layout either.
+   *
+   * A container coming apart reads from three things, in this order: the thing
+   * is suddenly gone (flash), pieces of it are in the air (shards with real
+   * silhouettes, tumbling, falling, bouncing on the road), and the space it
+   * occupied is briefly lit (front and spill). The shards are the expensive
+   * part and the only part still on screen half a second later, so they carry
+   * the hue: a box is a rainbow prism, and its pieces are pieces of a rainbow.
+   */
+  itemBreak(pos) {
+    const gy = this._groundNear(pos);
+    _p.copy(pos);
+
+    // 1. Flash. Three frames, small, near-white — the onset, nothing else.
+    _c.copy(_FLASH);
+    this.additive.spawn(_p, _ZERO, _c, {
+      shape: SHAPE.GLOW, size: 1.45, sizeGrow: 12, life: 0.07, alpha: 2.6,
+      drag: 8, colorB: 0xffd070,
+    });
+
+    // 2. Fronts on the road under it, so the pickup has a footprint the eye
+    //    can find even when the box itself was behind another kart.
+    _q.copy(pos); onRoad(_q, gy);
+    _c.setRGB(1.00, 0.82, 0.34);
+    this.additive.spawn(_q, _ZERO, _c, {
+      shape: SHAPE.GROUND, size: 1.6, sizeGrow: 25, life: 0.26, alpha: 0.85,
+      drag: 4, colorB: 0x2a1804, rot: 0.16,
+    });
+    this.additive.spawn(_q, _ZERO, _c, {
+      shape: SHAPE.GROUND, size: 3.8, sizeGrow: 3.0, life: 0.38, alpha: 0.44,
+      drag: 4, colorB: 0x1a1004, rot: 1.0,
+    });
+
+    // 3. Shards. Eighteen pieces of prism, each keeping its own hue right
+    //    through its life so the shower is a spectrum rather than a colour.
+    //    Opaque pool: a silhouette is the entire point and additive sprites
+    //    have none.
+    for (let i = 0; i < 18; i++) {
+      const a = (i / 18 + this.rng() * 0.12) * TAU;
+      const sp = 3.5 + this.rng() * 5.0;
+      _v.set(Math.cos(a) * sp, 3.0 + this.rng() * 5.0, Math.sin(a) * sp);
+      const h = (i * PHI + 0.1) % 1;
+      setLuma(_c.setHSL(h, 0.85, 0.62), 0.68);
+      setLuma(_c2.setHSL(h, 0.95, 0.30), 0.14);
+      this.smoke.spawn(_p, _v, _c, {
+        shape: SHAPE.SHARD, size: 0.26 + this.rng() * 0.24,
+        life: 0.70 + this.rng() * 0.50, alpha: 0.95, gravity: 19, drag: 0.4,
+        ground: gy, bounce: 0.38,
+        rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 24, colorB: _c2,
+      });
+    }
+
+    // 4. Sparkle. Tapered, so it reads as thrown outward from a centre rather
+    //    than as confetti that happened to land near the kart.
+    for (let i = 0; i < 30; i++) {
+      _v.set(this.rng() - 0.5, this.rng() * 0.85 + 0.15, this.rng() - 0.5).normalize()
+        .multiplyScalar(5 + this.rng() * 11);
+      const h = (this.rng() * 0.18 + 0.08) % 1;
+      setLuma(_c.setHSL(h, 0.90, 0.66), 0.95);
+      this.additive.spawn(_p, _v, _c, {
+        shape: SHAPE.EMBER, size: 0.30 + this.rng() * 0.30,
+        life: 0.26 + this.rng() * 0.30, alpha: 1.0, gravity: 13, drag: 1.2,
+        ground: gy, bounce: 0.40,
+        rot: this.rng() * TAU, rotVel: (this.rng() - 0.5) * 16, colorB: 0x2a1000,
       });
     }
   }
