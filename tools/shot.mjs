@@ -144,13 +144,18 @@ async function main() {
       }
     }
 
-    await page.evaluate((d) => window.__hk.seek(d), target);
-
-    // Let post-processing and particle state settle for a few real frames so
-    // the capture matches what a player would actually see in motion.
-    await page.evaluate(async () => {
-      for (let k = 0; k < 8; k++) await window.__hk.frame(1 / 60);
-    });
+    // Seek short of the target, then settle *into* it. The settle frames
+    // advance the simulation as well as the presentation, so the requested time
+    // is the time in the picture. Previously the seek landed on the target and
+    // the settle then ran 133 ms of presentation on top of it, which meant
+    // every capture reviewed the world an eighth of a second after the moment
+    // it asked for -- long enough that a 55 ms impact flash could never appear
+    // in one.
+    const SETTLE = 8, SETTLE_DT = 1 / 60;
+    await page.evaluate((d) => window.__hk.seek(d), Math.max(0, target - SETTLE * SETTLE_DT));
+    await page.evaluate(([n, d]) => window.__hk.settle(n, d), [SETTLE, SETTLE_DT]);
+    // One presented frame with the GPU awaited, so the canvas is complete.
+    await page.evaluate((d) => window.__hk.frame(d), SETTLE_DT);
 
     if (CFG.hide && hiddenNames.length) {
       // Measured *after* the seek, at the frame actually being captured.

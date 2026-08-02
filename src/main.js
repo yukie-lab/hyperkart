@@ -281,6 +281,36 @@ const harness = {
     return { time: loop.simTime, lap: race.player.lap, speed: race.player.speedKmh };
   },
 
+  /**
+   * Advance the simulation and the presentation together, the way the live
+   * loop does.
+   *
+   * The harness used to seek to a target and then present eight frames without
+   * stepping anything, so every capture this project has ever taken showed the
+   * world 133 ms after the moment it asked for. An impact flash lasting 55 ms
+   * was structurally invisible to all of them — the effect was reviewed, and
+   * repeatedly redesigned, purely on its litter. Stepping while settling costs
+   * nothing and makes the requested time the time you actually see.
+   */
+  settle(frames = 8, dt = 1 / 60) {
+    const driver = autoDriver || new AIDriver(race.player, race.track, { skill: 0.92, seed: 31337 });
+    const steps = Math.max(1, Math.round(dt / loop.fixedDt));
+    for (let f = 0; f < frames; f++) {
+      for (let k = 0; k < steps; k++) {
+        const c = driver.update(loop.fixedDt, race._ctx);
+        race.step(loop.fixedDt, {
+          steer: c.steer, accel: c.accel, brake: c.brake,
+          drift: c.drift, driftPressed: c.driftPressed,
+          item: false, itemPressed: !!c.useItem,
+        });
+        handleEvents(race.drainEvents());
+        loop.simTime += loop.fixedDt;
+      }
+      presentFrame(1, dt);
+    }
+    return loop.simTime;
+  },
+
   setCamera(mode) { chase.setMode(mode); },
   setHud(v) { hud.setVisible(v); },
   setQuality(q) { rs.setQuality(q); },
