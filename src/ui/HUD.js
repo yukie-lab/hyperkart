@@ -31,10 +31,25 @@ let UID = 0;
 
 const CSS = `
 .hk-hud {
-  /* --u is the whole type/space scale. Pure vmin looks right at 1080p but
-     goes illegible at 720p and cartoonishly large at 1440p+, so it is clamped
-     at both ends and every size below is a multiple of it. */
-  --u: clamp(6.6px, 1vmin, 12.2px);
+  /* --u is the whole type/space scale, and every size below is a multiple of
+     it. A floor only, no ceiling.
+
+     The ceiling used to be 12.2px, on the theory that pure vmin goes
+     cartoonish above 1440p. It does not — it holds angular size, which is the
+     opposite. A 4K television is not viewed closer than a 1080p one, so a HUD
+     that stops growing at ~1220px of viewport height is a HUD that shrinks:
+     the speedo measured 14.1% of frame width at 720p and 1080p, 11.9% at
+     1440p and 7.9% at 2160p, while the gutters beside it stayed at a
+     proportional 2.8vmin. That mismatch is what read as cartoonish, not the
+     scale itself. Above the floor the HUD is now one fixed design blown up,
+     identical as a fraction of the frame at every resolution.
+
+     The floor is the half that was always load-bearing: below ~660px of
+     viewport height 1vmin puts the micro-labels under 10px and the HUD goes
+     illegible, so a small window gets a proportionally larger HUD on purpose.
+     vmin rather than vh so a portrait window scales off its short side and the
+     centre column cannot outgrow the frame it sits in. */
+  --u: max(6.6px, 1vmin);
 
   --gold:#ffd45c; --gold-2:#ff9c22; --gold-3:#b45a00;
   --ice:#8fe9ff;  --ice-2:#2ba6ff;
@@ -214,7 +229,9 @@ const CSS = `
    The whole centre stack is budgeted in --u so nothing in it can collide at
    any resolution — slot 0-13.4, chip 13.9-17.1, lap banner 17.7-23.1, all
    measured from the top gutter. Crossing the line while a star is running has
-   to look composed, not like two panels fighting for the same 40 pixels. */
+   to look composed, not like two panels fighting for the same 40 pixels. The
+   countdown's lamp gantry (14.4-16.6) shares this chip's line; see the centre
+   stage below for why that needs no arbitration. */
 .hk-star { position:absolute; left:50%; top:calc(var(--st) + var(--u)*13.9); transform:translateX(-50%);
   width:calc(var(--u)*13.4); height:calc(var(--u)*3.2);
   display:none; align-items:center; justify-content:center; gap:calc(var(--u)*.55);
@@ -401,13 +418,64 @@ const CSS = `
 .hk-speed.boost .hk-arc-glow { opacity:.85; }
 .hk-needle { transform-box:view-box; transform-origin:50px 54px; }
 
-/* ---- CENTRE STAGE: countdown, banners, finish ---------------------------- */
-/* Lifted off centre: the numeral and its lamps otherwise land squarely on the
-   player's own kart, which is the one thing they must not cover. */
-.hk-center { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
-  flex-direction:column; pointer-events:none; padding-bottom:calc(var(--u)*11); }
+/* ---- CENTRE STAGE: countdown, banners, finish ----------------------------
+   .hk-center holds the countdown and nothing else; the banner and the finish
+   card below are their own absolutely-positioned elements. (No backticks in
+   this block, ever — the whole stylesheet is one template literal.)
+
+   It is hung off the top gutter in --u, like the item slot, the star chip and
+   the lap banner. It used to be a full-screen flex box centred on the viewport
+   and then lifted by a padding-bottom of 11u — a bet that half of that lift
+   would cover the distance from the centre of the frame to the top of the
+   player's own kart. It does not. Measured on the grid at 720p, 1080p,
+   1440p and 2160p, the chase camera parks the kart's silhouette from 53.2% of
+   frame height down and the driver's helmet from 59.7% — the same fractions at
+   every resolution, because that is a property of the camera, not the screen.
+   The lamp row landed at 60.1%: dead on the helmet, reading as two glowing
+   mouse ears growing out of the driver's head. And because the lift was
+   denominated in --u while the distance it had to cover is a fraction of the
+   frame, it bought *less* clearance the smaller the window got.
+
+   So the anchor is now the one thing in this HUD that cannot move, and the
+   centre column's budget from the top gutter reads end to end:
+
+     slot 0–13.4, lamp gantry 14.4–16.6, star chip 13.9–17.1,
+     lap banner 17.7–23.1, countdown numeral 18.4–48.4,
+     kart silhouette from ~50.6, helmet from ~58.7.
+
+   The numeral crosses the chip's and the banner's bands, and that is fine
+   rather than lucky: none of the three can be on screen at the same time. A
+   star cannot be running before the start, lap 1 raises no banner, and the
+   only other caller of banner() is the finish. Anyone widening one of those
+   three has to re-check this list.
+
+   Lamps above the numeral, not below it, which is also where a start gantry
+   belongs: they hang off the item slot as if bolted to it, the numeral counts
+   underneath, and neither of them is within 10u of the player's kart. */
+.hk-center { position:absolute; left:0; right:0; top:var(--st);
+  display:flex; flex-direction:column; align-items:center; pointer-events:none; }
+
+/* 14.4 = clear of the 13.4u slot plus a 1u breath. It is a margin rather than
+   a top offset because the slot is a *sibling* of this stage, not a box it can
+   flow under. */
+.hk-lamps { display:flex; gap:calc(var(--u)*1.5); margin-top:calc(var(--u)*14.4); }
+/* An unlit lamp is a dark socket with a bright rim, not a pale translucent
+   disc. It used to sit over the player's kart, where anything light read
+   instantly; up here it sits in the sky band, which on sunsetCoast is the
+   brightest thing in the frame, and a white-on-white circle is a bug. */
+.hk-lamp { width:calc(var(--u)*2.2); height:calc(var(--u)*2.2); border-radius:50%;
+  background:rgba(6,11,22,.60); border:calc(var(--u)*.26) solid rgba(255,255,255,.62);
+  box-shadow:inset 0 calc(var(--u)*.2) calc(var(--u)*.45) rgba(0,0,0,.75),
+             0 0 calc(var(--u)*.45) rgba(0,0,0,.85); }
+/* One line, one owner — the same rule the star chip already follows. The
+   gantry takes the ITEM tag's line for the length of the countdown, which is
+   the one stretch of the race where the slot is guaranteed empty and the word
+   ITEM is telling the player nothing the dashed mark inside the slot is not
+   already saying. */
+.hk-hud.counting .hk-item .hk-item-tag { opacity:0; }
+
 .hk-count { font-size:calc(var(--u)*30); font-weight:900; letter-spacing:-.06em; line-height:1;
-  position:relative;
+  position:relative; margin-top:calc(var(--u)*1.8);
   filter:drop-shadow(0 calc(var(--u)*.8) calc(var(--u)*2.2) rgba(0,0,0,.6)); }
 .hk-count::before { content:attr(data-v); position:absolute; inset:0;
   -webkit-text-stroke:calc(var(--u)*1.25) rgba(2,5,12,.88); color:transparent; }
@@ -415,10 +483,6 @@ const CSS = `
 .hk-count-ring { position:absolute; left:50%; top:50%; width:calc(var(--u)*34); height:calc(var(--u)*34);
   margin:calc(var(--u)*-17) 0 0 calc(var(--u)*-17); border-radius:50%;
   border:calc(var(--u)*.5) solid currentColor; opacity:0; }
-.hk-lamps { display:flex; gap:calc(var(--u)*1.5); margin-top:calc(var(--u)*3.4); }
-.hk-lamp { width:calc(var(--u)*2.2); height:calc(var(--u)*2.2); border-radius:50%;
-  background:rgba(255,255,255,.10); border:calc(var(--u)*.26) solid rgba(255,255,255,.32);
-  box-shadow:inset 0 calc(var(--u)*.2) calc(var(--u)*.4) rgba(0,0,0,.6); }
 .hk-lamp.on { background:radial-gradient(circle at 40% 34%,#fff,var(--lamp,#ff5030) 62%);
   border-color:rgba(255,255,255,.7);
   box-shadow:0 0 calc(var(--u)*1.6) var(--lamp,#ff5030),0 0 calc(var(--u)*4) rgba(255,80,48,.45); }
@@ -1428,15 +1492,19 @@ export class HUD {
           : { a: '#ffe9e4', b: '#ff5a44', c: '#a01000', lamp: '#ff5a44' };
     const lit = go ? 3 : 4 - n;
 
+    // Lamps first in source order as well as on screen: the gantry is bolted
+    // under the item slot and the numeral counts below it.
     this.dom.center.innerHTML = `
+      <div class="hk-lamps">${[0, 1, 2].map((i) =>
+        `<div class="hk-lamp${i < lit ? ' on' : ''}" style="--lamp:${tone.lamp}"></div>`).join('')}</div>
       <div class="hk-count" data-v="${go ? 'GO!' : n}">
         <div class="hk-count-ring" style="color:${tone.b}"></div>
         <span style="background-image:linear-gradient(178deg,${tone.a} 14%,${tone.b} 56%,${tone.c} 100%)">${go ? 'GO!' : n}</span>
-      </div>
-      <div class="hk-lamps">${[0, 1, 2].map((i) =>
-        `<div class="hk-lamp${i < lit ? ' on' : ''}" style="--lamp:${tone.lamp}"></div>`).join('')}</div>`;
+      </div>`;
+    this.el.classList.add('counting');   // hands the ITEM tag's line to the gantry
 
-    const num = this.dom.center.firstElementChild;
+    const lamps = this.dom.center.firstElementChild;
+    const num = this.dom.center.lastElementChild;
     const ring = num.firstElementChild;
     const anim = seq(num, go
       ? [{ transform: 'scale(.25)', opacity: 0, easing: EASE_BACK },
@@ -1453,8 +1521,7 @@ export class HUD {
     seq(ring, [{ opacity: .85, transform: 'scale(.35)' }, { opacity: 0, transform: 'scale(1.5)' }],
       go ? 700 : 520, { easing: 'ease-out' });
     for (let i = 0; i < lit; i++) {
-      const lamp = this.dom.center.lastElementChild.children[i];
-      if (i === lit - 1 || go) this._pop(lamp, 1.5, 420);
+      if (i === lit - 1 || go) this._pop(lamps.children[i], 1.5, 420);
     }
 
     // Deliberately no `anim.finished` cleanup: see the note on this method.
@@ -1466,6 +1533,7 @@ export class HUD {
     if (this._countAt === undefined || !this.dom.center.firstElementChild) return;
     if ((race?.time ?? 0) - this._countAt <= this._countLife) return;
     this.dom.center.innerHTML = '';
+    this.el.classList.remove('counting');
     this._countAt = undefined;
   }
 
