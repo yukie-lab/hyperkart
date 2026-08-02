@@ -102,6 +102,7 @@ async function main() {
   // rewinds. Reaching every frame the same way is the only thing that makes
   // two captures comparable, and this project's whole verification method
   // rests on that.
+  let hiddenNames = [];
   for (const target of times) {
     await page.goto(url.toString(), { waitUntil: 'load', timeout: CFG.timeout });
     await page.waitForFunction(() => window.__hk && window.__hk.ready, null, { timeout: CFG.timeout });
@@ -137,15 +138,29 @@ async function main() {
         });
         return names;
       }, pats);
+      hiddenNames = hidden;
       if (target === times[0]) {
         process.stdout.write(`hidden (${hidden.length}): ${hidden.join(', ') || 'nothing matched'}\n`);
       }
-      if (hidden.length) {
-        // A hide that matched objects but does not change the draw count did
+    await page.evaluate((d) => window.__hk.seek(d), target);
+
+    // Let post-processing and particle state settle for a few real frames so
+    // the capture matches what a player would actually see in motion.
+    await page.evaluate(async () => {
+      for (let k = 0; k < 8; k++) await window.__hk.frame(1 / 60);
+    });
+
+    if (CFG.hide && hiddenNames.length) {
+      // Measured *after* the seek, at the frame actually being captured. Counting
+      // at load time reported a false "did nothing" for anything correctly culled
+      // on the start grid -- the lighthouse beam, for one, which is out of frustum
+      // for most of a lap and contributes 0.7% of the frame when it is not.
+      // A self-check that cries wolf is worth as little as one that stays silent.
+      // A hide that matched objects but does not change the draw count did
         // nothing, and a silent no-op here produces a confident false
         // conclusion downstream. Counted by drawing straight to the canvas, not
         // through `frame()`, which would advance particle and animation state.
-        const drop = await page.evaluate(() => {
+      const drop = await page.evaluate(() => {
           const { rs, scene, camera } = window.__hk;
           const count = () => {
             rs.beginFrame();
@@ -160,21 +175,14 @@ async function main() {
           for (const o of restored) o.layers.set(31);
           return { withHide, without };
         });
-        if (target === times[0]) {
-          process.stdout.write(drop.withHide >= drop.without
-            ? `  ! WARNING: hiding those objects did not reduce draw calls (${drop.without} -> ${drop.withHide}). Treat this A/B as invalid.\n`
-            : `  hide removes ${drop.without - drop.withHide} draw calls\n`);
-        }
+      {
+        process.stdout.write(drop.withHide >= drop.without
+          ? `  ! WARNING: hiding those objects did not reduce draw calls (${drop.without} -> ${drop.withHide}). Treat this A/B as invalid.\n`
+          : `  hide removes ${drop.without - drop.withHide} draw calls\n`);
       }
     }
+    }
 
-    await page.evaluate((d) => window.__hk.seek(d), target);
-
-    // Let post-processing and particle state settle for a few real frames so
-    // the capture matches what a player would actually see in motion.
-    await page.evaluate(async () => {
-      for (let k = 0; k < 8; k++) await window.__hk.frame(1 / 60);
-    });
 
     const stats = await page.evaluate(() => window.__hk.stats());
     const errs = await page.evaluate(() => window.__hkErrors.slice());

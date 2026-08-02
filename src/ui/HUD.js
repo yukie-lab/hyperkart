@@ -91,24 +91,50 @@ const CSS = `
 .hk-cap { font-size:calc(var(--u)*1.55); font-weight:800; letter-spacing:.30em;
   line-height:1; text-transform:uppercase; opacity:.78; text-shadow:var(--halo); }
 
-/* ---- CORNER WASHES -------------------------------------------------------
-   Four soft ellipses that give every corner cluster a contrast floor over a
+/* ---- CLUSTER SCRIMS ------------------------------------------------------
+   One soft dark ellipse per text cluster, giving it a contrast floor over a
    white sky or a bleached sand straight. They are their own elements rather
    than backgrounds on the clusters because a gradient painted inside a text
    box always reveals that box's edge, and a faint grey rectangle behind the
-   lap counter looks worse than no scrim at all. Each is deliberately sized
-   past the viewport, so the only hard edge is the screen edge. */
-.hk-wash { position:absolute; pointer-events:none; }
-.w-tl { left:0; top:0; width:calc(var(--u)*36); height:calc(var(--u)*27);
-  background:radial-gradient(ellipse 100% 100% at 0% 0%, rgba(3,7,16,.72), rgba(3,7,16,.36) 42%, rgba(3,7,16,0) 100%); }
-.w-tr { right:0; top:0; width:calc(var(--u)*33); height:calc(var(--u)*42);
-  background:radial-gradient(ellipse 100% 100% at 100% 0%, rgba(3,7,16,.66), rgba(3,7,16,.32) 44%, rgba(3,7,16,0) 100%); }
-.w-bl { left:0; bottom:0; width:calc(var(--u)*38); height:calc(var(--u)*40);
-  background:radial-gradient(ellipse 100% 100% at 0% 100%, rgba(3,7,16,.74), rgba(3,7,16,.38) 42%, rgba(3,7,16,0) 100%); }
-.w-br { right:0; bottom:0; width:calc(var(--u)*38); height:calc(var(--u)*35);
-  background:radial-gradient(ellipse 100% 100% at 100% 100%, rgba(3,7,16,.70), rgba(3,7,16,.34) 42%, rgba(3,7,16,0) 100%); }
-.w-tc { left:50%; top:0; width:calc(var(--u)*30); height:calc(var(--u)*24); transform:translateX(-50%);
-  background:radial-gradient(ellipse 60% 100% at 50% 0%, rgba(3,7,16,.52), rgba(3,7,16,0) 100%); }
+   lap counter looks worse than no scrim at all.
+
+   ONE peak and ONE falloff, shared by all five. They used to be five unrelated
+   gradients — peaks from .52 to .74, two different mid stops, one with no mid
+   stop at all, and footprints picked by eye. Toggling the scrim layer alone
+   against a fixed sunsetCoast capture, the five corners of the same frame came
+   out 47% (top centre) to 67% (bottom left) darker than the render beneath
+   them, all of it stacked on a render vignette already at 0.42: the ocean and
+   the beach were being taken to a third of their brightness to carry a coin
+   count and a position numeral. Now the same measurement reads 32.9-33.9% at
+   all five.
+
+   The peak is .36. Legibility here has never rested on the scrim alone: every
+   glyph also carries --halo (an outline plus a cast shadow) and the position
+   numeral a .62u dark stroke, and the scrim only has to stop a white-on-white
+   frame. .36 does that and still leaves the sea reading as sea. The stops are
+   100 / 84 / 48 / 0 percent of the peak, steepening outward so the far edge
+   fades out instead of banding.
+
+   Each footprint is the cluster's measured bounding box plus an 8u falloff
+   margin — sized to the text it actually serves, not to the corner it sits
+   in. Measured with getBoundingClientRect at 1080p, in --u from the screen
+   edge: lap 12.3 x 12.0, item slot + ITEM tag 6.7 either side of centre and
+   18.4 down, minimap + gap rail + splits 24.3 x 38.4 (lap 3, three split
+   rows), coins + position 15.7 x 20.2, speedo 26.6 x 26.2. In --u rather than
+   px so the scrim tracks the type it is protecting at every resolution.
+
+   The ellipse radii are per-instance because the top-centre one is anchored
+   at 50% and would otherwise need twice its box to fall off; the stop list —
+   the falloff itself — is written once. */
+.hk-scrim { position:absolute; pointer-events:none; --srx:100%; --sry:100%;
+  background:radial-gradient(ellipse var(--srx) var(--sry) at var(--sx) var(--sy),
+    rgba(3,7,16,.36), rgba(3,7,16,.30) 46%, rgba(3,7,16,.17) 74%, rgba(3,7,16,0) 100%); }
+.s-tl { --sx:0%;   --sy:0%;   left:0;  top:0;    width:calc(var(--u)*20); height:calc(var(--u)*20); }
+.s-tr { --sx:100%; --sy:0%;   right:0; top:0;    width:calc(var(--u)*32); height:calc(var(--u)*46); }
+.s-bl { --sx:0%;   --sy:100%; left:0;  bottom:0; width:calc(var(--u)*24); height:calc(var(--u)*28); }
+.s-br { --sx:100%; --sy:100%; right:0; bottom:0; width:calc(var(--u)*35); height:calc(var(--u)*34); }
+.s-tc { --sx:50%;  --sy:0%;   --srx:50%; left:50%; top:0; transform:translateX(-50%);
+  width:calc(var(--u)*30); height:calc(var(--u)*26); }
 
 /* ---- LAP (top-left) ------------------------------------------------------
    Lap and position are the two values a player reads mid-corner, so they get
@@ -845,9 +871,9 @@ export class HUD {
     const u = this.uid;
 
     return `
-      <div class="hk-wash w-tl"></div><div class="hk-wash w-tc"></div>
-      <div class="hk-wash w-tr"></div><div class="hk-wash w-bl"></div>
-      <div class="hk-wash w-br"></div>
+      <div class="hk-scrim s-tl"></div><div class="hk-scrim s-tc"></div>
+      <div class="hk-scrim s-tr"></div><div class="hk-scrim s-bl"></div>
+      <div class="hk-scrim s-br"></div>
 
       <div class="hk-lap">
         <div class="hk-cap">Lap</div>

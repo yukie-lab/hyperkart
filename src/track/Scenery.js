@@ -1315,25 +1315,79 @@ export class Scenery {
     this._blob({ s: best.s, lateral: best.lateral + 7.5, u: 0.0, v: 0.5 }, 4.4, { opacity: 0.6 });
 
     // Rotating beam. Additive, unlit, no depth write — it is light, not a solid.
-    const beamGeo = new THREE.ConeGeometry(2.6, 150, 10, 1, true);
-    beamGeo.translate(0, -75, 0);
+    //
+    // It has to out-shout the sky it is drawn against, and at `opacity 0.16` it
+    // did not. Peak contribution was 0.14 of scene-linear radiance; the coast
+    // grade scales that by a 0.52 exposure and then ACES compresses what is left
+    // against a sunset sky already near screen white, so the beam arrived as one
+    // 1/255 step. Hiding it changed exactly zero pixels at t = 2, 20, 34, 52, 65
+    // and 70 — a lap and a half — while still costing two draw calls and a
+    // callback on every frame of every race on this circuit.
+    // `toneMapped: false` was never any protection either: the composer
+    // renders into a HalfFloat target, and three disables in-shader tone mapping
+    // for every off-screen target regardless, so the grade this material opts
+    // out of is not the one that was eating it. PostFX's OutputPass is.
+    //
+    // So the beam is authored in HDR instead: its core carries more radiance
+    // than the sky behind it and clears the coast bloom threshold (1.05 after
+    // exposure), and that bloom is where its soft edge comes from. A hollow cone
+    // has no soft edge of its own — every ray through it crosses exactly two
+    // walls, so the silhouette is uniform right up to a hard rim — which is
+    // presumably why the original stayed dim enough not to show it.
+    const THROW = 150;
+    const beamGeo = new THREE.ConeGeometry(4.4, THROW, 14, 1, true);
+    beamGeo.translate(0, -THROW * 0.5, 0);
     beamGeo.rotateX(Math.PI * 0.5);
     paintGeometry(beamGeo, (v, col) => {
-      const t = clamp01(1 - Math.abs(v.z) / 150);
-      col.setRGB(t * 0.9, t * 0.78, t * 0.5);
+      // Radiance is gone before the geometry is, so the throw ends in air rather
+      // than on a flat rim hanging over the sea.
+      const t = clamp01(1 - Math.abs(v.z) / THROW);
+      const f = t * (0.34 + 0.66 * t);
+      col.setRGB(f * 3.9, f * 3.0, f * 1.6);
     });
     const beamMat = this._mat(new THREE.MeshBasicMaterial({
-      vertexColors: true, transparent: true, opacity: 0.16, blending: THREE.AdditiveBlending,
+      vertexColors: true, transparent: true, opacity: 1, blending: THREE.AdditiveBlending,
       depthWrite: false, side: THREE.DoubleSide, toneMapped: false, fog: false,
     }), { env: false });
+    // Where the second draw call came from: three renders a transparent
+    // double-sided material back faces first, then front faces. Additive
+    // blending is order-independent, so that split buys this beam nothing and
+    // costs it 100%.
+    beamMat.forceSinglePass = true;
     const beam = new THREE.Mesh(beamGeo, beamMat);
     beam.name = 'lighthouseBeam';
-    beam.frustumCulled = false;
+    // Frustum culling stays on. `frustumCulled = false` submitted 150 m of cone
+    // on every frame, including the large majority of a lap spent with the
+    // headland behind the camera: measured, the lighthouse enters the frustum
+    // around t = 36 s and leaves it around t = 52 s, and is outside it at five
+    // of the six times above. Nothing here needs the opt-out — the cone is baked
+    // to run from the origin down its own -Z, so the bounding sphere sits half a
+    // throw ahead of the lamp and the mesh's own rotation carries it round with
+    // the sweep, which makes the cull exact as well as free.
+    beamGeo.computeBoundingSphere();
     beam.renderOrder = 3;
     const lamp = new THREE.Vector3(0, H + 3.4, 0).applyMatrix4(m);
     beam.position.copy(lamp);
     this.group.add(beam);
-    this.animated.push((dt, time) => { beam.rotation.y = -time * 0.55; });
+
+    // Sweep, and pulse as the sweep comes round to the camera.
+    //
+    // Scattering in air is strongly forward-biased: a real beam flares when it
+    // points at you and is nearly gone broadside. That is also what keeps a cone
+    // of constant brightness from reading as a solid object, and it is what
+    // makes the lighthouse a clock — the flare tells a driver where on the lap
+    // they are as well as where the headland is. One dot product per frame, in
+    // the callback that was already turning the mesh, and it rides `opacity`
+    // because additive blending scales by source alpha.
+    const axis = new THREE.Vector3();
+    const toCam = new THREE.Vector3();
+    this.animated.push((dt, time, cameraPos) => {
+      beam.rotation.y = -time * 0.55;
+      if (!cameraPos) return;
+      axis.set(-Math.sin(beam.rotation.y), 0, -Math.cos(beam.rotation.y));
+      const face = Math.max(0, axis.dot(toCam.copy(cameraPos).sub(lamp).normalize()));
+      beamMat.opacity = 0.42 + 0.58 * face * face;
+    });
   }
 
   // =========================================================================
