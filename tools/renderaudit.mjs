@@ -16,10 +16,13 @@
  * against the pixels it moves. Anything costing draws and moving nothing is a
  * candidate for deletion or for being made visible on purpose.
  *
- * Limitation worth knowing: only top-level named objects are audited, so
- * something dead *inside* a named group is folded into its parent's total. The
- * lighthouse beam was found that way, by name, with `shot.mjs --hide`. Use that
- * when you suspect a specific child.
+ * By default only top-level named objects are audited, so something dead
+ * *inside* a named group is folded into its parent's total — 18 of the scene's
+ * 141 named objects. `--deep` audits all of them; expect it to flag around 29,
+ * nearly all merely occluded at every sampled time, so read it as a list of
+ * things to check by hand rather than as verdicts. The lighthouse beam was
+ * found by name with `shot.mjs --hide`, which is still the sharpest tool when
+ * you already suspect a specific child.
  *
  * Both renders come from one page state with no `frame()` between them, so
  * particles and animation cannot drift underneath the comparison.
@@ -28,6 +31,7 @@
  *   node tools/renderaudit.mjs
  *   node tools/renderaudit.mjs --track canyonRush --t 34
  *   node tools/renderaudit.mjs --track sunsetCoast --t 20 --min 0.02
+ *   node tools/renderaudit.mjs --deep
  */
 import { chromium } from 'playwright';
 
@@ -56,12 +60,18 @@ page.on('pageerror', (e) => console.log(`  ! ${e.message || e}`));
 await page.goto(`${url}?track=${track}&auto=1&shot=1&quality=high`, { waitUntil: 'load', timeout: 90000 });
 await page.waitForFunction(() => window.__hk?.ready, null, { timeout: 90000 });
 await page.evaluate(() => { window.__hk.stopForCapture(); window.__hk.setHud(false); });
+await page.evaluate((d) => { window.__hkDeepAudit = d; }, argv.includes('--deep'));
 const best = new Map();
 let totalCalls = 0;
 
 for (const t of times) {
   await page.evaluate((s) => window.__hk.seek(s), t - (await page.evaluate(() => window.__hk.loop.simTime)));
-  await page.evaluate(async () => { for (let k = 0; k < 8; k++) await window.__hk.frame(1 / 60); });
+  // Settle the way shot.mjs does. Eight bare `frame()` calls advance the
+  // presentation without stepping the simulation, which is the exact pattern
+  // a609531 was written to remove: it put the audit an eighth of a second of
+  // particles and post damping away from the sim state it claims to describe.
+  await page.evaluate(() => window.__hk.settle(8, 1 / 60));
+  await page.evaluate(() => window.__hk.frame(1 / 60));
 
   const frame = await page.evaluate(() => {
   const { rs, scene, camera } = window.__hk;
@@ -90,7 +100,13 @@ for (const t of times) {
   const named = new Map();
   scene.traverse((o) => {
     if (!o.name) return;
-    for (let p = o.parent; p; p = p.parent) if (p.name) return;   // child of a named group
+    // Children of a named group are folded into the parent unless --deep. The
+    // default keeps the report readable and its verdicts meaningful; the deep
+    // pass reaches the other ~123 named objects, at the cost of flagging
+    // anything merely occluded at all four sampled times.
+    if (!window.__hkDeepAudit) {
+      for (let p = o.parent; p; p = p.parent) if (p.name) return;
+    }
     named.set(o.name, o);
   });
 

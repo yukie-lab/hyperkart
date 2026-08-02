@@ -33,7 +33,6 @@ const CinematicShader = {
     uGain: { value: new THREE.Color(1.02, 1.00, 0.97) },
     uBoostFlash: { value: 0 },     // white/blue rim pulse when boosting
     uHitFlash: { value: 0 },
-    uResolution: { value: new THREE.Vector2(1920, 1080) },
   },
   vertexShader: /* glsl */`
     varying vec2 vUv;
@@ -46,7 +45,7 @@ const CinematicShader = {
     uniform sampler2D tDiffuse;
     uniform float uTime, uSpeed, uAberration, uVignette, uGrain;
     uniform float uSaturation, uContrast, uBoostFlash, uHitFlash;
-    uniform vec2 uCenter, uResolution;
+    uniform vec2 uCenter;
     uniform vec3 uLift, uGain;
     varying vec2 vUv;
 
@@ -320,7 +319,6 @@ export class PostFX {
   setSize(w, h) {
     this.composer.setSize(w, h);
     this.bloom.setSize(w, h);
-    this.u.uResolution.value.set(w, h);
   }
 
   setPixelRatio(r) { this.composer.setPixelRatio(r); }
