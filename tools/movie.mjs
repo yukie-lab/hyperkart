@@ -53,7 +53,8 @@ const CFG = {
   out: arg('out', null),
   png: flag('png'),
   jpegQuality: parseInt(arg('jpeg-quality', '95'), 10),
-  crf: arg('crf', '17'),
+  crf: arg('crf', '20'),
+  preset: arg('preset', 'medium'),
   keepFrames: flag('keep-frames'),
   timeout: parseInt(arg('timeout', '120000'), 10),
 };
@@ -182,7 +183,7 @@ async function main() {
       '-y', '-loglevel', 'error',
       '-framerate', String(CFG.fps),
       '-i', join(FRAMES, `f%06d.${EXT}`),
-      '-c:v', 'libx264', '-preset', 'slow', '-crf', CFG.crf,
+      '-c:v', 'libx264', '-preset', CFG.preset, '-crf', CFG.crf,
       '-pix_fmt', 'yuv420p',
       '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2',
       '-movflags', '+faststart',
@@ -198,7 +199,7 @@ async function main() {
     console.log(`\n  mp4 にするには:`);
     console.log(`    brew install ffmpeg`);
     console.log(`    ffmpeg -framerate ${CFG.fps} -i ${join(FRAMES, `f%06d.${EXT}`)} \\`);
-    console.log(`      -c:v libx264 -preset slow -crf ${CFG.crf} -pix_fmt yuv420p ${OUT}`);
+    console.log(`      -c:v libx264 -preset ${CFG.preset} -crf ${CFG.crf} -pix_fmt yuv420p ${OUT}`);
   }
   console.log('');
 }
