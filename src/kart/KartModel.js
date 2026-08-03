@@ -84,12 +84,28 @@ const ARM_LEN = 0.46;
  * always keep their contact plane at body y=0, because that is the convention
  * the ground query and the shadow blob are written against.
  */
+/**
+ * Three chassis, one per stat class: `dart` for light, `gt` for medium,
+ * `bruiser` for heavy. Every character names one, so the class a kart drives
+ * like is the class it looks like.
+ *
+ * They used to span 1.04 to 1.42 in width — a light kart 18.7% narrower than a
+ * heavy one overall, once wheels and wing were included. Three builds that
+ * exist and cannot be told apart are worth about as much as one, and at race
+ * distance twelve karts did read as one shape in twelve colours. Pushed to
+ * 0.94/1.22/1.58 across width, track, wheelbase, tyre and engine mass, which is
+ * a 45% span: a dart is now narrow-tracked and small-wheeled, a bruiser squats
+ * wide on tall tyres, and the difference survives being sixty metres away.
+ *
+ * Nothing here touches physics. Collision uses `PHYS.kartRadius`, which is one
+ * number for the whole field, so these are silhouette decisions only.
+ */
 const BUILDS = {
   dart: {
-    width: 1.04, deck: 0.30, len: 1.74, stance: -0.015,
-    podW: 0.24, podH: 0.26, podZ: 0.08, podLen: 0.92,
-    track: 0.70, rearTrack: 0.76, wbF: 0.90, wbR: -0.74,
-    tyre: 0.88, engine: [0.70, 0.34, 0.54], noseTaper: 0.58, seatH: 0.58,
+    width: 0.94, deck: 0.28, len: 1.70, stance: -0.030,
+    podW: 0.21, podH: 0.24, podZ: 0.09, podLen: 0.90,
+    track: 0.64, rearTrack: 0.70, wbF: 0.92, wbR: -0.72,
+    tyre: 0.80, engine: [0.62, 0.30, 0.50], noseTaper: 0.52, seatH: 0.56,
   },
   gt: {
     width: 1.22, deck: 0.34, len: 1.82, stance: 0.0,
@@ -98,10 +114,10 @@ const BUILDS = {
     tyre: 1.0, engine: [0.86, 0.44, 0.62], noseTaper: 0.66, seatH: 0.62,
   },
   bruiser: {
-    width: 1.42, deck: 0.40, len: 1.90, stance: 0.045,
-    podW: 0.38, podH: 0.36, podZ: 0.04, podLen: 1.00,
-    track: 0.86, rearTrack: 0.94, wbF: 0.88, wbR: -0.80,
-    tyre: 1.14, engine: [1.02, 0.54, 0.70], noseTaper: 0.80, seatH: 0.70,
+    width: 1.58, deck: 0.44, len: 1.96, stance: 0.070,
+    podW: 0.44, podH: 0.40, podZ: 0.03, podLen: 1.02,
+    track: 0.96, rearTrack: 1.06, wbF: 0.88, wbR: -0.82,
+    tyre: 1.24, engine: [1.14, 0.60, 0.76], noseTaper: 0.90, seatH: 0.74,
   },
 };
 
