@@ -1,4 +1,46 @@
 import { clamp01 } from '../core/MathX.js';
+import { KEYMAP } from '../core/Input.js';
+
+/** `KeyW` -> `W`, `ArrowUp` -> `↑`, and so on. */
+function keyLabel(code) {
+  const named = {
+    ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→',
+    ShiftLeft: 'Shift', ShiftRight: 'Shift', ControlLeft: 'Ctrl', ControlRight: 'Ctrl',
+    Space: 'Space', Escape: 'Esc',
+  };
+  if (named[code]) return named[code];
+  return code.startsWith('Key') ? code.slice(3) : code;
+}
+
+/** First two bindings per action; more than two on a card is noise. */
+const kb = (action) => [...new Set((KEYMAP[action] || []).map(keyLabel))].slice(0, 2);
+
+/**
+ * The controls card, built from `KEYMAP` itself so it cannot drift from what
+ * the game actually listens for.
+ *
+ * `pause` is deliberately absent: it exists in the keymap and nothing consumes
+ * it, and offering a player a key that does nothing is worse than saying
+ * nothing. The last row is not a control at all — it is the rule that had a
+ * player convinced the boxes were broken.
+ */
+const HELP_ROWS = [
+  { keys: kb('accel'), what: 'Accelerate' },
+  { keys: kb('brake'), what: 'Brake, then reverse' },
+  { keys: [...kb('left'), ...kb('right')], what: 'Steer' },
+  {
+    keys: kb('drift'),
+    what: 'Hop, and hold to drift',
+    note: 'Hold through a corner to charge a mini-turbo — blue, orange, purple.',
+  },
+  { keys: kb('item'), what: 'Use the item you are holding' },
+  { keys: kb('look'), what: 'Look behind' },
+  {
+    keys: ['?'],
+    what: 'Drive through a ? box to get an item',
+    note: 'One at a time: a box will not open while your slot is full.',
+  },
+];
 
 /**
  * HUD.
@@ -312,6 +354,57 @@ const CSS = `
     linear-gradient(170deg, rgba(10,18,34,.74), rgba(3,6,14,.84));
   backdrop-filter:blur(calc(var(--u)*.7)) saturate(1.1); overflow:hidden; }
 .hk-map canvas { width:100%; height:100%; display:block; }
+
+/* ---- CONTROLS (the ? beside the minimap, and its panel) -------------------
+   The button borrows the item slot's and minimap's chamfered octagon so it
+   reads as part of the same instrument cluster rather than as a web widget
+   dropped on top of the game. */
+.hk-help { position:absolute; top:var(--st); right:calc(var(--sr) + var(--u)*23.2);
+  width:calc(var(--u)*5.6); height:calc(var(--u)*5.6); --chamfer:calc(var(--u)*1.1);
+  cursor:pointer; pointer-events:auto; border:0; padding:0; color:#eaf2ff;
+  font:800 calc(var(--u)*3)/1 var(--hkf); letter-spacing:0;
+  /* Dark well, light rim — the minimap's construction, not its inverse. Over a
+     bright sky a pale button on a pale background disappears, and this one has
+     to be findable on all three circuits without being loud on any. */
+  background:linear-gradient(170deg,rgba(10,18,34,.80),rgba(3,6,14,.86));
+  box-shadow:0 0 0 calc(var(--u)*.26) rgba(255,255,255,.40) inset;
+  backdrop-filter:blur(calc(var(--u)*.7)) saturate(1.1);
+  clip-path:polygon(var(--chamfer) 0,calc(100% - var(--chamfer)) 0,100% var(--chamfer),
+    100% calc(100% - var(--chamfer)),calc(100% - var(--chamfer)) 100%,var(--chamfer) 100%,
+    0 calc(100% - var(--chamfer)),0 var(--chamfer));
+  filter:drop-shadow(0 calc(var(--u)*.6) calc(var(--u)*1.6) rgba(0,0,0,.5));
+  transition:background .16s, transform .16s; }
+.hk-help:hover, .hk-help:focus-visible { color:#ffd75e;
+  box-shadow:0 0 0 calc(var(--u)*.26) rgba(255,215,94,.85) inset;
+  transform:scale(1.06); outline:0; }
+.hk-help-sheet { position:absolute; inset:0; display:none; pointer-events:auto;
+  align-items:center; justify-content:center;
+  background:radial-gradient(ellipse 70% 70% at 50% 45%, rgba(6,12,24,.62), rgba(3,6,14,.82)); }
+.hk-hud.help-open .hk-help-sheet { display:flex; }
+.hk-help-card { --chamfer:calc(var(--u)*2.4); width:min(calc(var(--u)*74), 86vw);
+  padding:calc(var(--u)*3.4) calc(var(--u)*3.8) calc(var(--u)*3);
+  background:linear-gradient(168deg,rgba(24,38,64,.96),rgba(8,14,28,.97));
+  box-shadow:0 0 0 calc(var(--u)*.22) rgba(255,255,255,.22) inset;
+  clip-path:polygon(var(--chamfer) 0,calc(100% - var(--chamfer)) 0,100% var(--chamfer),
+    100% calc(100% - var(--chamfer)),calc(100% - var(--chamfer)) 100%,var(--chamfer) 100%,
+    0 calc(100% - var(--chamfer)),0 var(--chamfer)); }
+.hk-help-h { font:800 calc(var(--u)*3.1)/1 var(--hkf); letter-spacing:.10em;
+  color:#fff; margin-bottom:calc(var(--u)*2.4); }
+.hk-help-h span { color:#ffd75e; }
+.hk-help-row { display:flex; align-items:center; gap:calc(var(--u)*1.4);
+  padding:calc(var(--u)*.72) 0; border-top:1px solid rgba(255,255,255,.10); }
+.hk-help-row:first-of-type { border-top:0; }
+.hk-help-keys { flex:0 0 calc(var(--u)*20); display:flex; gap:calc(var(--u)*.5); flex-wrap:wrap; }
+.hk-help-keys kbd { font:700 calc(var(--u)*1.75)/1 var(--hkf); color:#0a1526;
+  background:linear-gradient(180deg,#f2f6ff,#c3d0e4);
+  border-radius:calc(var(--u)*.4); padding:calc(var(--u)*.62) calc(var(--u)*.9);
+  box-shadow:0 calc(var(--u)*.22) 0 rgba(0,0,0,.35); }
+.hk-help-what { font:600 calc(var(--u)*1.95)/1.25 var(--hkf); color:#dbe6f7; }
+.hk-help-what i { display:block; font-style:normal; font-weight:500;
+  font-size:calc(var(--u)*1.6); color:#8fa4c2; margin-top:calc(var(--u)*.24); }
+.hk-help-foot { margin-top:calc(var(--u)*2.2); font:500 calc(var(--u)*1.6)/1.4 var(--hkf);
+  color:#8fa4c2; }
+.hk-help-foot b { color:#dbe6f7; font-weight:700; }
 
 /* ---- RIGHT RAIL: gaps, then splits ---------------------------------------
    Both hang off the minimap and both are variable-height, so they share one
@@ -800,7 +893,23 @@ export class HUD {
       times: q('[data-times]'), map: q('[data-map]'),
       star: q('[data-star]'), starFill: q('[data-starfill]'),
       gaps: q('[data-gaps]'),
+      help: q('[data-help]'), helpSheet: q('[data-helpsheet]'),
     };
+
+    // Controls card. Toggled by the button, by `H`, and dismissed by clicking
+    // anywhere off the card — the three things a player will try. It does not
+    // pause: nothing in this build pauses, and a card that silently stopped the
+    // race would be a bigger surprise than one that does not.
+    this._helpOpen = false;
+    this._onHelpKey = (e) => {
+      if (e.code === 'KeyH' || (e.key === '?' && !e.repeat)) { this.toggleHelp(); }
+      else if (e.code === 'Escape' && this._helpOpen) this.toggleHelp(false);
+    };
+    this.dom.help?.addEventListener('click', () => this.toggleHelp());
+    this.dom.helpSheet?.addEventListener('click', (e) => {
+      if (e.target === this.dom.helpSheet) this.toggleHelp(false);
+    });
+    window.addEventListener('keydown', this._onHelpKey);
 
     // Gap rows are addressed by index (0 = ahead, 1 = behind) so the hot path
     // never runs a selector.
@@ -921,6 +1030,23 @@ export class HUD {
       <div class="hk-map">
         <div class="hk-map-frame"></div>
         <div class="hk-map-well"><canvas data-map width="256" height="256"></canvas></div>
+      </div>
+
+      <button class="hk-help" data-help type="button" aria-label="Controls">?</button>
+      <div class="hk-help-sheet" data-helpsheet>
+        <div class="hk-help-card">
+          <div class="hk-help-h">CONTROLS<span>.</span></div>
+          ${HELP_ROWS.map((r) => `
+          <div class="hk-help-row">
+            <div class="hk-help-keys">${r.keys.map((k) => `<kbd>${k}</kbd>`).join('')}</div>
+            <div class="hk-help-what">${r.what}${r.note ? `<i>${r.note}</i>` : ''}</div>
+          </div>`).join('')}
+          <div class="hk-help-foot">
+            A gamepad works too: left stick steers, right trigger accelerates,
+            shoulder drifts.<br>
+            <b>?</b> or <b>H</b> closes this. The race keeps running.
+          </div>
+        </div>
       </div>
 
       <div class="hk-rail">
@@ -1645,8 +1771,16 @@ export class HUD {
 
   setVisible(v) { this.el.style.display = v ? '' : 'none'; }
 
+  /** Show or hide the controls card. Omit `v` to flip it. */
+  toggleHelp(v) {
+    this._helpOpen = v === undefined ? !this._helpOpen : !!v;
+    this.el.classList.toggle('help-open', this._helpOpen);
+    if (!this._helpOpen) this.dom.help?.blur();
+  }
+
   dispose() {
     window.removeEventListener('resize', this._onResize);
+    window.removeEventListener('keydown', this._onHelpKey);
     this.el.remove();
   }
 }

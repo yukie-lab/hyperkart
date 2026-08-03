@@ -6,7 +6,16 @@ import { clamp, damp } from './MathX.js';
  * digital keys feel like an analog stick without the physics model caring.
  */
 
-const KEYMAP = {
+/**
+ * Exported so the controls panel can be generated from the real bindings
+ * rather than transcribed beside them. A help screen that is typed out by hand
+ * is a help screen that goes stale the first time a key moves.
+ *
+ * `pause` is listed here and consumed by nothing — grep it. The panel therefore
+ * does not show it, because a control list that offers a key which does nothing
+ * is worse than one that omits it.
+ */
+export const KEYMAP = {
   accel: ['KeyW', 'ArrowUp', 'KeyZ'],
   brake: ['KeyS', 'ArrowDown', 'KeyX'],
   left: ['KeyA', 'ArrowLeft'],
