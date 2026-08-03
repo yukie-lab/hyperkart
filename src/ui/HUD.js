@@ -363,6 +363,9 @@ const CSS = `
   width:calc(var(--u)*5.6); height:calc(var(--u)*5.6); --chamfer:calc(var(--u)*1.1);
   cursor:pointer; pointer-events:auto; border:0; padding:0; color:#eaf2ff;
   font:800 calc(var(--u)*3)/1 var(--hkf); letter-spacing:0;
+  /* Above the backdrop, or the one control the player just used to open the
+     card cannot be used to close it — the click lands on the sheet behind. */
+  z-index:6;
   /* Dark well, light rim — the minimap's construction, not its inverse. Over a
      bright sky a pale button on a pale background disappears, and this one has
      to be findable on all three circuits without being loud on any. */
@@ -380,7 +383,7 @@ const CSS = `
 .hk-help:hover, .hk-help:focus-visible { color:#ffd75e;
   box-shadow:0 0 0 calc(var(--u)*.26) rgba(255,215,94,.85) inset;
   transform:scale(1.06); outline:0; }
-.hk-help-sheet { position:absolute; inset:0; display:none; pointer-events:auto;
+.hk-help-sheet { position:absolute; inset:0; display:none; pointer-events:auto; z-index:5;
   align-items:center; justify-content:center;
   background:radial-gradient(ellipse 70% 70% at 50% 45%, rgba(6,12,24,.62), rgba(3,6,14,.82)); }
 .hk-hud.help-open .hk-help-sheet { display:flex; }
@@ -413,6 +416,25 @@ const CSS = `
 .hk-help-start { display:none; }
 .hk-hud.help-start .hk-help-start { display:inline; }
 .hk-hud.help-start .hk-help-race { display:none; }
+/* Every way out of the card, made visible. The first version said "close this
+   to start the race" and then did not say how, with no close control anywhere
+   on it — which is the question it immediately produced. */
+.hk-help-card { position:relative; }
+.hk-help-x { position:absolute; top:calc(var(--u)*1.6); right:calc(var(--u)*1.8);
+  width:calc(var(--u)*3.6); height:calc(var(--u)*3.6); cursor:pointer;
+  border:0; padding:0; border-radius:50%; color:#c6d4e8;
+  font:700 calc(var(--u)*2.4)/1 var(--hkf);
+  background:rgba(255,255,255,.10); transition:background .15s, color .15s; }
+.hk-help-x:hover, .hk-help-x:focus-visible { background:rgba(255,215,94,.22); color:#ffd75e; outline:0; }
+.hk-help-go { display:none; width:100%; margin-top:calc(var(--u)*2.2); cursor:pointer;
+  border:0; padding:calc(var(--u)*1.5) 0; color:#10203a;
+  font:800 calc(var(--u)*2.3)/1 var(--hkf); letter-spacing:.12em;
+  background:linear-gradient(180deg,#ffe694,#ffc93e);
+  box-shadow:0 calc(var(--u)*.35) 0 rgba(0,0,0,.35);
+  transition:filter .15s, transform .1s; }
+.hk-hud.help-start .hk-help-go { display:block; }
+.hk-help-go:hover, .hk-help-go:focus-visible { filter:brightness(1.08); outline:0; }
+.hk-help-go:active { transform:translateY(calc(var(--u)*.2)); }
 
 /* ---- RIGHT RAIL: gaps, then splits ---------------------------------------
    Both hang off the minimap and both are variable-height, so they share one
@@ -902,6 +924,7 @@ export class HUD {
       star: q('[data-star]'), starFill: q('[data-starfill]'),
       gaps: q('[data-gaps]'),
       help: q('[data-help]'), helpSheet: q('[data-helpsheet]'),
+      helpX: q('[data-helpx]'), helpGo: q('[data-helpgo]'),
     };
 
     // Controls card. Toggled by the button, by `H`, and dismissed by clicking
@@ -914,6 +937,8 @@ export class HUD {
       else if (e.code === 'Escape' && this._helpOpen) this.toggleHelp(false);
     };
     this.dom.help?.addEventListener('click', () => this.toggleHelp());
+    this.dom.helpX?.addEventListener('click', () => this.toggleHelp(false));
+    this.dom.helpGo?.addEventListener('click', () => this.toggleHelp(false));
     this.dom.helpSheet?.addEventListener('click', (e) => {
       if (e.target === this.dom.helpSheet) this.toggleHelp(false);
     });
@@ -1043,6 +1068,7 @@ export class HUD {
       <button class="hk-help" data-help type="button" aria-label="Controls">?</button>
       <div class="hk-help-sheet" data-helpsheet>
         <div class="hk-help-card">
+          <button class="hk-help-x" data-helpx type="button" aria-label="Close">×</button>
           <div class="hk-help-h">CONTROLS<span>.</span></div>
           ${HELP_ROWS.map((r) => `
           <div class="hk-help-row">
@@ -1052,9 +1078,11 @@ export class HUD {
           <div class="hk-help-foot">
             A gamepad works too: left stick steers, right trigger accelerates,
             shoulder drifts.<br>
-            <span class="hk-help-start"><b>Close this to start the race.</b> Nothing moves until you do.</span>
-            <span class="hk-help-race"><b>?</b> or <b>H</b> closes this. The race keeps running.</span>
+            <span class="hk-help-start">Nothing moves until you close this.</span>
+            <span class="hk-help-race">The race keeps running while this is open.</span>
+            <br>Close with <b>×</b>, <b>Esc</b>, <b>H</b>, or a click outside the card.
           </div>
+          <button class="hk-help-go" data-helpgo type="button">START RACE</button>
         </div>
       </div>
 
