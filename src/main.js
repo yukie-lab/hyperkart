@@ -92,6 +92,28 @@ const kickAudio = () => {
 window.addEventListener('pointerdown', kickAudio);
 window.addEventListener('keydown', kickAudio);
 
+/**
+ * Circuit switching and the two offers at the flag, both by navigation.
+ *
+ * `TRACK_ORDER` has existed since the first commit, imported here and used by
+ * nothing — the intent was always to move between circuits and it was never
+ * wired. It is wired now.
+ *
+ * A reload rather than an in-place rebuild: the track mesh, scenery, sky probe,
+ * lighting, item boxes and twelve karts are each constructed once at module
+ * init, and tearing all of that down and standing it back up is a large change
+ * with a large surface for leaks. Re-entering through the front door reuses
+ * every line of it exactly as it is already known to work. Existing parameters
+ * are preserved so `?quality=ultra&cam=bumper` survives a circuit change.
+ */
+const goToTrack = (id) => {
+  const p = new URLSearchParams(location.search);
+  p.set('track', id);
+  location.search = p.toString();
+};
+hud.onSelectTrack = goToTrack;
+hud.onRetry = () => goToTrack(trackId);
+
 hud.toggleMute(muted);
 hud.onMuteToggle = (m) => {
   muted = m;
@@ -267,7 +289,13 @@ function handleEvents(events) {
         }
         break;
       case 'finish':
-        if (e.kart === race.player) hud.toast(`FINISH — ${e.place}${ordinalSuffix(e.place)}`, '#ffd75e');
+        if (e.kart === race.player) {
+          hud.toast(`FINISH — ${e.place}${ordinalSuffix(e.place)}`, '#ffd75e');
+          // The banner says what happened; the panel offers what to do next.
+          // Before this, finishing a race left the player with an orbiting
+          // camera and no way to start another except reloading by hand.
+          hud.showFinish(e.place);
+        }
         break;
       case 'itemDeclined':
         // Drove through a live box with a full slot. The rule is right; its

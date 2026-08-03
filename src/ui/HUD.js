@@ -1,5 +1,6 @@
 import { clamp01 } from '../core/MathX.js';
 import { KEYMAP } from '../core/Input.js';
+import { TRACKS, TRACK_ORDER } from '../track/Tracks.js';
 
 /** `KeyW` -> `W`, `ArrowUp` -> `↑`, and so on. */
 function keyLabel(code) {
@@ -121,6 +122,19 @@ const CSS = `
 
   position:absolute; inset:0; color:#fff; user-select:none; -webkit-user-select:none;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* The same stack again as a variable, for the font shorthands below.
+     The font shorthand *requires* a family: omit it, or name a variable that
+     does not resolve, and the browser discards the whole declaration, size
+     included. Twelve rules across the controls card and the finish panel
+     named an undefined --hkf and were silently inert. The panels still looked
+     plausible, because colour, padding and background are separate
+     declarations and went on working -- which is why it survived three
+     commits.
+
+     Note for anyone editing this block: it is a template literal, so a
+     backtick anywhere in here, including inside a comment, ends the string
+     and breaks the module. That has now happened twice. */
+  --hkf: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   /* Tabular figures everywhere: without them the speed readout jitters
      horizontally every time a 1 replaces a 0. */
   font-variant-numeric: tabular-nums lining-nums;
@@ -455,6 +469,43 @@ const CSS = `
 .hk-hud.help-start .hk-help-go { display:block; }
 .hk-help-go:hover, .hk-help-go:focus-visible { filter:brightness(1.08); outline:0; }
 .hk-help-go:active { transform:translateY(calc(var(--u)*.2)); }
+
+/* ---- CIRCUIT PICKER + FINISH --------------------------------------------
+   Switching circuits reloads the page with a new track. Rebuilding the
+   world in place would mean tearing down the track mesh, scenery, sky probe,
+   lighting, items and twelve karts and putting them back — every one of which
+   is currently built once at module init. A navigation reuses all of that
+   exactly as it is already known to work. */
+.hk-help-circuits { margin-top:calc(var(--u)*2.2); display:flex; gap:calc(var(--u)*.9); flex-wrap:wrap; }
+.hk-help-sub { flex:0 0 100%; font:700 calc(var(--u)*1.5)/1 var(--hkf);
+  letter-spacing:.16em; color:#7d90ad; margin-bottom:calc(var(--u)*.5); }
+.hk-help-track { flex:1 1 calc(33% - var(--u)); cursor:pointer; border:0;
+  padding:calc(var(--u)*1.05) calc(var(--u)*.6); color:#dbe6f7;
+  font:700 calc(var(--u)*1.75)/1.2 var(--hkf);
+  background:rgba(255,255,255,.08);
+  box-shadow:0 0 0 1px rgba(255,255,255,.12) inset;
+  transition:background .15s, color .15s, box-shadow .15s; }
+.hk-help-track i { display:block; font-style:normal; font-weight:500;
+  font-size:calc(var(--u)*1.4); color:#8fa4c2; margin-top:calc(var(--u)*.28); }
+.hk-help-track:hover, .hk-help-track:focus-visible { background:rgba(255,215,94,.16); color:#ffe694; outline:0; }
+.hk-help-track.here { background:rgba(255,215,94,.22); color:#ffe694;
+  box-shadow:0 0 0 calc(var(--u)*.2) rgba(255,215,94,.7) inset; cursor:default; }
+.hk-help-track.here i { color:#d8bd6e; }
+
+.hk-finish-sheet { position:absolute; inset:0; display:none; pointer-events:auto; z-index:7;
+  align-items:center; justify-content:center;
+  background:radial-gradient(ellipse 70% 70% at 50% 45%, rgba(6,12,24,.66), rgba(3,6,14,.86)); }
+.hk-hud.finished .hk-finish-sheet { display:flex; }
+.hk-finish-place { display:flex; align-items:baseline; justify-content:center;
+  gap:calc(var(--u)*.4); margin:calc(var(--u)*1.2) 0 calc(var(--u)*.4); }
+.hk-finish-place b { font:800 calc(var(--u)*9)/1 var(--hkf); color:#ffd75e;
+  text-shadow:0 calc(var(--u)*.35) 0 rgba(0,0,0,.45); }
+.hk-finish-place i { font:800 calc(var(--u)*3.2)/1 var(--hkf); font-style:normal; color:#ffd75e; }
+.hk-finish-track { text-align:center; font:600 calc(var(--u)*1.9)/1 var(--hkf);
+  color:#8fa4c2; margin-bottom:calc(var(--u)*2.4); }
+.hk-finish-acts { display:flex; gap:calc(var(--u)*1.2); }
+.hk-finish-btn { display:block; margin-top:0; flex:1 1 50%; }
+.hk-finish-btn.alt { background:linear-gradient(180deg,#b9d7ff,#6ea8f0); }
 
 /* ---- RIGHT RAIL: gaps, then splits ---------------------------------------
    Both hang off the minimap and both are variable-height, so they share one
@@ -946,10 +997,26 @@ export class HUD {
       help: q('[data-help]'), helpSheet: q('[data-helpsheet]'),
       helpX: q('[data-helpx]'), helpGo: q('[data-helpgo]'),
       mute: q('[data-mute]'),
+      finishSheet: q('[data-finishsheet]'), finishNum: q('[data-finishnum]'),
+      finishOrd: q('[data-finishord]'), finishTrack: q('[data-finishtrack]'),
     };
 
     // Sound toggle. `onMuteToggle` is main's hook; the HUD owns only the glyph.
     this.dom.mute?.addEventListener('click', () => this.toggleMute());
+
+    // Circuit picker and the two things offered at the flag. The HUD decides
+    // nothing here — it names an intent and main performs it.
+    for (const b of this.el.querySelectorAll('[data-track]')) {
+      b.addEventListener('click', () => {
+        const id = b.getAttribute('data-track');
+        if (id !== this._trackId) this.onSelectTrack?.(id);
+      });
+    }
+    q('[data-retry]')?.addEventListener('click', () => this.onRetry?.());
+    q('[data-nexttrack]')?.addEventListener('click', () => {
+      const i = TRACK_ORDER.indexOf(this._trackId);
+      this.onSelectTrack?.(TRACK_ORDER[(i + 1) % TRACK_ORDER.length]);
+    });
 
     // Controls card. Toggled by the button, by `H`, and dismissed by clicking
     // anywhere off the card — the three things a player will try. It does not
@@ -1102,6 +1169,18 @@ export class HUD {
         </svg>
       </button>
       <button class="hk-help" data-help type="button" aria-label="Controls">?</button>
+      <div class="hk-finish-sheet" data-finishsheet>
+        <div class="hk-help-card">
+          <div class="hk-help-h">FINISH<span>.</span></div>
+          <div class="hk-finish-place"><b data-finishnum>1</b><i data-finishord>st</i></div>
+          <div class="hk-finish-track" data-finishtrack></div>
+          <div class="hk-finish-acts">
+            <button class="hk-help-go hk-finish-btn" data-retry type="button">RETRY</button>
+            <button class="hk-help-go hk-finish-btn alt" data-nexttrack type="button">NEXT CIRCUIT</button>
+          </div>
+        </div>
+      </div>
+
       <div class="hk-help-sheet" data-helpsheet>
         <div class="hk-help-card">
           <button class="hk-help-x" data-helpx type="button" aria-label="Close">×</button>
@@ -1111,6 +1190,13 @@ export class HUD {
             <div class="hk-help-keys">${r.keys.map((k) => `<kbd>${k}</kbd>`).join('')}</div>
             <div class="hk-help-what">${r.what}${r.note ? `<i>${r.note}</i>` : ''}</div>
           </div>`).join('')}
+          <div class="hk-help-circuits">
+            <div class="hk-help-sub">CIRCUIT</div>
+            ${TRACK_ORDER.map((id) => `
+            <button class="hk-help-track" data-track="${id}" type="button">
+              ${TRACKS[id].name}<i>${TRACKS[id].laps} laps</i>
+            </button>`).join('')}
+          </div>
           <div class="hk-help-foot">
             A gamepad works too: left stick steers, right trigger accelerates,
             shoulder drifts.<br>
@@ -1185,8 +1271,26 @@ export class HUD {
     this.mapCtx.setTransform(px / 256, 0, 0, px / 256, 0, 0);
   }
 
+  /** The flag. `place` is 1-based. */
+  showFinish(place) {
+    if (this.dom.finishNum) this.dom.finishNum.textContent = place;
+    if (this.dom.finishOrd) this.dom.finishOrd.textContent = ordinal(place);
+    if (this.dom.finishTrack) {
+      this.dom.finishTrack.textContent = TRACKS[this._trackId]?.name ?? '';
+    }
+    this.el.classList.add('finished');
+  }
+
   setTrack(track) {
     this.track = track;
+    // Marks the circuit picker, names the circuit at the flag, and tells
+    // NEXT CIRCUIT where it is in TRACK_ORDER. `Track` copies `name` and
+    // `theme` off its definition but not `id`, so the id comes from `def`.
+    const id = track.def?.id ?? track.id;
+    this._trackId = id;
+    for (const b of this.el.querySelectorAll('[data-track]')) {
+      b.classList.toggle('here', b.getAttribute('data-track') === id);
+    }
     this.dom.laps.textContent = track.laps;
     this._c.laps = track.laps;
 
