@@ -579,9 +579,18 @@ export class Scenery {
     const fenceGeo = mergeParts(fenceParts);
     const fenceMat = this._mat(propMaterial({ roughness: 0.5, metalness: 0.35, envMapIntensity: 0.8, side: THREE.DoubleSide }));
 
+    // More pockets, closer together, and deeper into the bank.
+    //
+    // The crowd was never thin in *count* — sunsetCoast carries 1,778 figures.
+    // It was thin on *screen*: measured by hiding the crowd layer and diffing,
+    // the whole population contributed 1,255 pixels at t=0, 0.087% of the
+    // frame. Nearly all of it is seated in four grandstands that the camera
+    // sees end-on or not at all, and the ~264 people actually beside the track
+    // were 22 clumps a minimum of 34 m apart. These pockets are the only crowd
+    // a driver ever passes, so this is where the population belongs.
     const sites = scatterAlong(this.rng, this.terrain, {
-      count, band: [NEAR_D, NEAR_D + 7], cycles: 13, threshold: 0.15,
-      cluster: [1, 1], minGap: 34,
+      count, band: [NEAR_D, NEAR_D + 9], cycles: 13, threshold: 0.15,
+      cluster: [1, 1], minGap: 21,
       accept: (it) => it.pos.y > this.track.waterLevel + 2.5,
     });
 
@@ -595,9 +604,12 @@ export class Scenery {
       fenceItems.push({ s: site.s, m });
       this._blob(site, 7.5, { opacity: 0.5 });
 
-      const heads = 6 + Math.floor(rng() * 14);
+      // Two to three times as many, and standing further back as well as along
+      // the fence: a single row reads as a queue, a body with depth reads as a
+      // crowd. Width stays inside the 11.5 m of fence in front of them.
+      const heads = 15 + Math.floor(rng() * 22);
       for (let i = 0; i < heads; i++) {
-        pos.set((rng() - 0.5) * 11.5, 0, 0.5 + rng() * 3.4);
+        pos.set((rng() - 0.5) * 11.5, 0, 0.5 + rng() * 6.2);
         const gy = this.terrain.heightAt(site.s, site.lateral + (rng() - 0.5) * 6);
         pos.applyMatrix4(m);
         pos.y = gy;
@@ -866,7 +878,7 @@ export class Scenery {
     this._lighthouse();
     this._hoardings(COAST_SPONSORS);
     this._grandstands([0.0, 0.235, 0.50, 0.735]);
-    this._spectatorPockets(this._n(22), [0xe2483c, 0xffcf3d, 0x7fd4ff, 0xffffff, 0x2b8a63]);
+    this._spectatorPockets(this._n(40), [0xe2483c, 0xffcf3d, 0x7fd4ff, 0xffffff, 0x2b8a63]);
     this._verge(0xd23c33);
     this._gantry([0.0, 0.42], COAST_SPONSORS);
     this._birds(this._n(30), 0xf2e6d8, 330, this.track.maxY + 60);
@@ -1404,7 +1416,7 @@ export class Scenery {
     this._rockArch([0.30, 0.72]);
     this._hoardings(CANYON_SPONSORS);
     this._grandstands([0.0, 0.26, 0.545, 0.80]);
-    this._spectatorPockets(this._n(22), [0xc9541f, 0xf0a63c, 0xffffff, 0x2f3d52, 0xffe3a8]);
+    this._spectatorPockets(this._n(40), [0xc9541f, 0xf0a63c, 0xffffff, 0x2f3d52, 0xffe3a8]);
     this._verge(0xdb8a2a);
     this._gantry([0.0, 0.47], CANYON_SPONSORS);
     this._birds(this._n(20), 0x3a2e26, 300, this.track.maxY + 78);
@@ -2196,13 +2208,16 @@ vHkFade = smoothstep( 110.0, 260.0, - mvPosition.z );
     const L = this.track.length;
     const items = [];
     const p = new THREE.Vector3();
-    const count = this._n(20);
+    // More platforms, and each of them fuller. This circuit has no grandstands
+    // and no trackside bank, so these decks are its entire crowd — 20 of them
+    // at 8-17 heads was 267 people for a whole lap, against 1,778 on the coast.
+    const count = this._n(32);
     for (let i = 0; i < count; i++) {
       // Irregular arc positions with a minimum separation, so the platforms
       // arrive in twos and threes rather than as a necklace.
       const s = mod((i / count) * L + gauss(this.rng) * 14, L);
       const side = this.rng() < 0.5 ? -1 : 1;
-      const d = lerp(16, 40, this.rng());
+      const d = lerp(12, 38, this.rng());
       this.track.placeOnRoad(s, side * (this.track.halfWidthAt(s) + d), p);
       p.y += lerp(-8, 5, this.rng());
       const m = poseMatrix(p.clone(), { yaw: this.rng() * TAU, scale: lerp(0.85, 1.35, this.rng()) }, new THREE.Matrix4());
@@ -2210,7 +2225,7 @@ vHkFade = smoothstep( 110.0, 260.0, - mvPosition.z );
 
       const rng = makeRng(2300 + i);
       const q = new THREE.Vector3();
-      const heads = 8 + Math.floor(rng() * 10);
+      const heads = 15 + Math.floor(rng() * 15);
       for (let k = 0; k < heads; k++) {
         const th = rng() * TAU, rr = rng() * 5.6;
         // The deck's top face is at local y = 0. Standing them at 0.1 put the
