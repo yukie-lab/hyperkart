@@ -144,7 +144,17 @@ http://localhost:5178/?track=canyonRush&mute=1&quality=ultra
 
 ```bash
 npm install
-npm run dev      # http://localhost:5178
+npm run dev            # http://localhost:5178  開発用
+npm run build          # dist/ 静的サーバに置く用
+npm run build:single   # dist/hyperkart.html  1ファイル、ダブルクリックで開く
 ```
+
+**`index.html` を直接ブラウザで開いても動かない。** `<script type="module">` は `file://` から読み込めないというブラウザ側の規則による（プロジェクトの不具合ではない）。サーバ無しで動かしたい場合は `build:single` を使う。
+
+| やりたいこと | コマンド | 結果 |
+|---|---|---|
+| 開発する | `npm run dev` | vite、ホットリロード |
+| どこかに置く | `npm run build` | `dist/` を静的ホスティングへ。相対パスなのでサブディレクトリ可 |
+| 人に渡す | `npm run build:single` | `dist/hyperkart.html` 1枚。USB でもメール添付でも動く |
 
 技術詳細と開発回顧は `docs/TECHNICAL.md`。

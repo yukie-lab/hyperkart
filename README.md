@@ -12,6 +12,18 @@ npm run dev        # http://localhost:5178
 
 開いたら操作カードが出る。読み終えて **START RACE** を押すとレースが始まる。
 
+### 配る / サーバ無しで動かす
+
+```bash
+npm run build:single     # → dist/hyperkart.html
+```
+
+**1ファイル 1.10 MB、外部リクエスト 0。ダブルクリックで開く。**
+
+> `index.html` を直接開いても動かない。`<script type="module">` は `file://` から読めない（ブラウザの CORS 規則で、null オリジンのページは自分の隣のファイルすら取得できない）。
+> `npm run build` の `dist/` は**任意の静的サーバ**で動くが、ダブルクリックでは開けない。
+> `build:single` はバンドルを IIFE で作ってクラシックスクリプトとして HTML に畳み込むので、その制約から外れる。
+
 ---
 
 ## これは何か
