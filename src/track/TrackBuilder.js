@@ -1076,8 +1076,25 @@ float gGravel = smoothstep( uGravel.x, uGravel.x + 0.7, gGravD )
 // that tonal shift is world- and road-space, so it is the part of the band that
 // survives to any distance — the stones themselves cannot and do not.
 float gGravStone = mix( gGrainM.b, gGrainF.b, gDetW * 0.5 );
-vec3 gGravTint = mix( vec3( 1.0 ), vec3( 1.16, 1.13, 1.10 ), gGravStone );
-diffuseColor.rgb = mix( diffuseColor.rgb, diffuseColor.rgb * gGravTint * 0.95, gGravel );
+// Darker than the ground beyond it, and washed toward grey.
+//
+// This band is the only thing telling a driver how far out the ground is still
+// theirs, and it was barely telling them. Measured on canyonRush by masking
+// the band with an A/B of this very term and sampling 12 px either side of its
+// outer edge: the band sat 9.2 luma below the ground beyond it, which is 1.55x
+// that ground's own variation. A boundary only half again as strong as the
+// noise around it is why the run-off read as the desert having swallowed the
+// circuit.
+//
+// The first attempt at this brightened the band and made it *worse* — 5.7, or
+// 0.96x variation — because the band was already the darker of the two and
+// lifting it closed the gap. Measure the sign before choosing it.
+//
+// B falls least, so the tint desaturates as it darkens: sorted stone is greyer
+// than the fines it came out of, and darkening along the sand's own hue would
+// only have made a shadowed patch of the same desert.
+vec3 gGravTint = mix( vec3( 0.90, 0.91, 0.95 ), vec3( 1.10, 1.12, 1.18 ), gGravStone );
+diffuseColor.rgb = mix( diffuseColor.rgb, diffuseColor.rgb * gGravTint * 0.84, gGravel );
 
 // Albedo modulation from both taps. R is half the multiplier and the map was
 // normalised so its mean is exactly 1.0, which is what lets this ride on 40% of
