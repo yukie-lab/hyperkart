@@ -91,10 +91,27 @@ let dipImpulse = 0;
 let hitFlash = 0;
 
 // --- Loop ------------------------------------------------------------------
+/**
+ * Whether the simulation may advance.
+ *
+ * The countdown used to start on the first frame after load, which meant the
+ * controls card could be opened but never read: three seconds and the lights
+ * were out. The card is now shown once at boot with the grid held, and closing
+ * it is what starts the race — which is also the user gesture the browser
+ * requires before an AudioContext may run, so the first sound arrives exactly
+ * when the first movement does.
+ *
+ * The harness and the attract mode are armed from the start: `shot=1` drives
+ * the clock itself and must not wait for a click that will never come, and
+ * `auto=1` has no one to read the card.
+ */
+let armed = shotMode || autopilot;
+
 const loop = new Loop({
   hz: 120,
   step: (dt) => {
     input.update(dt);
+    if (!armed) { input.endFrame(); return; }
 
     let ctrl;
     if (autoDriver) {
@@ -250,6 +267,10 @@ function ordinalSuffix(n) {
 // That, plus the adaptive-resolution controller reacting to real frame time,
 // is why two runs of identical code differed on most of their pixels and why
 // no small visual regression could be measured.
+if (!armed) {
+  hud.onHelpToggle = (open) => { if (!open) armed = true; };
+  hud.openHelpAsStart();
+}
 if (!shotMode) loop.start();
 
 // --- Harness ---------------------------------------------------------------

@@ -368,7 +368,10 @@ const CSS = `
      to be findable on all three circuits without being loud on any. */
   background:linear-gradient(170deg,rgba(10,18,34,.80),rgba(3,6,14,.86));
   box-shadow:0 0 0 calc(var(--u)*.26) rgba(255,255,255,.40) inset;
-  backdrop-filter:blur(calc(var(--u)*.7)) saturate(1.1);
+  /* No backdrop-filter here. The well is opaque enough not to need one, and a
+     backdrop filter has to sample a backdrop that may not be composited yet on
+     the first frame after a load — which made rainbowSkyway's t=20 capture
+     differ on the first run of a batch and agree on every run after it. */
   clip-path:polygon(var(--chamfer) 0,calc(100% - var(--chamfer)) 0,100% var(--chamfer),
     100% calc(100% - var(--chamfer)),calc(100% - var(--chamfer)) 100%,var(--chamfer) 100%,
     0 calc(100% - var(--chamfer)),0 var(--chamfer));
@@ -405,6 +408,11 @@ const CSS = `
 .hk-help-foot { margin-top:calc(var(--u)*2.2); font:500 calc(var(--u)*1.6)/1.4 var(--hkf);
   color:#8fa4c2; }
 .hk-help-foot b { color:#dbe6f7; font-weight:700; }
+/* The card is shown once before the lights, holding the countdown, and on
+   demand during the race. Same card, and it must not claim the wrong one. */
+.hk-help-start { display:none; }
+.hk-hud.help-start .hk-help-start { display:inline; }
+.hk-hud.help-start .hk-help-race { display:none; }
 
 /* ---- RIGHT RAIL: gaps, then splits ---------------------------------------
    Both hang off the minimap and both are variable-height, so they share one
@@ -1044,7 +1052,8 @@ export class HUD {
           <div class="hk-help-foot">
             A gamepad works too: left stick steers, right trigger accelerates,
             shoulder drifts.<br>
-            <b>?</b> or <b>H</b> closes this. The race keeps running.
+            <span class="hk-help-start"><b>Close this to start the race.</b> Nothing moves until you do.</span>
+            <span class="hk-help-race"><b>?</b> or <b>H</b> closes this. The race keeps running.</span>
           </div>
         </div>
       </div>
@@ -1771,11 +1780,27 @@ export class HUD {
 
   setVisible(v) { this.el.style.display = v ? '' : 'none'; }
 
-  /** Show or hide the controls card. Omit `v` to flip it. */
+  /**
+   * Show or hide the controls card. Omit `v` to flip it.
+   *
+   * `onHelpToggle` is how the pre-race showing releases the grid: main holds
+   * the simulation until the card is dismissed, so the card is also the click
+   * the browser wants before it will let an AudioContext run.
+   */
   toggleHelp(v) {
     this._helpOpen = v === undefined ? !this._helpOpen : !!v;
     this.el.classList.toggle('help-open', this._helpOpen);
-    if (!this._helpOpen) this.dom.help?.blur();
+    if (!this._helpOpen) {
+      this.dom.help?.blur();
+      this.el.classList.remove('help-start');
+    }
+    this.onHelpToggle?.(this._helpOpen);
+  }
+
+  /** Mark the next showing as the one that holds the countdown. */
+  openHelpAsStart() {
+    this.el.classList.add('help-start');
+    this.toggleHelp(true);
   }
 
   dispose() {
