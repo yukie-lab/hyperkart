@@ -35,7 +35,18 @@ const shotMode = opt('shot', '0') === '1';
  * console first; a corner of text they can photograph asks nothing. Off unless
  * requested, so no capture and no ordinary session ever sees it.
  */
-const diagMode = opt('diag', '0') === '1';
+let diagMode = opt('diag', '0') === '1';
+
+// ...and `G` at any moment, without a reload.
+//
+// The URL switch alone was useless for the thing it was built for: adding a
+// parameter reloads the page, which restarts the race, so it could never be
+// turned on *while* a fault was on screen. Reported immediately, and correctly.
+window.addEventListener('keydown', (e) => {
+  if (e.code !== 'KeyG' || e.repeat) return;
+  diagMode = !diagMode;
+  if (!diagMode && _diagEl) { _diagEl.remove(); _diagEl = null; }
+});
 
 const container = document.getElementById('app');
 const uiRoot = document.getElementById('ui');
