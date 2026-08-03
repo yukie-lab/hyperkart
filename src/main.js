@@ -155,7 +155,9 @@ function presentFrame(alpha, dt) {
 
   sky.follow(camera.position);
   sky.update(dt, loop.simTime);
-  lighting.update(dt, p.visualPos, _fwd.set(Math.sin(p.yaw), 0, Math.cos(p.yaw)));
+  // `p.ground` goes through so an emissive road can bounce its own colour back
+  // up onto the karts; see Lighting.update.
+  lighting.update(dt, p.visualPos, _fwd.set(Math.sin(p.yaw), 0, Math.cos(p.yaw)), p.ground);
 
   race.fx.setPixelScale(rs.height * rs.currentPixelRatio, camera.fov);
 

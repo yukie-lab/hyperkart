@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { skyPresetFor, linColor } from './SkyPresets.js';
+import { clamp01 } from '../core/MathX.js';
 
 /**
  * Scene lighting.
@@ -62,6 +63,19 @@ export class Lighting {
     this.fill = new THREE.DirectionalLight(0xffffff, 0.35);
     scene.add(this.fill);
 
+    // Light thrown back up by an emissive road.
+    //
+    // A hemisphere light's ground half only reaches surfaces whose normals
+    // point down, and almost nothing on a kart does — driving its `groundColor`
+    // from the road moved the underside by 4%. A road at emissiveIntensity 1.35
+    // directly beneath the kart is a large area source, and the honest cheap
+    // stand-in for one is a light aimed straight up. Off on circuits whose road
+    // does not emit.
+    this.bounce = new THREE.DirectionalLight(0xffffff, 0);
+    this.bounceTarget = new THREE.Object3D();
+    this.bounce.target = this.bounceTarget;
+    scene.add(this.bounce, this.bounceTarget);
+
     this.sunDirection = new THREE.Vector3(0, 1, 0);
     this._focus = new THREE.Vector3();
     this._snap = new THREE.Vector3();
@@ -77,6 +91,15 @@ export class Lighting {
 
     this.hemi.color.setHex(theme.ambientColor);
     this.hemi.groundColor.setHex(theme.groundColor);
+    // On a road that emits its own light, the theme's `groundColor` is a lie.
+    // Rainbow Skyway declares 0x0a0620 — near-black — while running a road at
+    // emissiveIntensity 1.35, so the brightest surface in the game bounced
+    // nothing. Karts measured a mean luma of 45.2 there against 126.4 on the
+    // coast, with the underside at 28.6 under a top half of 57.8: darkest on
+    // the brightest circuit. `update` drives the bounce from the hue actually
+    // beneath the kart instead.
+    this._roadBounce = theme.roadSurface === 'rainbow';
+    this.bounce.intensity = this._roadBounce ? (sunIntensity ?? 1) * 0.55 : 0;
     // This is the *ground bounce*, and it is not a rounding error.
     //
     // The environment probe is generated from the sky dome alone, so it
@@ -114,9 +137,28 @@ export class Lighting {
    * The focus point is snapped to shadow-texel increments; without that, the
    * shadow edges crawl and shimmer as the camera moves.
    */
-  update(dt, focusPos, forwardDir) {
+  update(dt, focusPos, forwardDir, ground) {
     this._focus.copy(focusPos);
     if (forwardDir) this._focus.addScaledVector(forwardDir, SHADOW_FORWARD);
+
+    // Light coming back up off an emissive road.
+    //
+    // One hemisphere light cannot give each kart its own bounce, so it takes
+    // the colour under the *player*, who owns the middle of the frame and whose
+    // rivals are usually within a stripe or two. The road's ramp is seven
+    // bands of `setHSL(hue, 0.92, 0.56)` across its width; this follows the
+    // same mapping continuously, because a bounce integrates over an area and
+    // has no business stepping at a stripe edge the way the texture does.
+    if (this._roadBounce && ground && ground.halfWidth > 0) {
+      const u = clamp01((ground.lateral + ground.halfWidth) / (2 * ground.halfWidth));
+      this.hemi.groundColor.setHSL((u + 0.02) % 1, 0.62, 0.42);
+      this.bounce.color.setHSL((u + 0.02) % 1, 0.55, 0.60);
+      // Straight up, from just under the road, at the kart.
+      this.bounceTarget.position.copy(focusPos);
+      this.bounce.position.set(focusPos.x, focusPos.y - 30, focusPos.z);
+      this.bounceTarget.updateMatrixWorld();
+      this.bounce.updateMatrixWorld();
+    }
 
     const texelWorld = (SHADOW_EXTENT * 2) / this.sun.shadow.mapSize.x;
     this._snap.set(
@@ -140,7 +182,7 @@ export class Lighting {
   }
 
   dispose() {
-    this.scene.remove(this.sun, this.hemi, this.fill, this.sunTarget);
+    this.scene.remove(this.sun, this.hemi, this.fill, this.sunTarget, this.bounce, this.bounceTarget);
     this.sun.dispose?.();
   }
 }
