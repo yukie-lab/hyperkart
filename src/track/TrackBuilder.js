@@ -21,6 +21,7 @@ const TERRAIN_REACH = 260;    // how far the surrounding land extends
 // centre and every quad around it is degenerate; past 1.0 the surface passes
 // through the centre, the winding inverts, the triangles are back-face culled
 // and the run-off simply stops in mid-air. This is the whole of that bug.
+const _terrCentre = new THREE.Vector3();
 const FOLD_SAFETY = 0.86;
 // Metres of clearance the innermost column keeps from that centre regardless.
 const FOLD_CLEAR = 4;
@@ -2025,10 +2026,29 @@ roughnessFactor = clamp( roughnessFactor, 0.05, 1.0 );`);
         const side = q === 0 ? -1 : 1;
         this._point(s, side * (half + wallOffset), edge);
         const edgeY = edge.y;
+        // The sheet leaves the barrier at the barrier's own height, and loses
+        // the camber over the next twenty-five metres.
+        //
+        // It used to hold `edgeY` all the way out. On the *inside* of a banked
+        // corner the barrier line stands well above the road — canyonRush banks
+        // 20.6 degrees, which puts it 4.81 m up — so the terrain set off from
+        // there and ran outward at that height while the road curved away and
+        // descended beneath it. From the driving seat that is a slab of sand
+        // lying over the circuit with the kart travelling underneath it, which
+        // is exactly how it was reported, after it had also been reported as
+        // sand on the course, the course buried, and the road disappearing.
+        //
+        // The blend has to start at `edgeY` or the sheet parts company with the
+        // shoulder it is supposed to meet. `TerrainSampler` does the same
+        // arithmetic; the two height fields have to agree or the queries stop
+        // describing what is drawn.
+        this._point(s, 0, _terrCentre);
+        const centreY = _terrCentre.y;
         for (let k = 0; k <= cols; k++) {
           const d = k === 0 ? -inset[q][i] : Math.pow(k / cols, 1.7) * reach[q][i];
           p.copy(edge).addScaledVector(outward, side * d);
-          p.y = groundY(d, p.x, p.z, edgeY);
+          const ref = edgeY + (centreY - edgeY) * smoothstep(clamp01((d - 0.5) / 24.5));
+          p.y = groundY(d, p.x, p.z, ref);
           // The left block is stored outermost-first so that both blocks wind
           // the same way round — otherwise the left half renders back-facing.
           const j = side < 0 ? cols - k : m + k;
