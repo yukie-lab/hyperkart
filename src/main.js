@@ -27,6 +27,15 @@ const quality = QUALITY_PRESETS[opt('quality', 'high')] ? opt('quality', 'high')
 const fieldSize = Math.max(2, Math.min(12, parseInt(opt('field', '12'), 10) || 12));
 const autopilot = opt('auto', '0') === '1';
 const shotMode = opt('shot', '0') === '1';
+/**
+ * `?diag=1` — the numbers, on screen.
+ *
+ * A visual bug that only one person can reproduce is a bug reported through a
+ * keyhole. Asking for them from the browser console asks someone to learn the
+ * console first; a corner of text they can photograph asks nothing. Off unless
+ * requested, so no capture and no ordinary session ever sees it.
+ */
+const diagMode = opt('diag', '0') === '1';
 
 const container = document.getElementById('app');
 const uiRoot = document.getElementById('ui');
@@ -241,6 +250,8 @@ function presentFrame(alpha, dt) {
   shakeImpulse = 0;
   dipImpulse = 0;
 
+  if (diagMode) writeDiag(p);
+
   sky.follow(camera.position);
   sky.update(dt, loop.simTime);
   // `p.ground` goes through so an emissive road can bounce its own colour back
@@ -276,6 +287,38 @@ function presentFrame(alpha, dt) {
 /** Metres the camera keeps between itself and whatever it is over. */
 const CAM_CLEARANCE = 0.9;
 const _camGround = {};
+/**
+ * The `?diag=1` readout. Everything needed to place the camera and the kart in
+ * the world at the moment of a screenshot, in a corner someone can photograph.
+ */
+let _diagEl = null;
+const _diagG = {};
+function writeDiag(p) {
+  if (!_diagEl) {
+    _diagEl = document.createElement('div');
+    _diagEl.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:99;'
+      + 'font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;color:#c8f5a0;'
+      + 'background:rgba(4,10,20,.82);padding:8px 10px;border-radius:6px;'
+      + 'white-space:pre;pointer-events:none;letter-spacing:.02em';
+    document.body.appendChild(_diagEl);
+  }
+  const t = race.track;
+  const kg = t.sampleGround(p.pos, -1, _diagG);
+  const kPast = Number.isFinite(kg.height) ? Math.abs(kg.lateral) - t.halfWidthAt(kg.s) : NaN;
+  const kS = kg.s, kH = kg.height;
+  const cg = t.sampleGround(camera.position, -1, _diagG);
+  const cPast = Number.isFinite(cg.height) ? Math.abs(cg.lateral) - t.halfWidthAt(cg.s) : NaN;
+  const terr = race.scenery?.terrain;
+  const cTer = terr && Number.isFinite(cg.height) ? terr.heightAt(cg.s, cg.lateral) : NaN;
+  const f = (v, n = 2) => (Number.isFinite(v) ? v.toFixed(n) : '--');
+  _diagEl.textContent =
+    `${trackId}  cam=${chase.mode}  ${f(p.speedKmh, 0)} km/h\n`
+    + `kart  s=${f(kS, 0)}  past=${f(kPast)}  y=${f(p.pos.y)}  grd=${p.grounded ? 1 : 0} rsp=${p.respawn.active ? 1 : 0}\n`
+    + `road  y=${f(kH)}\n`
+    + `cam   y=${f(camera.position.y)}  past=${f(cPast)}  dist=${f(camera.position.distanceTo(p.pos))}\n`
+    + `under cam  road=${f(cg.height)}  sand=${f(cTer)}`;
+}
+
 const _fwd = new THREE.Vector3();
 const _focus = new THREE.Vector3();
 
