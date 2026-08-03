@@ -215,6 +215,29 @@ function presentFrame(alpha, dt) {
   } else {
     chase.update(dt, p, { lookBack, shakeImpulse, dipImpulse });
   }
+
+  // Keep the camera out of the ground.
+  //
+  // The chase rig positions itself behind the kart with no idea what is there,
+  // and on canyonRush's banked corners what is there is the dune. Drive off at
+  // the wrong place and the camera ends up *inside* the sand: the frame fills
+  // with orange, the kart vanishes, and the road survives as a sliver at the
+  // edge. Reported three times and each time as something else — sand sitting
+  // on the course, the course buried, the road disappearing — because from
+  // inside a dune all three are what it looks like. The road mesh is complete
+  // at all 4,800 points sampled round the lap; nothing was ever missing.
+  //
+  // Both floors matter. `sampleGround` is the physics surface and the terrain
+  // sampler is what is actually drawn, and off-track the two disagree by
+  // metres, so the camera has to clear whichever is higher.
+  const camG = race.track.sampleGround(camera.position, -1, _camGround);
+  if (Number.isFinite(camG.height)) {
+    let floor = camG.height;
+    const terrain = race.scenery?.terrain;
+    if (terrain) floor = Math.max(floor, terrain.heightAt(camG.s, camG.lateral));
+    floor += CAM_CLEARANCE;
+    if (camera.position.y < floor) camera.position.y = floor;
+  }
   shakeImpulse = 0;
   dipImpulse = 0;
 
@@ -250,6 +273,9 @@ function presentFrame(alpha, dt) {
   post.render(dt);
 }
 
+/** Metres the camera keeps between itself and whatever it is over. */
+const CAM_CLEARANCE = 0.9;
+const _camGround = {};
 const _fwd = new THREE.Vector3();
 const _focus = new THREE.Vector3();
 
