@@ -303,6 +303,10 @@ const _camGround = {};
  * the world at the moment of a screenshot, in a corner someone can photograph.
  */
 let _diagEl = null;
+let _diagTick = 0;
+let _diagHit = '-';
+const _diagRay = new THREE.Raycaster();
+const _diagNDC = new THREE.Vector2(0, 0);
 const _diagG = {};
 function writeDiag(p) {
   if (!_diagEl) {
@@ -322,12 +326,32 @@ function writeDiag(p) {
   const terr = race.scenery?.terrain;
   const cTer = terr && Number.isFinite(cg.height) ? terr.heightAt(cg.s, cg.lateral) : NaN;
   const f = (v, n = 2) => (Number.isFinite(v) ? v.toFixed(n) : '--');
+  // What is actually in front of the lens.
+  //
+  // Every quantity above has read healthy while the screen was full of sand,
+  // which means the numbers were describing the wrong thing. This names the
+  // object the middle of the screen is looking at, and how far away it is, so
+  // the next report identifies the geometry instead of describing it. Sampled
+  // every tenth frame; a raycast against the whole scene is not free.
+  if ((_diagTick++ % 10) === 0) {
+    _diagRay.setFromCamera(_diagNDC, camera);
+    _diagRay.far = 600;
+    const hit = _diagRay.intersectObject(scene, true)[0];
+    if (!hit) _diagHit = 'sky';
+    else {
+      let o = hit.object, nm = o.name;
+      while (!nm && o.parent) { o = o.parent; nm = o.name; }
+      _diagHit = `${nm || hit.object.type} @${hit.distance.toFixed(1)}m`;
+    }
+  }
+
   _diagEl.textContent =
     `${trackId}  cam=${chase.mode}  ${f(p.speedKmh, 0)} km/h\n`
     + `kart  s=${f(kS, 0)}  past=${f(kPast)}  y=${f(p.pos.y)}  grd=${p.grounded ? 1 : 0} rsp=${p.respawn.active ? 1 : 0}\n`
     + `road  y=${f(kH)}\n`
     + `cam   y=${f(camera.position.y)}  past=${f(cPast)}  dist=${f(camera.position.distanceTo(p.pos))}\n`
-    + `under cam  road=${f(cg.height)}  sand=${f(cTer)}`;
+    + `under cam  road=${f(cg.height)}  sand=${f(cTer)}\n`
+    + `AHEAD  ${_diagHit}`;
 }
 
 const _fwd = new THREE.Vector3();
