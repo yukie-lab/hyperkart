@@ -13,6 +13,23 @@ export const PHYS = {
   rideHeight: 0.42,
   kartRadius: 1.15,
   kartLength: 2.3,
+  /**
+   * How far the *bodywork* reaches from the kart's centre, worst case.
+   *
+   * `kartRadius` describes the kart for kart-to-kart contact and is smaller
+   * than the car: measured from the models, the half-diagonal is 1.74 m for a
+   * dart, 1.90 for a gt and 2.17 for a bruiser. Parking a kart against a
+   * barrier by its *radius* therefore leaves up to a metre of it on the far
+   * side of the barrier line.
+   *
+   * On canyonRush that is not cosmetic. The terrain steps up about six metres
+   * starting 7.0 m past the road edge — the embankment the barrier stands on —
+   * while `_resolveWalls` clamps the kart's centre at 5.35 m. A kart resting
+   * there at an angle puts its corner at 7.1-7.5 m, which is inside the
+   * embankment, and the car is drawn half-swallowed by sand. Measured worst
+   * case 5.77 m of burial at s=1264.
+   */
+  bodyReach: 2.2,
   // Vertical distance above ground before we consider the kart airborne.
   airborneThreshold: 0.22,
   // How fast the kart is pulled back down onto a descending road.

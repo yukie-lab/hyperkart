@@ -558,7 +558,10 @@ export class Kart {
 
   _resolveWalls(g, dt) {
     if (this.track.isVoid) return; // rainbow road has no barriers, only gravity
-    const limit = g.wallLateral - PHYS.kartRadius;
+    // Stopped by where the *bodywork* reaches, not by the collision radius.
+    // See PHYS.bodyReach: the radius is a metre short of the car, which parked
+    // it inside the embankment behind the barrier on canyonRush.
+    const limit = g.wallLateral - PHYS.bodyReach;
     if (Math.abs(this.lateral) <= limit) return;
 
     const s = sign(this.lateral);
