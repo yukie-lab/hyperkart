@@ -689,6 +689,20 @@ export function frondGeometry(len, width, { segs = 5, droop = 1.0, fold = 0.32 }
  *   - the cap rim is notched per side, so the top edge is a broken line rather
  *     than one horizontal cut.
  */
+/**
+ * How far `mesaGeometry` reaches from its own axis, in units of the X/Z scale
+ * it is given: the talus apron at the base (1.38) times the most the wobble can
+ * push a face outward.
+ *
+ * Anyone placing a mesa on a ring needs this. The scale passed to the matrix is
+ * *not* the mesh's half-width, and a ring radius measured to the centre is not
+ * a clearance — the canyon horizon range was laid out that way and a 235 m
+ * butte, scaled 2.4 wide, reached 987 m from its own axis onto a 560 m ring.
+ * Its near face stood 427 m inside the circuit, on the road, and filled the
+ * screen with rock.
+ */
+export function mesaReach(wobble = 0.16) { return 1.38 * (1 + wobble * 1.5); }
+
 export function mesaGeometry(rng, {
   rings = 8, sides = 13, wobble = 0.16, flute = 0.085, rim = 0.075, gullies = 0.34,
 } = {}) {

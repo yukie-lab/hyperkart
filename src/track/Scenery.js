@@ -5,7 +5,7 @@ import {
   scatterAlong, terrainNormal, poseMatrix, gauss, loopField,
   blobGeometry, blobMaterial,
   T, mergeParts, paintGeometry, darkenBase,
-  rockGeometry, sweepStack, columnGeometry, frondGeometry, mesaGeometry,
+  rockGeometry, sweepStack, columnGeometry, frondGeometry, mesaGeometry, mesaReach,
   tuftGeometry, blobClusterGeometry, personGeometry, pennantGeometry,
   propMaterial, neonMaterial, rockMaterial, groundTexturesFor,
   applyWind, applyCrowd, applyBob, applyFlap, applyDrift, applyPulse, applyFlag,
@@ -155,6 +155,31 @@ export class Scenery {
   }
 
   _n(base) { return Math.max(1, Math.round(base * this.detail)); }
+
+  /**
+   * Radius from the terrain centre that no horizon landform may reach inside.
+   * The circuit's farthest road edge plus a margin wide enough that the mid
+   * layer, the run-off and the wall all still have their own ground.
+   *
+   * A background ring is placed by angle and radius, which quietly assumes the
+   * circuit sits in a tidy disc around the centre. It does not: canyonRush
+   * reaches 341 m one way and far less the other, so a radius that clears the
+   * near side buries the far side. Measure it instead of assuming it.
+   */
+  _horizonClear() {
+    if (this._clearR !== undefined) return this._clearR;
+    const t = this.track, c = this.terrain.centre, v = new THREE.Vector3();
+    let max = 0;
+    for (let s = 0; s < t.length; s += 4) {
+      const half = t.halfWidthAt(s);
+      for (const lat of [-1, 1]) {
+        t.placeOnRoad(s, lat * half, v);
+        max = Math.max(max, Math.hypot(v.x - c.x, v.z - c.z));
+      }
+    }
+    this._clearR = max + 90;
+    return this._clearR;
+  }
 
   /**
    * The terrain's texture set. Cached in ProcTex on the same key TrackBuilder
@@ -897,6 +922,7 @@ export class Scenery {
     const wl = this.track.waterLevel;
     const parts = [];
     const count = 26;
+    const clear = this._horizonClear();
     for (let i = 0; i < count; i++) {
       // Angular jitter, not an even ring — a regular polygon of islands is
       // instantly readable as one at this scale.
@@ -914,6 +940,13 @@ export class Scenery {
       for (let k = 0; k < lobes; k++) {
         const hk = h * (k === 0 ? 1 : lerp(0.42, 0.88, rng()));
         const wk = hk * lerp(1.0, 2.1, rng());
+        const rot = rng() * TAU;
+        const zf = lerp(0.6, 1.0, rng());
+        // `r` is the near face. A 128 m headland scaled 2.1 wide reaches 505 m
+        // from its axis, so putting its centre on the 520 m ring left 15 m of
+        // clear water — the same mistake that drove the range across the canyon
+        // circuit, and the reason islands were reported alongside the road.
+        const rl = Math.max(r, clear) + Math.max(wk, wk * zf) * mesaReach(0.24);
         // Lobes are strung out along the tangent of the ring, so a headland
         // spreads sideways across the view rather than back into the haze.
         const off = (k === 0 ? 0 : (rng() - 0.5) * 2) * h * 1.9;
@@ -922,16 +955,19 @@ export class Scenery {
           color: 0xffffff,
           // Islands sit *in* the water: the base is below sea level so there
           // is no visible seam where a landform meets the plane.
-          m: T([c.x + Math.cos(th) * r - Math.sin(th) * off, wl - hk * 0.16, c.z + Math.sin(th) * r + Math.cos(th) * off],
-            [0, rng() * TAU, 0], [wk, hk * 1.2, wk * lerp(0.6, 1.0, rng())]),
+          m: T([c.x + Math.cos(th) * rl - Math.sin(th) * off, wl - hk * 0.16, c.z + Math.sin(th) * rl + Math.cos(th) * off],
+            [0, rot, 0], [wk, hk * 1.2, wk * zf]),
         });
       }
       // A couple of stacks in front of the larger masses for silhouette layering.
       if (big > 0.55) {
         for (let k = 0; k < 2; k++) {
-          const rr = r * lerp(0.72, 0.92, rng());
+          const rr0 = r * lerp(0.72, 0.92, rng());
           const tt = th + (rng() - 0.5) * 0.18;
           const hh = h * lerp(0.20, 0.45, rng());
+          // These sit deliberately in front of the headland, so they keep their
+          // own radius — clamped only where it would put them on the circuit.
+          const rr = Math.max(rr0, clear + hh * 0.83);
           parts.push({
             geo: rockGeometry(rng, { detail: 0, rough: 0.42, squash: 1.5 }),
             color: 0xffffff,
@@ -1429,15 +1465,27 @@ export class Scenery {
     const baseY = this.track.minY - 6;
     const parts = [];
     const count = 30;
+    const clear = this._horizonClear();
+    const WOBBLE = 0.18;
     for (let i = 0; i < count; i++) {
       const th = (i / count) * TAU + (rng() - 0.5) * 0.28;
-      const r = lerp(560, 1350, Math.pow(rng(), 0.65));
+      // The near face, not the centre. See `mesaReach`: the scale handed to the
+      // matrix is not the mesh's half-width, and treating this as a centre
+      // radius stood the range on the road.
+      const face = lerp(560, 1350, Math.pow(rng(), 0.65));
       const h = lerp(70, 235, Math.pow(rng(), 1.4));
       const w = h * lerp(0.9, 2.4, rng());
+      const rot = rng() * TAU;
+      const zf = lerp(0.6, 1.1, rng());
+      const reach = Math.max(w, w * zf) * mesaReach(WOBBLE);
+      // Fog is what sells the distance, and it is measured to the near face —
+      // so pushing the centre out by the reach costs nothing on screen. The
+      // silhouette you actually see stays exactly where it was.
+      const r = Math.max(face, clear) + reach;
       parts.push({
-        geo: mesaGeometry(rng, { rings: 7, sides: 12, wobble: 0.18, flute: 0.10, rim: 0.09, gullies: 0.45 }),
+        geo: mesaGeometry(rng, { rings: 7, sides: 12, wobble: WOBBLE, flute: 0.10, rim: 0.09, gullies: 0.45 }),
         color: 0xffffff,
-        m: T([c.x + Math.cos(th) * r, baseY, c.z + Math.sin(th) * r], [0, rng() * TAU, 0], [w, h, w * lerp(0.6, 1.1, rng())]),
+        m: T([c.x + Math.cos(th) * r, baseY, c.z + Math.sin(th) * r], [0, rot, 0], [w, h, w * zf]),
       });
     }
     const geo = mergeParts(parts);
