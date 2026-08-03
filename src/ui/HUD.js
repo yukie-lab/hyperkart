@@ -1384,6 +1384,32 @@ export class HUD {
       .finished.then(() => r.remove(), () => r.remove());
   }
 
+  /**
+   * "You already have one."
+   *
+   * Fired when the player drives through a live box with a full slot. A nudge
+   * sideways rather than a pop: a pop is what the slot does when something
+   * *arrives*, and this is the opposite event, so it must not borrow the
+   * reward's gesture. Small on purpose — it answers a question, it does not
+   * demand attention mid-corner.
+   */
+  declineItem() {
+    const el = this.dom.item;
+    if (!el) return;
+    seq(el, [
+      { transform: 'translateX(0)' },
+      { transform: 'translateX(-5%)', offset: .25, easing: 'ease-out' },
+      { transform: 'translateX(4%)', offset: .6, easing: 'ease-in-out' },
+      { transform: 'translateX(0)' },
+    ], 260);
+    const f = this.dom.itemFrame;
+    if (f) {
+      seq(f, [
+        { opacity: 1 }, { opacity: .45, offset: .3 }, { opacity: 1 },
+      ], 260);
+    }
+  }
+
   _pop(el, scale, ms) {
     if (!el) return;
     seq(el, [

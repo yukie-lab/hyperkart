@@ -35,7 +35,8 @@ await page.waitForFunction(() => window.__hk?.ready, null, { timeout: 90000 });
 const EVENTS = [
   'countdown', 'go', 'boost', 'driftStage', 'hit', 'wallHit', 'land', 'hop',
   'trick', 'itemBox', 'itemGet', 'useMushroom', 'useStar', 'useThunder',
-  'useBullet', 'useBanana', 'banana', 'shellBounce', 'lap', 'respawn', 'finish',
+  'useBullet', 'useBanana', 'banana', 'useGreenShell', 'useRedShell',
+  'itemDeclined', 'shellBounce', 'lap', 'respawn', 'finish',
 ];
 
 const result = await page.evaluate(async ({ EVENTS, seconds }) => {

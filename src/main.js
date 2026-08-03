@@ -226,6 +226,12 @@ function handleEvents(events) {
       case 'finish':
         if (e.kart === race.player) hud.toast(`FINISH — ${e.place}${ordinalSuffix(e.place)}`, '#ffd75e');
         break;
+      case 'itemDeclined':
+        // Drove through a live box with a full slot. The rule is right; its
+        // silence was not — this was reported from play as boxes that "do not
+        // react to my kart".
+        if (e.kart === race.player) hud.declineItem();
+        break;
       // `itemGet` has no case: the HUD locks the slot off its own state diff in
       // `HUD.update`, and `audio.handleEvent` above sees every event regardless.
     }

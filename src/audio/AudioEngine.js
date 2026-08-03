@@ -444,9 +444,24 @@ export class AudioEngine {
       case 'useBullet':
         this._sweep(now, 180, 900, 0.5, { peak: 0.34 * near, type: 'sawtooth' }, at);
         break;
+      case 'useGreenShell':
+      case 'useRedShell':
+        // Found by the same trace that verified `itemDeclined`: shells were the
+        // one item that could be thrown in silence. Red sits a fourth higher so
+        // you can hear which one left your hands without looking.
+        this._sweep(now, event.type === 'useRedShell' ? 520 : 390,
+          event.type === 'useRedShell' ? 240 : 190, 0.20,
+          { peak: 0.26 * near, type: 'square' }, at);
+        this._noise(now, { peak: 0.18 * near, decay: 0.16, f0: 2200, f1: 700 }, at);
+        break;
       case 'useBanana':
       case 'banana':
         this._noise(now, { peak: 0.2 * near, decay: 0.12, f0: 1500, f1: 500 }, at);
+        break;
+      case 'itemDeclined':
+        // A soft, low, downward tick. Deliberately unlike the pickup's rising
+        // pair: this is the same slot saying no.
+        this._tone(now, midi(58), 0.05, { peak: 0.13 * near, decay: 0.10, type: 'sine' }, at);
         break;
       case 'shellBounce':
         this._tone(now, midi(79), 0.06, { peak: 0.2 * near, decay: 0.1, type: 'square' }, at);

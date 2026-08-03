@@ -770,8 +770,22 @@ export class ItemSystem {
       }
 
       for (const k of karts) {
-        if (k.item || k.itemRoulette) continue;
-        if (k.pos.distanceToSquared(b.mesh.position) < 3.2 * 3.2) {
+        const near = k.pos.distanceToSquared(b.mesh.position) < 3.2 * 3.2;
+        if (k.item || k.itemRoulette) {
+          // Holding an item means you cannot take another, which is right, and
+          // which the game never said out loud. Passing straight through a box
+          // with a full slot is indistinguishable from a box that failed —
+          // reported from play as "the third one doesn't react to my kart" —
+          // so the moment is now an event and the HUD answers it. Latched per
+          // box so a kart parked in one does not fire every frame.
+          if (near && !b.declined?.has(k)) {
+            (b.declined ??= new Set()).add(k);
+            this.events.push({ type: 'itemDeclined', kart: k });
+          } else if (!near) b.declined?.delete(k);
+          continue;
+        }
+        b.declined?.delete(k);
+        if (near) {
           b.active = false;
           b.respawn = BOX_RESPAWN;
           b.pop = POP_TIME;
