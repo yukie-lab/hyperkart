@@ -50,6 +50,8 @@ export class TerrainSampler {
     this.n = Math.max(48, Math.round(track.length / TERRAIN_STEP));
     this.cols = TERRAIN_COLS;
     this._tmp = new THREE.Vector3();
+    this._anchor = new THREE.Vector3();
+    this._anchor2 = new THREE.Vector3();
     this._tmp2 = new THREE.Vector3();
     this._cache = new Map();
 
@@ -93,7 +95,29 @@ export class TerrainSampler {
     const { side, d } = this.colDistance(j);
     const half = this.track.halfWidthAt(s);
     const p = this.track.placeOnRoad(s, side * (half + WALL_OFFSET + d), this._tmp);
-    const y = d > 0.5 ? this.profile(d, p.x, p.z, p.y) : p.y - 0.42;
+    // Beyond the barrier the ground stops following the camber.
+    //
+    // `placeOnRoad` extends the banking for as far as it is asked. canyonRush
+    // banks 20.6 degrees, so the extended plane is 4.81 m off the road centre
+    // at the barrier line and keeps going — and the terrain was anchored to it,
+    // which on the *inside* of a banked corner builds a sand wall that climbs
+    // with distance and stands metres above the track. That is what a driver
+    // sitting on the road, grounded, with the camera in its normal place 7.97 m
+    // behind, was looking at when the circuit appeared to be buried.
+    //
+    // The reference blends from the barrier's own height, where it must match
+    // the shoulder mesh exactly or there is a step, to the road *centre* by
+    // twenty-five metres out, where the camber has no business being. The bank
+    // and its shoulder are untouched; only the desert behind them stops being
+    // tilted.
+    let ref = p.y;
+    if (d > 0.5) {
+      const edgeY = this.track.placeOnRoad(s, side * (half + WALL_OFFSET), this._anchor).y;
+      const centreY = this.track.placeOnRoad(s, 0, this._anchor2).y;
+      const k = smoothstep(clamp01((d - 0.5) / 24.5));
+      ref = edgeY + (centreY - edgeY) * k;
+    }
+    const y = d > 0.5 ? this.profile(d, p.x, p.z, ref) : p.y - 0.42;
     this._cache.set(key, y);
     return y;
   }
