@@ -380,6 +380,26 @@ const CSS = `
     0 calc(100% - var(--chamfer)),0 var(--chamfer));
   filter:drop-shadow(0 calc(var(--u)*.6) calc(var(--u)*1.6) rgba(0,0,0,.5));
   transition:background .16s, transform .16s; }
+/* Sound toggle, sharing the ? button's well so the two read as a pair. */
+.hk-mute { position:absolute; top:var(--st); right:calc(var(--sr) + var(--u)*29.6);
+  width:calc(var(--u)*5.6); height:calc(var(--u)*5.6); --chamfer:calc(var(--u)*1.1);
+  cursor:pointer; pointer-events:auto; border:0; padding:calc(var(--u)*1.1);
+  color:#eaf2ff; z-index:6;
+  background:linear-gradient(170deg,rgba(10,18,34,.80),rgba(3,6,14,.86));
+  box-shadow:0 0 0 calc(var(--u)*.26) rgba(255,255,255,.40) inset;
+  clip-path:polygon(var(--chamfer) 0,calc(100% - var(--chamfer)) 0,100% var(--chamfer),
+    100% calc(100% - var(--chamfer)),calc(100% - var(--chamfer)) 100%,var(--chamfer) 100%,
+    0 calc(100% - var(--chamfer)),0 var(--chamfer));
+  filter:drop-shadow(0 calc(var(--u)*.6) calc(var(--u)*1.6) rgba(0,0,0,.5));
+  transition:color .16s, box-shadow .16s, transform .16s; }
+.hk-mute svg { width:100%; height:100%; display:block; }
+.hk-mute .hk-mute-off { display:none; }
+.hk-mute.muted { color:#8a99b0; }
+.hk-mute.muted .hk-mute-on { display:none; }
+.hk-mute.muted .hk-mute-off { display:block; }
+.hk-mute:hover, .hk-mute:focus-visible { color:#ffd75e;
+  box-shadow:0 0 0 calc(var(--u)*.26) rgba(255,215,94,.85) inset;
+  transform:scale(1.06); outline:0; }
 .hk-help:hover, .hk-help:focus-visible { color:#ffd75e;
   box-shadow:0 0 0 calc(var(--u)*.26) rgba(255,215,94,.85) inset;
   transform:scale(1.06); outline:0; }
@@ -925,7 +945,11 @@ export class HUD {
       gaps: q('[data-gaps]'),
       help: q('[data-help]'), helpSheet: q('[data-helpsheet]'),
       helpX: q('[data-helpx]'), helpGo: q('[data-helpgo]'),
+      mute: q('[data-mute]'),
     };
+
+    // Sound toggle. `onMuteToggle` is main's hook; the HUD owns only the glyph.
+    this.dom.mute?.addEventListener('click', () => this.toggleMute());
 
     // Controls card. Toggled by the button, by `H`, and dismissed by clicking
     // anywhere off the card — the three things a player will try. It does not
@@ -934,6 +958,7 @@ export class HUD {
     this._helpOpen = false;
     this._onHelpKey = (e) => {
       if (e.code === 'KeyH' || (e.key === '?' && !e.repeat)) { this.toggleHelp(); }
+      else if (e.code === 'KeyM' && !e.repeat) this.toggleMute();
       else if (e.code === 'Escape' && this._helpOpen) this.toggleHelp(false);
     };
     this.dom.help?.addEventListener('click', () => this.toggleHelp());
@@ -1065,6 +1090,17 @@ export class HUD {
         <div class="hk-map-well"><canvas data-map width="256" height="256"></canvas></div>
       </div>
 
+      <button class="hk-mute" data-mute type="button" aria-label="Sound">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 9.5h3.6L12 5.6v12.8L7.6 14.5H4z" fill="currentColor"/>
+          <g class="hk-mute-on" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+            <path d="M15.4 9.2a4 4 0 0 1 0 5.6"/><path d="M17.9 6.9a7.4 7.4 0 0 1 0 10.2"/>
+          </g>
+          <g class="hk-mute-off" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+            <path d="M16 9.5l5 5"/><path d="M21 9.5l-5 5"/>
+          </g>
+        </svg>
+      </button>
       <button class="hk-help" data-help type="button" aria-label="Controls">?</button>
       <div class="hk-help-sheet" data-helpsheet>
         <div class="hk-help-card">
@@ -1081,6 +1117,7 @@ export class HUD {
             <span class="hk-help-start">Nothing moves until you close this.</span>
             <span class="hk-help-race">The race keeps running while this is open.</span>
             <br>Close with <b>×</b>, <b>Esc</b>, <b>H</b>, or a click outside the card.
+            <br><b>M</b>, or the speaker beside <b>?</b>, turns the sound off. It is remembered.
           </div>
           <button class="hk-help-go" data-helpgo type="button">START RACE</button>
         </div>
@@ -1823,6 +1860,18 @@ export class HUD {
       this.el.classList.remove('help-start');
     }
     this.onHelpToggle?.(this._helpOpen);
+  }
+
+  /**
+   * Flip the sound, or set it with `v`. The HUD keeps the glyph honest and
+   * hands the decision to `onMuteToggle`; whether that closes an AudioContext
+   * or merely drops a gain is not the HUD's business.
+   */
+  toggleMute(v) {
+    this._muted = v === undefined ? !this._muted : !!v;
+    this.dom.mute?.classList.toggle('muted', this._muted);
+    this.dom.mute?.setAttribute('aria-label', this._muted ? 'Sound off' : 'Sound on');
+    this.onMuteToggle?.(this._muted);
   }
 
   /** Mark the next showing as the one that holds the countdown. */

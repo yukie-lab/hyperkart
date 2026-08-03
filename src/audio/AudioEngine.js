@@ -577,11 +577,22 @@ export class AudioEngine {
     }
   }
 
+  /**
+   * Muting suspends the context, it does not merely close the fader.
+   *
+   * A silent-but-running context still has the browser mark the tab as playing
+   * audio, and still runs the graph on the audio thread — neither of which is
+   * what someone who turned the sound off asked for. The gain is faded first so
+   * the suspend does not clip the tail. Skipped for an injected (offline)
+   * context, where `suspend` means something else entirely.
+   */
   setMuted(b) {
     this.muted = b;
-    if (this._nodes) {
-      setTarget(this._nodes.master.gain, b ? 0 : this.masterVolume * MIX.master, this.ctx.currentTime, 0.05);
-    }
+    if (!this._nodes) return;
+    setTarget(this._nodes.master.gain, b ? 0 : this.masterVolume * MIX.master, this.ctx.currentTime, 0.05);
+    if (this.opts.context) return;
+    if (b) setTimeout(() => { if (this.muted) this.ctx?.suspend?.(); }, 120);
+    else this.ctx?.resume?.();
   }
 
   dispose() {

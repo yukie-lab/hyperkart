@@ -71,9 +71,35 @@ hud.setTrack(race.track);
 // Audio needs a user gesture before an AudioContext may run.
 const audio = new AudioEngine({ volume: 0.8 });
 for (const k of race.karts) audio.attachKart(k, k.isPlayer);
-const kickAudio = () => { audio.start(); window.removeEventListener('pointerdown', kickAudio); window.removeEventListener('keydown', kickAudio); };
+
+/**
+ * Sound on/off, remembered across reloads.
+ *
+ * Muting does not open an AudioContext and drop the gain to zero — it does not
+ * open one at all. A silent context still makes the browser mark the tab as
+ * playing audio, which is exactly the thing someone who turned the sound off
+ * was trying to be rid of. Unmuting later starts the engine then; `start()` is
+ * idempotent and the gesture requirement is long satisfied by that point.
+ */
+const MUTE_KEY = 'hk.muted';
+let muted = opt('mute', '0') === '1';
+try { if (localStorage.getItem(MUTE_KEY) === '1') muted = true; } catch { /* private mode */ }
+const kickAudio = () => {
+  if (!muted) audio.start();
+  window.removeEventListener('pointerdown', kickAudio);
+  window.removeEventListener('keydown', kickAudio);
+};
 window.addEventListener('pointerdown', kickAudio);
 window.addEventListener('keydown', kickAudio);
+
+hud.toggleMute(muted);
+hud.onMuteToggle = (m) => {
+  muted = m;
+  try { localStorage.setItem(MUTE_KEY, m ? '1' : '0'); } catch { /* private mode */ }
+  if (m) audio.setMuted(true);
+  else if (!audio.started) audio.start();
+  else audio.setMuted(false);
+};
 
 rs.onResize = (w, h) => post.setSize(w, h);
 rs.onPixelRatioChange = (r) => post.setPixelRatio(r);
