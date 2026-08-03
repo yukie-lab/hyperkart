@@ -8,3 +8,7 @@ shots/
 
 .claude/settings.local.json
 .DS_Store
+
+# 動画の書き出し
+movie/
+.frames_*/

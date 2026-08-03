@@ -56,7 +56,17 @@ const rs = new RenderSystem(container, { quality, preserveDrawingBuffer: shotMod
 const scene = rs.scene;
 const camera = rs.camera;
 
-const trackDef = TRACKS[trackId];
+/**
+ * `?laps=` — a shorter race, for recording.
+ *
+ * Three laps is 95 s of finished video and most clips want one. The count lives
+ * on the track definition, so shadow it there rather than reaching into `Track`
+ * after it has been built.
+ */
+const lapsOpt = parseInt(opt('laps', ''), 10);
+const trackDef = Number.isFinite(lapsOpt) && lapsOpt > 0
+  ? { ...TRACKS[trackId], laps: Math.min(9, lapsOpt) }
+  : TRACKS[trackId];
 rs.applyTheme(trackDef.theme);
 const sky = new SkySystem(rs.renderer, scene);
 const sunDir = sky.build(trackDef.theme);
@@ -522,6 +532,42 @@ const harness = {
       presentFrame(1, dt);
     }
     return loop.simTime;
+  },
+
+  /**
+   * One frame of a recording: advance `dt` under the autopilot, then present
+   * exactly once, deterministically.
+   *
+   * `settle` and `frame` cannot simply be called in sequence, which is the
+   * obvious way to write this. Both present, and presenting twice ages every
+   * particle at double rate — a recording made that way runs its dust and
+   * sparks at 2x while the karts drive at 1x. Recording wants the stepping of
+   * one and the HUD pinning of the other, so the step happens here without
+   * presenting and the single present is handed to `frame`.
+   *
+   * The driver is held across calls rather than rebuilt per frame the way
+   * `settle` does it. `settle` is called once per capture and can afford a
+   * fresh one; a recording calls this thousands of times, and an AI whose
+   * lookahead resets every frame does not drive, it twitches. `settle` is
+   * deliberately left alone — every existing capture depends on it byte for
+   * byte.
+   */
+  async record(dt = 1 / 60) {
+    const driver = autoDriver
+      || (this._recDriver ||= new AIDriver(race.player, race.track, { skill: 0.92, seed: 31337 }));
+    const steps = Math.max(1, Math.round(dt / loop.fixedDt));
+    for (let k = 0; k < steps; k++) {
+      const c = driver.update(loop.fixedDt, race._ctx);
+      race.step(loop.fixedDt, {
+        steer: c.steer, accel: c.accel, brake: c.brake,
+        drift: c.drift, driftPressed: c.driftPressed,
+        item: false, itemPressed: !!c.useItem,
+      });
+      handleEvents(race.drainEvents());
+      loop.simTime += loop.fixedDt;
+    }
+    await this.frame(dt);
+    return { time: loop.simTime, state: race.state, lap: race.player.lap, laps: race.track.laps };
   },
 
   setCamera(mode) { chase.setMode(mode); },

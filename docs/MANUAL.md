@@ -123,6 +123,7 @@
 | `?cam=chase\|near\|far\|bumper` | カメラ |
 | `?mute=1` | 無音で開く |
 | `?auto=1` | AI が自機を運転（アトラクト） |
+| `?laps=1..9` | 周回数。既定は 3 |
 | `?shot=1` | 撮影モード。ループを止め、時計を `window.__hk` に渡す |
 
 例：
@@ -134,13 +135,50 @@ http://localhost:5178/?track=canyonRush&mute=1&quality=ultra
 
 ---
 
-## 9. 重ければ
+## 9. 動画を撮る
+
+運転が下手でも構わない。**AI に走らせて録画する**方法が二つある。
+
+### 音がいらないなら — オフライン書き出し（きれい）
+
+```bash
+node tools/movie.mjs --track canyonRush --laps 1
+node tools/movie.mjs --track sunsetCoast --w 3840 --h 2160     # 4K
+node tools/movie.mjs --seconds 20 --cam bumper --hud 0         # 車載20秒
+```
+
+1フレームずつ書き出すので、**PC の速度に関係なく完璧な 60fps** になる。カクつきは原理的に起きず、4K でも画質が落ちない（時間がかかるだけ）。1080p で 1フレーム約 70ms、フルレース 95 秒ぶんで 7 分ほど。
+
+| 指定 | 既定 | 意味 |
+|---|---|---|
+| `--track` | `sunsetCoast` | コース |
+| `--laps` | 3 | 周回数。`1` なら約 35 秒の動画 |
+| `--seconds` | — | 秒数で打ち切る。指定しなければゴールまで |
+| `--w` `--h` `--fps` | 1920 1080 60 | 解像度とフレームレート |
+| `--cam` | `chase` | `chase` `near` `far` `bumper` |
+| `--hud 0` | 表示 | HUD を消す |
+| `--out` | `movie/<コース>.mp4` | 出力先 |
+| `--png` | JPEG | 連番を可逆で出す（重い） |
+
+**ffmpeg があれば mp4 まで作る。**無ければ連番画像を残し、結合するコマンドを表示する（`brew install ffmpeg`）。
+
+### 音が要るなら — 画面収録
+
+```
+http://localhost:5178/?auto=1&track=canyonRush
+```
+
+を開いて `Cmd + Shift + 5`。AI が勝手に走るので操作は不要。**音がそのまま入る**代わりに、フレームレートは PC の実力なりになる。
+
+---
+
+## 10. 重ければ
 
 右上の画質は URL 指定だが、**解像度は自動で調整される**（60fps を保つために内部解像度を落とす）。それでも重い場合は `?quality=medium` か `low`、あるいは `?field=6` で台数を減らす。
 
 ---
 
-## 10. 動かす
+## 11. 動かす
 
 ```bash
 npm install
