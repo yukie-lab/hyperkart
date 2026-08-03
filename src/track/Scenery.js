@@ -944,8 +944,9 @@ export class Scenery {
         const zf = lerp(0.6, 1.0, rng());
         // `r` is the near face. A 128 m headland scaled 2.1 wide reaches 505 m
         // from its axis, so putting its centre on the 520 m ring left 15 m of
-        // clear water — the same mistake that drove the range across the canyon
-        // circuit, and the reason islands were reported alongside the road.
+        // clear water. Never seen — measured at 16% of screen at worst, all of
+        // it ocean — but it is the same arithmetic that drove the canyon range
+        // across its circuit, and 15 m is not a margin.
         const rl = Math.max(r, clear) + Math.max(wk, wk * zf) * mesaReach(0.24);
         // Lobes are strung out along the tangent of the ring, so a headland
         // spreads sideways across the view rather than back into the haze.
