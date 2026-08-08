@@ -74,9 +74,16 @@ export class Race {
     const chosen = opts.playerCharacter || 'nova';
 
     const pool = CHARACTERS.filter((c) => c.id !== chosen);
+    // The pool is walked with an AI-only counter, not the grid index. The
+    // player occupies one slot mid-grid, so grid indices span fieldSize=12
+    // values while the pool holds 11 — and 12 values into 11 residues must
+    // collide: i=0 and i=11 both landed on pool[3], which put two identical
+    // navy Rooks on every full grid while Blitz never raced at all. Eleven
+    // AI drivers stepping 5 (coprime with 11) cover all eleven characters.
+    let ai = 0;
     for (let i = 0; i < this.fieldSize; i++) {
       const isPlayer = i === playerSlot;
-      const character = isPlayer ? chosen : pool[(i * 5 + 3) % pool.length].id;
+      const character = isPlayer ? chosen : pool[(ai++ * 5 + 3) % pool.length].id;
       const kart = new Kart(this.track, { isPlayer, characterId: character, index: i });
       kart.placeAt(grid[i]);
 
