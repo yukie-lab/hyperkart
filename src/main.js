@@ -439,6 +439,14 @@ if (!armed) {
   hud.onHelpToggle = (open) => { if (!open) armed = true; };
   hud.openHelpAsStart();
 }
+// Compile every scene shader before the first frame is presented. Left to
+// itself the compiler runs lazily inside the first few renders, and those
+// frames each stall long enough to read as stutter — and, before the hitch
+// filter in Loop, long enough to convince the adaptive-resolution controller
+// to start moving the pixel ratio around on a screen the player had only just
+// seen. The cost is the same either way; paid here it lands in the load, where
+// nothing is moving and nobody can see it.
+rs.renderer.compile(scene, camera);
 if (!shotMode) loop.start();
 
 // --- Harness ---------------------------------------------------------------

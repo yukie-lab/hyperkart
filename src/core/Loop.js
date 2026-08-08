@@ -43,7 +43,17 @@ export class Loop {
       // Clamp both ends: the ceiling stops a backgrounded tab spiralling the
       // accumulator, the floor stops time ever running backwards.
       frameDt = Math.min(Math.max(frameDt, 0), 0.25);
-      this.smoothedFrameMs += ((frameDt * 1000) - this.smoothedFrameMs) * 0.1;
+      // A hitch is not a frame rate. A shader compile, a GC pause, or the
+      // first frame back from a hidden tab arrives as one enormous delta, and
+      // folding it into the average told the adaptive-resolution controller
+      // the machine was slow — which it answered by dropping the pixel ratio
+      // and then handing it back 0.05 at a time, a staircase of visible
+      // re-scales across the first seconds of a session. A stall past 100 ms
+      // is something no resolution change can rescue, so it carries no
+      // information about what resolution to run at; sustained heavy load
+      // still registers, because even a 10 fps slideshow sits under the bar.
+      const frameMs = frameDt * 1000;
+      if (frameMs < 100) this.smoothedFrameMs += (frameMs - this.smoothedFrameMs) * 0.1;
       frameDt *= this.timeScale;
       this.accumulator += frameDt;
 

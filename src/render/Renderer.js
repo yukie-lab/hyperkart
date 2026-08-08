@@ -66,6 +66,11 @@ export class RenderSystem {
     this.renderer.setPixelRatio(this.currentPixelRatio);
 
     this._adaptAccum = 0;
+    // Adaptation is held for the first moments of a session. Startup frames
+    // measure shader compilation and first-touch allocation, not the cost of
+    // rendering at this resolution, and reacting to them put a staircase of
+    // resolution changes on screen just as the player first saw the game.
+    this._adaptHold = 2.0;
     this._resizeObserver = null;
     this.onResize = null;
 
@@ -81,6 +86,16 @@ export class RenderSystem {
       this._resizeObserver = new ResizeObserver(handler);
       this._resizeObserver.observe(this.container);
     }
+    // Coming back to a hidden tab replays startup in miniature: the browser
+    // re-rasterises for a few frames, and those frames say nothing about the
+    // resolution either. The 100 ms hitch filter in Loop already discards the
+    // single huge wake-up delta; this covers the slowish frames just after it.
+    this._visHandler = () => {
+      if (document.visibilityState === 'visible') {
+        this._adaptHold = Math.max(this._adaptHold, 1.0);
+      }
+    };
+    document.addEventListener('visibilitychange', this._visHandler);
   }
 
   resize() {
@@ -101,6 +116,11 @@ export class RenderSystem {
    * visibly during a race.
    */
   adaptResolution(dt, smoothedFrameMs, budgetMs = 16.0) {
+    if (this._adaptHold > 0) {
+      this._adaptHold -= dt;
+      this._adaptAccum = 0;
+      return;
+    }
     this._adaptAccum += dt;
     if (this._adaptAccum < 0.5) return;
     this._adaptAccum = 0;
@@ -140,6 +160,7 @@ export class RenderSystem {
 
   dispose() {
     window.removeEventListener('resize', this._resizeHandler);
+    document.removeEventListener('visibilitychange', this._visHandler);
     this._resizeObserver?.disconnect();
     this.renderer.dispose();
     this.renderer.domElement.remove();
