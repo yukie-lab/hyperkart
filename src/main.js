@@ -404,11 +404,11 @@ function handleEvents(events) {
         break;
       case 'finish':
         if (e.kart === race.player) {
-          hud.toast(`FINISH — ${e.place}${ordinalSuffix(e.place)}`, '#ffd75e');
-          // The banner says what happened; the panel offers what to do next.
-          // Before this, finishing a race left the player with an orbiting
-          // camera and no way to start another except reloading by hand.
-          hud.showFinish(e.place);
+          // No toast: the sheet carries the placing at full size, and the
+          // finished state hides the banner band anyway. The portrait is
+          // rendered here, at the flag, while the model still wears exactly
+          // the race it just drove.
+          hud.showFinish(e.place, kartPortrait());
         }
         break;
       case 'itemDeclined':
@@ -423,9 +423,86 @@ function handleEvents(events) {
   }
 }
 
-function ordinalSuffix(n) {
-  if (n % 100 >= 11 && n % 100 <= 13) return 'th';
-  return ['th', 'st', 'nd', 'rd'][n % 10] || 'th';
+/**
+ * A portrait of the player's kart for the results sheet.
+ *
+ * The kart is borrowed into a bare stage and rendered once into an offscreen
+ * target with a transparent background, so the sheet shows the actual model in
+ * its actual livery. Cropping the live frame instead would carry whatever
+ * track and sky happened to be behind the kart at the flag.
+ */
+function kartPortrait() {
+  const SIZE = 512;
+  const g = race.player.model.group;
+  const parent = g.parent;
+  const pos = g.position.clone();
+  const quat = g.quaternion.clone();
+  const wasVisible = g.visible;
+
+  const stage = new THREE.Scene();
+  stage.add(g);
+  g.position.set(0, 0, 0);
+  g.quaternion.identity();
+  g.visible = true; // the bumper camera may have hidden it
+  // Studio levels chosen against the live kart side by side: brighter keys
+  // wash the livery toward pink, and the sky-metered scene exposure (0.69 on
+  // sunsetCoast) mutes it — the portrait is lit for itself, at exposure 1.
+  const keyLight = new THREE.DirectionalLight(0xffffff, 1.5);
+  keyLight.position.set(2.5, 3.5, 2.2);
+  const rimLight = new THREE.DirectionalLight(0x9fc8ff, 0.7);
+  rimLight.position.set(-2.2, 2.0, -2.6);
+  stage.add(keyLight, rimLight, new THREE.AmbientLight(0xbfd4ff, 0.35));
+
+  // Front three-quarter, slightly high — the beauty angle box art uses.
+  const cam = new THREE.PerspectiveCamera(32, 1, 0.1, 50);
+  cam.position.set(3.4, 2.0, 3.9);
+  cam.lookAt(0, 0.45, 0);
+
+  const rt = new THREE.WebGLRenderTarget(SIZE, SIZE, { colorSpace: THREE.SRGBColorSpace });
+  const r = rs.renderer;
+  const prevTarget = r.getRenderTarget();
+  const prevColor = new THREE.Color();
+  r.getClearColor(prevColor);
+  const prevAlpha = r.getClearAlpha();
+  r.setRenderTarget(rt);
+  r.setClearColor(0x000000, 0);
+  r.clear();
+  r.render(stage, cam);
+  const px = new Uint8Array(SIZE * SIZE * 4);
+  r.readRenderTargetPixels(rt, 0, 0, SIZE, SIZE, px);
+  r.setRenderTarget(prevTarget);
+  r.setClearColor(prevColor, prevAlpha);
+  rt.dispose();
+
+  // The kart goes back exactly as it was borrowed.
+  parent?.add(g);
+  g.position.copy(pos);
+  g.quaternion.copy(quat);
+  g.visible = wasVisible;
+
+  // Tone-map by hand. three applies ACES only when rendering to the screen,
+  // so a render-target read comes back linear-lit — washed out next to every
+  // other pixel this game shows. Narkowicz's ACES fit is close enough for a
+  // portrait chip, and the same sky-metered exposure the post chain uses
+  // keeps the livery the brightness the player just raced in.
+  const aces = (x) => Math.min(1, Math.max(0, (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14)));
+  for (let i = 0; i < px.length; i += 4) {
+    for (let ch = 0; ch < 3; ch++) {
+      const lin = Math.pow(px[i + ch] / 255, 2.2);
+      px[i + ch] = Math.round(Math.pow(aces(lin), 1 / 2.2) * 255);
+    }
+  }
+
+  // GL rows read back bottom-up; flip while copying into the 2D canvas.
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = SIZE;
+  const ctx = cv.getContext('2d');
+  const img = ctx.createImageData(SIZE, SIZE);
+  for (let y = 0; y < SIZE; y++) {
+    img.data.set(px.subarray((SIZE - 1 - y) * SIZE * 4, (SIZE - y) * SIZE * 4), y * SIZE * 4);
+  }
+  ctx.putImageData(img, 0, 0);
+  return cv.toDataURL('image/png');
 }
 
 // In capture mode the harness owns the clock from the very first frame. Even
@@ -579,6 +656,7 @@ const harness = {
   },
 
   setCamera(mode) { chase.setMode(mode); },
+  portrait: kartPortrait,
   setHud(v) { hud.setVisible(v); },
   setQuality(q) { rs.setQuality(q); },
 
@@ -657,7 +735,14 @@ const harness = {
         if (t?.iterations === Infinity) { a.pause(); a.currentTime = 0; }
         else {
           a.pause();
-          const dur = (t?.activeDuration ?? 0) || 0;
+          // endTime, not activeDuration: a staggered entrance carries its
+          // stagger as `delay`, which activeDuration does not include.
+          // Pinning to the shorter number parks any element whose delay
+          // exceeds the shared duration still inside that delay — the finish
+          // sheet's standings photographed with rows 5-12 at opacity zero.
+          // For the delay-less animations every earlier capture pinned, the
+          // two numbers are the same value.
+          const dur = Number.isFinite(t?.endTime) ? t.endTime : ((t?.activeDuration ?? 0) || 0);
           const born = a.__hkRaceStart;
           // An unstamped animation is a CSS one, started by a class change at
           // a race time nobody recorded. Pin it to its END, not to zero: these

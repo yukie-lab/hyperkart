@@ -492,18 +492,107 @@ const CSS = `
   box-shadow:0 0 0 calc(var(--u)*.2) rgba(255,215,94,.7) inset; cursor:default; }
 .hk-help-track.here i { color:#d8bd6e; }
 
+/* ---- FINISH SHEET --------------------------------------------------------
+   The layout is the one every kart racer has taught players to read: the full
+   standings down the left as slanted lozenges filling in as karts come home,
+   the player's row in their highlight gold, and the trophy corner — kart
+   portrait, big placing, times — on the right. The dim is a left-weighted
+   gradient rather than a full-screen wash, because the best thing on this
+   screen is not the sheet at all: it is the player's own kart under the orbit
+   camera, and the old radial dim paid for legibility by burying it. Racing
+   chrome (speed, slot, map, rail…) is switched off below — a race that is
+   over has no speed to report, and every gauge left running just competed
+   with the results. */
+.hk-hud.finished .hk-lap, .hk-hud.finished .hk-item, .hk-hud.finished .hk-star,
+.hk-hud.finished .hk-map, .hk-hud.finished .hk-rail, .hk-hud.finished .hk-coins,
+.hk-hud.finished .hk-pos, .hk-hud.finished .hk-speed, .hk-hud.finished .hk-center,
+.hk-hud.finished .hk-band { display:none; }
+
 .hk-finish-sheet { position:absolute; inset:0; display:none; pointer-events:auto; z-index:7;
-  align-items:center; justify-content:center;
-  background:radial-gradient(ellipse 70% 70% at 50% 45%, rgba(6,12,24,.66), rgba(3,6,14,.86)); }
-.hk-hud.finished .hk-finish-sheet { display:flex; }
-.hk-finish-place { display:flex; align-items:baseline; justify-content:center;
-  gap:calc(var(--u)*.4); margin:calc(var(--u)*1.2) 0 calc(var(--u)*.4); }
-.hk-finish-place b { font:800 calc(var(--u)*9)/1 var(--hkf); color:#ffd75e;
-  text-shadow:0 calc(var(--u)*.35) 0 rgba(0,0,0,.45); }
-.hk-finish-place i { font:800 calc(var(--u)*3.2)/1 var(--hkf); font-style:normal; color:#ffd75e; }
-.hk-finish-track { text-align:center; font:600 calc(var(--u)*1.9)/1 var(--hkf);
-  color:#8fa4c2; margin-bottom:calc(var(--u)*2.4); }
-.hk-finish-acts { display:flex; gap:calc(var(--u)*1.2); }
+  background:linear-gradient(100deg, rgba(3,7,15,.88) 0%, rgba(3,7,15,.74) 30%,
+    rgba(3,7,15,.20) 52%, rgba(3,7,15,0) 66%); }
+.hk-hud.finished .hk-finish-sheet { display:flex; align-items:stretch; }
+
+/* Placing tint, MK-fashion: gold, silver, bronze, then a cool blue for the
+   rest of the field. Set as vars on the sheet so the numeral, the ordinal and
+   nothing else pick it up. */
+.hk-finish-sheet.p1 { --plc1:#ffd75e; --plc2:#c98d04; }
+.hk-finish-sheet.p2 { --plc1:#dfe8f2; --plc2:#8fa3b8; }
+.hk-finish-sheet.p3 { --plc1:#ffb277; --plc2:#a05c28; }
+.hk-finish-sheet.p4 { --plc1:#9fc8ef; --plc2:#4a7aaa; }
+
+.hk-fin-left { display:flex; flex-direction:column; justify-content:center;
+  gap:calc(var(--u)*1.4); padding:calc(var(--u)*3) 0 calc(var(--u)*3) calc(var(--u)*4);
+  width:min(calc(var(--u)*46), 40vw); }
+.hk-fin-title { font:900 calc(var(--u)*3.6)/1 var(--hkf); letter-spacing:.06em;
+  text-shadow:var(--halo); }
+.hk-fin-title span { color:var(--gold); }
+.hk-fin-title i { display:block; margin-top:calc(var(--u)*.8);
+  font:700 calc(var(--u)*1.7)/1 var(--hkf); font-style:normal;
+  letter-spacing:.26em; text-transform:uppercase; color:#9db2cf; }
+
+.hk-fin-rows { display:flex; flex-direction:column; gap:calc(var(--u)*.55); }
+/* The lozenge is skewed and its contents unskewed, same trick as the lap
+   banner: the slant carries speed, upright glyphs stay readable. */
+.hk-fin-row { position:relative; display:flex; align-items:center; gap:calc(var(--u)*1.0);
+  height:calc(var(--u)*3.05); padding:0 calc(var(--u)*1.6);
+  font:800 calc(var(--u)*1.95)/1 var(--hkf); transform:skewX(-8deg);
+  background:linear-gradient(180deg, rgba(16,26,48,.88), rgba(8,14,28,.88));
+  box-shadow:0 0 0 1px rgba(255,255,255,.09) inset, 0 calc(var(--u)*.25) calc(var(--u)*.8) rgba(0,0,0,.4); }
+.hk-fin-row > * { transform:skewX(8deg); }
+.hk-fin-row.you { background:linear-gradient(180deg,#ffe694,#ffc93e); color:#132241;
+  box-shadow:0 0 0 1px rgba(255,255,255,.4) inset, 0 calc(var(--u)*.4) calc(var(--u)*1.3) rgba(0,0,0,.55); }
+.hk-fin-rank { flex:0 0 calc(var(--u)*2.6); text-align:right;
+  font-size:calc(var(--u)*2.3); font-weight:900; letter-spacing:-.04em; }
+.hk-fin-rank.rk1 { color:#ffd75e; }
+.hk-fin-rank.rk2 { color:#dfe8f2; }
+.hk-fin-rank.rk3 { color:#ffb277; }
+.hk-fin-row.you .hk-fin-rank { color:inherit; }
+/* Livery chip, same construction as the map/gap dots: the light inner rim is
+   what keeps Onyx's near-black visible on a dark row. */
+.hk-fin-chip { flex:0 0 auto; width:calc(var(--u)*1.5); height:calc(var(--u)*1.5);
+  border-radius:28%; background:var(--c,#8fa3bd);
+  box-shadow:inset 0 0 0 calc(var(--u)*.14) rgba(255,255,255,.5),
+             0 0 0 calc(var(--u)*.14) rgba(0,0,0,.65); }
+.hk-fin-name { flex:1 1 auto; letter-spacing:.14em; text-transform:uppercase; overflow:hidden;
+  white-space:nowrap; }
+.hk-fin-you-tag { font-size:.6em; font-style:normal; letter-spacing:.3em; opacity:.7;
+  margin-left:.7em; }
+.hk-fin-time { font-weight:900; letter-spacing:.01em; font-variant-numeric:tabular-nums; }
+/* Still racing: the row holds its place in the order, the time stays quiet. */
+.hk-fin-time.tbd { opacity:.35; }
+
+.hk-fin-right { margin-left:auto; display:flex; flex-direction:column; align-items:center;
+  justify-content:center; gap:calc(var(--u)*.8); padding-right:calc(var(--u)*4.5);
+  pointer-events:none; }
+.hk-fin-portrait { width:calc(var(--u)*24); height:calc(var(--u)*17); display:none;
+  position:relative; align-items:center; justify-content:center; }
+.hk-fin-portrait.on { display:flex; }
+/* A soft pool of light behind the transparent render, so the kart reads as
+   presented rather than pasted. */
+.hk-fin-portrait::before { content:''; position:absolute; inset:0;
+  background:radial-gradient(ellipse 60% 55% at 50% 60%, rgba(255,255,255,.10),
+    rgba(255,255,255,.02) 60%, transparent 76%); }
+.hk-fin-portrait img { position:relative; width:100%; height:100%; object-fit:contain;
+  filter:drop-shadow(0 calc(var(--u)*1.1) calc(var(--u)*2.2) rgba(0,0,0,.65)); }
+.hk-finish-place { display:flex; align-items:flex-start; justify-content:center;
+  gap:calc(var(--u)*.4); }
+.hk-finish-place b { font:800 calc(var(--u)*12)/0.9 var(--hkf); letter-spacing:-.05em;
+  background-image:linear-gradient(178deg,#fff 10%,var(--plc1,#ffd75e) 50%,var(--plc2,#c98d04) 100%);
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+  filter:drop-shadow(0 calc(var(--u)*.5) calc(var(--u)*1.6) rgba(0,0,0,.85)); }
+.hk-finish-place i { font:800 calc(var(--u)*4.2)/1 var(--hkf); font-style:normal;
+  color:var(--plc1,#ffd75e); text-shadow:var(--halo); margin-top:calc(var(--u)*1.1); }
+.hk-fin-stats { display:flex; flex-direction:column; gap:calc(var(--u)*.4);
+  min-width:calc(var(--u)*20); }
+.hk-fin-stat { display:flex; justify-content:space-between; align-items:baseline; gap:calc(var(--u)*2);
+  font:800 calc(var(--u)*1.8)/1.3 var(--hkf); text-shadow:var(--halo); }
+.hk-fin-stat i { font-style:normal; opacity:.6; letter-spacing:.22em;
+  font-size:calc(var(--u)*1.4); text-transform:uppercase; }
+.hk-fin-stat b { font-weight:900; font-variant-numeric:tabular-nums; }
+.hk-fin-stat.hi b { color:var(--gold); }
+
+.hk-finish-acts { display:flex; gap:calc(var(--u)*1.2); pointer-events:auto; }
 .hk-finish-btn { display:block; margin-top:0; flex:1 1 50%; }
 .hk-finish-btn.alt { background:linear-gradient(180deg,#b9d7ff,#6ea8f0); }
 
@@ -737,35 +826,6 @@ const CSS = `
 .hk-band-txt { position:relative; font-size:calc(var(--u)*4.0); font-weight:900; letter-spacing:.03em;
   white-space:nowrap; text-shadow:var(--halo); }
 
-/* Finish card. */
-.hk-finish { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
-  width:min(calc(var(--u)*54), 84vw); padding:calc(var(--u)*3.2) calc(var(--u)*3.4) calc(var(--u)*2.8);
-  --chamfer:calc(var(--u)*3.4); pointer-events:none; text-align:center;
-  clip-path:polygon(var(--chamfer) 0,calc(100% - var(--chamfer)) 0,100% var(--chamfer),
-    100% calc(100% - var(--chamfer)),calc(100% - var(--chamfer)) 100%,var(--chamfer) 100%,
-    0 calc(100% - var(--chamfer)),0 var(--chamfer));
-  background-image:linear-gradient(180deg, var(--gold) 0, var(--gold) calc(var(--u)*.4), rgba(0,0,0,0) calc(var(--u)*.4)),
-    linear-gradient(165deg, rgba(14,23,42,.93), rgba(4,7,16,.96));
-  filter:drop-shadow(0 calc(var(--u)*2) calc(var(--u)*5) rgba(0,0,0,.75)); }
-.hk-finish-hdr { font-size:calc(var(--u)*2.2); font-weight:900; letter-spacing:.42em; opacity:.8;
-  text-transform:uppercase; }
-.hk-finish-place { display:flex; align-items:flex-start; justify-content:center; margin:calc(var(--u)*.6) 0 calc(var(--u)*1.6); }
-.hk-finish-num { font-size:calc(var(--u)*14); font-weight:900; line-height:.8; letter-spacing:-.05em;
-  background-image:linear-gradient(178deg,#fff 12%,var(--gold) 50%,var(--gold-2) 78%,var(--gold-3) 100%);
-  -webkit-background-clip:text; background-clip:text; color:transparent;
-  filter:drop-shadow(0 calc(var(--u)*.5) calc(var(--u)*1.4) rgba(0,0,0,.6)); }
-.hk-finish-ord { font-size:calc(var(--u)*4.6); font-weight:900; color:var(--gold);
-  margin:calc(var(--u)*1.4) 0 0 calc(var(--u)*.4); }
-.hk-finish-rows { display:flex; flex-direction:column; gap:calc(var(--u)*.55); }
-.hk-frow { display:flex; justify-content:space-between; align-items:baseline;
-  font-size:calc(var(--u)*2.0); font-weight:800;
-  padding:calc(var(--u)*.55) calc(var(--u)*1.0); background:rgba(255,255,255,.055); }
-.hk-frow i { font-style:normal; opacity:.6; letter-spacing:.22em; font-size:calc(var(--u)*1.55);
-  text-transform:uppercase; }
-.hk-frow b { font-weight:900; font-size:calc(var(--u)*2.3); }
-.hk-frow.hi b { color:var(--gold); }
-.hk-finish-rule { height:calc(var(--u)*.3); margin:calc(var(--u)*1.4) 0 calc(var(--u)*1.6);
-  background:linear-gradient(90deg,transparent,var(--gold),transparent); opacity:.8; }
 `;
 
 // Triples reuse their single's art, so icon nodes are keyed by art kind and a
@@ -946,6 +1006,13 @@ const REDUCE = typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-m
  */
 let RACE_NOW = 0;
 const stamp = (a) => { a.__hkRaceStart = RACE_NOW; return a; };
+// Finish-sheet entrances go out unstamped: an unstamped animation is pinned to
+// its END by the capture harness, and the end state is exactly these elements'
+// settled look — the same rule CSS entrances follow. Stamped, they would pin
+// to the race clock of the frame that built them, which in a capture is the
+// capture's own target time: every row still inside its stagger delay, the
+// whole table photographed at opacity zero.
+const settled = (a) => { a.__hkRaceStart = undefined; return a; };
 
 /**
  * Run a multi-step keyframe sequence with LINEAR iteration timing.
@@ -999,6 +1066,8 @@ export class HUD {
       mute: q('[data-mute]'),
       finishSheet: q('[data-finishsheet]'), finishNum: q('[data-finishnum]'),
       finishOrd: q('[data-finishord]'), finishTrack: q('[data-finishtrack]'),
+      finRows: q('[data-finrows]'), finPortrait: q('[data-finportrait]'),
+      finStats: q('[data-finstats]'),
     };
 
     // Sound toggle. `onMuteToggle` is main's hook; the HUD owns only the glyph.
@@ -1080,6 +1149,8 @@ export class HUD {
     this._needleAngle = 0;
     this._surge = 0;
     this._finishShown = false;
+    this._finKey = '';        // fingerprint of the standings the sheet last drew
+    this._finAccum = 0;
     this._goShown = false;
     this._tint = 0;           // seconds left on the position gain/loss tint
 
@@ -1170,14 +1241,18 @@ export class HUD {
       </button>
       <button class="hk-help" data-help type="button" aria-label="Controls">?</button>
       <div class="hk-finish-sheet" data-finishsheet>
-        <div class="hk-help-card">
-          <div class="hk-help-h">FINISH<span>.</span></div>
-          <div class="hk-finish-place"><b data-finishnum>1</b><i data-finishord>st</i></div>
-          <div class="hk-finish-track" data-finishtrack></div>
+        <div class="hk-fin-left">
+          <div class="hk-fin-title">FINISH<span>.</span><i data-finishtrack></i></div>
+          <div class="hk-fin-rows" data-finrows></div>
           <div class="hk-finish-acts">
             <button class="hk-help-go hk-finish-btn" data-retry type="button">RETRY</button>
             <button class="hk-help-go hk-finish-btn alt" data-nexttrack type="button">NEXT CIRCUIT</button>
           </div>
+        </div>
+        <div class="hk-fin-right">
+          <div class="hk-fin-portrait" data-finportrait></div>
+          <div class="hk-finish-place"><b data-finishnum>1</b><i data-finishord>st</i></div>
+          <div class="hk-fin-stats" data-finstats></div>
         </div>
       </div>
 
@@ -1271,14 +1346,43 @@ export class HUD {
     this.mapCtx.setTransform(px / 256, 0, 0, px / 256, 0, 0);
   }
 
-  /** The flag. `place` is 1-based. */
-  showFinish(place) {
+  /**
+   * The flag. `place` is 1-based; `portrait`, when given, is a data-URL image
+   * of the player's own kart, rendered by main at the moment of the flag.
+   *
+   * The sheet opens with the placing and the portrait; the standings under
+   * them are drawn (and then kept live) by `_updateFinishRows`, because half
+   * the field is usually still racing when the player crosses the line and a
+   * results table frozen at that instant would be mostly dashes.
+   */
+  showFinish(place, portrait = null) {
+    if (this._finishShown) return;
+    this._finishShown = true;
     if (this.dom.finishNum) this.dom.finishNum.textContent = place;
     if (this.dom.finishOrd) this.dom.finishOrd.textContent = ordinal(place);
     if (this.dom.finishTrack) {
       this.dom.finishTrack.textContent = TRACKS[this._trackId]?.name ?? '';
     }
+    this.dom.finishSheet?.classList.add(`p${Math.min(place, 4)}`);
+    if (portrait && this.dom.finPortrait) {
+      const img = new Image();
+      img.src = portrait;
+      img.alt = '';
+      this.dom.finPortrait.replaceChildren(img);
+      this.dom.finPortrait.classList.add('on');
+      settled(seq(this.dom.finPortrait,
+        [{ opacity: 0, transform: 'translateX(12%) scale(.86)' },
+         { opacity: 1, transform: 'translateX(0) scale(1)' }],
+        520, { delay: 200, easing: EASE_BACK, fill: 'backwards' }));
+    }
     this.el.classList.add('finished');
+    // Rows land on the next update() tick, which also brings the race.
+    this._finAccum = 1;
+    const placeEl = this.dom.finishNum?.parentElement;
+    if (placeEl) {
+      settled(seq(placeEl, [{ transform: 'scale(2.1)', opacity: 0 }, { transform: 'scale(1)', opacity: 1 }],
+        640, { delay: 120, easing: EASE_BACK, fill: 'backwards' }));
+    }
   }
 
   setTrack(track) {
@@ -1506,7 +1610,15 @@ export class HUD {
     }
 
     // Finish -----------------------------------------------------------------
-    if (p.finished && !this._finishShown) { this._finishShown = true; this._showFinish(p, race); }
+    // main opens the sheet off the finish event (which also carries the kart
+    // portrait); this is the fallback for a caller that never wires events.
+    if (p.finished && !this._finishShown) this.showFinish(p.finishPlace || p.rank);
+    // After the flag the HUD's remaining job is keeping the standings honest
+    // while the AI field comes home. 4 Hz is plenty for a table.
+    if (this._finishShown) {
+      this._finAccum += dt;
+      if (this._finAccum >= 0.25) { this._finAccum = 0; this._updateFinishRows(race); }
+    }
 
     // Minimap ----------------------------------------------------------------
     this._mapAccum += dt;
@@ -1912,39 +2024,45 @@ export class HUD {
     this._countAt = undefined;
   }
 
-  _showFinish(p, race) {
-    const place = p.finishPlace || p.rank;
-    const best = p.lapTimes.length ? Math.min(...p.lapTimes) : null;
-    const card = document.createElement('div');
-    card.className = 'hk-finish';
-    card.innerHTML = `
-      <div class="hk-finish-hdr">Finish</div>
-      <div class="hk-finish-place">
-        <span class="hk-finish-num">${place}</span><span class="hk-finish-ord">${ordinal(place)}</span>
-      </div>
-      <div class="hk-finish-rule"></div>
-      <div class="hk-finish-rows">
-        <div class="hk-frow"><i>Total</i><b>${fmtTime(p.finishTime)}</b></div>
-        <div class="hk-frow hi"><i>Best lap</i><b>${best != null ? fmtTime(best) : '--:--.---'}</b></div>
-        <div class="hk-frow"><i>Coins</i><b>${p.coins}</b></div>
-        <div class="hk-frow"><i>Field</i><b>${race.karts.length} karts</b></div>
-      </div>`;
-    this.el.appendChild(card);
-    this._finishCard = card;
-
-    seq(card, [{ opacity: 0, transform: 'translate(-50%,-50%) scale(.82)' },
-      { opacity: 1, transform: 'translate(-50%,-50%) scale(1)' }],
-      520, { easing: EASE_BACK });
-    // Staggered rows: the eye is led down the card instead of being handed a
-    // wall of numbers at once.
-    const rows = card.querySelectorAll('.hk-frow');
-    rows.forEach((r, i) => seq(r,
-      [{ opacity: 0, transform: 'translateX(-10%)' }, { opacity: 1, transform: 'translateX(0)' }],
-      400, { delay: 380 + i * 110, easing: EASE_OUT, fill: 'backwards' },
-    ));
-    seq(card.querySelector('.hk-finish-num'),
-      [{ transform: 'scale(2.1)', opacity: 0 }, { transform: 'scale(1)', opacity: 1 }],
-      640, { delay: 120, easing: EASE_BACK, fill: 'backwards' });
+  /**
+   * The results table: place, livery, name, time — the player's row in
+   * highlight gold. Rebuilt only when the standings actually change (a kart
+   * finishing, or still-racing karts trading places), never per frame; a
+   * kart that has not finished holds its live position with a quiet dash
+   * where its time will land.
+   */
+  _updateFinishRows(race) {
+    if (!this.dom.finRows || !race.results) return;
+    const res = race.results;
+    const key = res.map((r) => `${r.name}:${r.time == null ? '' : 1}`).join('|');
+    if (key === this._finKey) return;
+    const first = !this._finKey;
+    this._finKey = key;
+    const hex = (c) => `#${c.toString(16).padStart(6, '0')}`;
+    this.dom.finRows.innerHTML = res.map((r) => `
+      <div class="hk-fin-row${r.isPlayer ? ' you' : ''}">
+        <b class="hk-fin-rank rk${Math.min(r.place, 4)}">${r.place}</b>
+        <span class="hk-fin-chip" style="--c:${hex(r.color)}"></span>
+        <span class="hk-fin-name">${r.name}${r.isPlayer ? '<i class="hk-fin-you-tag">You</i>' : ''}</span>
+        <span class="hk-fin-time${r.time == null ? ' tbd' : ''}">${r.time == null ? '—' : fmtTime(r.time)}</span>
+      </div>`).join('');
+    if (first) {
+      // Staggered entrance, top of the field first. Later rebuilds swap the
+      // table in place — a row that re-slid every time a rival finished would
+      // pull the eye twelve times over.
+      this.dom.finRows.querySelectorAll('.hk-fin-row').forEach((el, i) => settled(seq(el,
+        [{ opacity: 0, transform: 'skewX(-8deg) translateX(-8%)' },
+         { opacity: 1, transform: 'skewX(-8deg) translateX(0)' }],
+        360, { delay: 140 + i * 65, easing: EASE_OUT, fill: 'backwards' })));
+      const p = race.player;
+      const best = p.lapTimes.length ? Math.min(...p.lapTimes) : null;
+      if (this.dom.finStats) {
+        this.dom.finStats.innerHTML = `
+          <div class="hk-fin-stat"><i>Total</i><b>${fmtTime(p.finishTime)}</b></div>
+          <div class="hk-fin-stat hi"><i>Best lap</i><b>${best != null ? fmtTime(best) : '--:--.---'}</b></div>
+          <div class="hk-fin-stat"><i>Coins</i><b>${p.coins}</b></div>`;
+      }
+    }
   }
 
   setVisible(v) { this.el.style.display = v ? '' : 'none'; }
