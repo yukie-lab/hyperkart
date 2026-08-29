@@ -78,8 +78,19 @@ const CANYON_SPONSORS = [
   { bg: '#26343a', accent: '#5f8a72', fg: '#e7f0ea' },
 ];
 
+const FROST_SPONSORS = [
+  { bg: '#1b3350', accent: '#3d6c9c', fg: '#e8f2fb' },
+  { bg: '#f2f5f8', accent: '#c3d2e0', fg: '#1a2b3d' },
+  { bg: '#8f2f3a', accent: '#c26370', fg: '#fdeef0' },
+  { bg: '#243b3a', accent: '#437069', fg: '#e4f1ee' },
+  { bg: '#dfe6ec', accent: '#9fb3c6', fg: '#24303c' },
+  { bg: '#2f2a45', accent: '#5d5484', fg: '#eeeaf7' },
+  { bg: '#0f4a56', accent: '#2d8496', fg: '#e6f6f9' },
+  { bg: '#cfd8e2', accent: '#7c93ab', fg: '#1f2a36' },
+];
+
 /** Sponsor palettes a theme's `signage.sponsors` may name. */
-const SPONSOR_PALETTES = { coast: COAST_SPONSORS, canyon: CANYON_SPONSORS };
+const SPONSOR_PALETTES = { coast: COAST_SPONSORS, canyon: CANYON_SPONSORS, frost: FROST_SPONSORS };
 
 /**
  * The prop vocabulary a theme's `props` list may draw on.
@@ -110,6 +121,13 @@ const PROP_BUILDERS = {
   canyonRocks: '_canyonRocks',
   telegraphLine: '_telegraphLine',
   rockArch: '_rockArch',
+  // Winter
+  frostBackdrop: '_frostBackdrop',
+  frostCover: '_frostCover',
+  pines: '_pines',
+  frostRocks: '_frostRocks',
+  snowBanks: '_snowBanks',
+  chalets: '_chalets',
   // Space
   planets: '_planets',
   skyDust: '_skyDust',
@@ -1967,6 +1985,426 @@ export class Scenery {
   // =========================================================================
   // Rainbow Skyway
   // =========================================================================
+
+  // -- winter ---------------------------------------------------------------
+
+  /**
+   * The peaks ringing the basin at 560-1400 m.
+   *
+   * The far layer has a harder job here than on the other two circuits. A
+   * desert butte is dark against a bright sky and a headland is dark against a
+   * bright sea, so both read on silhouette alone. A snow peak is *white against
+   * white*, and silhouette gives nothing — which is why this track carries the
+   * densest fog in the game and why these are painted with an explicit snowline
+   * rather than left to the ground texture. The exposed rock below that line is
+   * the only dark mass on the horizon, and it is what makes the range read as
+   * distance rather than as a bright edge of the dome.
+   */
+  _frostBackdrop() {
+    const rng = makeRng(5501);
+    const c = this.terrain.centre;
+    const baseY = this.track.minY - 8;
+    const parts = [];
+    const count = 32;
+    const clear = this._horizonClear();
+    const WOBBLE = 0.22;
+    for (let i = 0; i < count; i++) {
+      const th = (i / count) * TAU + (rng() - 0.5) * 0.26;
+      const face = lerp(560, 1400, Math.pow(rng(), 0.6));
+      // Taller and narrower than the canyon's buttes. A mountain is defined by
+      // the ratio, not the height: the same 200 m mass drawn three times wider
+      // is a mesa, and a horizon of mesas is a desert whatever colour it is.
+      const h = lerp(120, 330, Math.pow(rng(), 1.25));
+      const w = h * lerp(0.55, 1.15, rng());
+      const rot = rng() * TAU;
+      const zf = lerp(0.65, 1.15, rng());
+      const reach = Math.max(w, w * zf) * mesaReach(WOBBLE);
+      const r = Math.max(face, clear) + reach;
+      parts.push({
+        // Few rings and deep gullies: a ridge-and-couloir profile rather than
+        // the flat cap and talus apron a mesa is built from.
+        geo: mesaGeometry(rng, { rings: 6, sides: 11, wobble: WOBBLE, flute: 0.20, rim: 0.02, gullies: 0.78 }),
+        color: 0xffffff,
+        m: T([c.x + Math.cos(th) * r, baseY, c.z + Math.sin(th) * r], [0, rot, 0], [w, h, w * zf]),
+      });
+    }
+    const geo = mergeParts(parts);
+    paintGeometry(geo, (v, col) => {
+      // Snowline in the geometry's own normalised height, with a wandering
+      // boundary so it is not a contour drawn round the range. Below it the
+      // rock is nearly four times darker than the cap — that ratio is the
+      // whole reason there is anything to see out there.
+      const wander = Math.sin(v.x * 0.9 + v.z * 1.3) * 0.5 + 0.5;
+      const line = lerp(0.30, 0.52, wander);
+      const snow = smoothstep(clamp01((v.y - line) / 0.16));
+      const k = lerp(0.27, 1.0, snow) * (0.94 + wander * 0.10);
+      col.setRGB(k * 0.97, k * 0.98, k);
+    });
+    geo.computeBoundingSphere();
+    const mat = this._rock({
+      baseY, tile: 60, macro: 0.10, macroDepth: 0.36,
+      strata: 34, strataDepth: 0.10, strataWarp: 28,
+      contact: 0.26, contactFall: 70, normalStrength: 0.45,
+      roughness: 1.0, envMapIntensity: 0.55, flatShading: true,
+    });
+    addMesh(this.group, geo, mat, { name: 'frostBackdrop', receive: false });
+  }
+
+  /**
+   * Conifer stands: the mid layer, and the only dark mass on the ground.
+   *
+   * A spruce is drawn as one swept stack whose radius saw-tooths, so each
+   * whorl of branches flares and then tapers into the next. That notched
+   * outline is the entire read at distance — a smooth cone is a traffic cone,
+   * and no amount of paint on one fixes it.
+   */
+  _pines() {
+    const variants = [
+      { rng: makeRng(401), h: 15.5, w: 2.5, whorls: 9, trunkR: 0.34 },
+      { rng: makeRng(402), h: 10.5, w: 2.1, whorls: 7, trunkR: 0.28 },
+      { rng: makeRng(403), h: 6.2, w: 1.7, whorls: 5, trunkR: 0.20 },
+    ];
+    const geos = variants.map((v) => {
+      const start = v.h * 0.14;
+      const pts = [];
+      for (let k = 0; k < v.whorls; k++) {
+        const t0 = k / v.whorls, t1 = (k + 1) / v.whorls;
+        const y0 = start + (v.h - start) * t0;
+        const y1 = start + (v.h - start) * t1;
+        // Radius falls faster than linearly, so the tree is a spire rather
+        // than a triangle: the lower whorls carry nearly all the mass.
+        const R = v.w * Math.pow(1 - t0, 1.25) * lerp(0.9, 1.1, v.rng());
+        pts.push({ p: new THREE.Vector3(0, y0, 0), r: R });
+        pts.push({ p: new THREE.Vector3(0, lerp(y0, y1, 0.80), 0), r: R * 0.30 });
+      }
+      pts.push({ p: new THREE.Vector3(0, v.h, 0), r: 0.03 });
+      const canopy = sweepStack(pts, 8, { capStart: false, capEnd: true, vScale: 0.2 });
+      const g = mergeParts([
+        { geo: columnGeometry(start + 0.6, v.trunkR, v.trunkR * 0.55, { segs: 2, sides: 6, curve: 1, capStart: true }), color: 0x4a3a2c },
+        { geo: canopy, color: 0xffffff },
+      ]);
+      const step = (v.h - start) / v.whorls;
+      paintGeometry(g, (vx, col) => {
+        if (vx.y < start + 0.55 && Math.hypot(vx.x, vx.z) < v.trunkR * 1.3) return;
+        // Snow load sits where a branch is horizontal, which on this shape is
+        // the flare at the bottom of each whorl. Deriving it from the same
+        // saw-tooth that cut the silhouette means the load lands on the
+        // branches instead of being sprinkled over the tree.
+        const ph = clamp01(mod(vx.y - start, step) / step);
+        const load = Math.pow(1 - ph, 3.2);
+        // Spruce is very dark — around a tenth of the snow it stands in. That
+        // contrast is doing the work the fog cannot: it is the only value
+        // separation available in the middle distance.
+        const t = clamp01(vx.y / v.h);
+        const base = lerp(0.055, 0.105, t);
+        col.setRGB(
+          lerp(base * 0.72, 0.92, load * 0.85),
+          lerp(base, 0.95, load * 0.85),
+          lerp(base * 0.86, 1.02, load * 0.85),
+        );
+      });
+      darkenBase(g, { height: 1.6, amount: 0.35 });
+      return g;
+    });
+
+    // Barely any. A laden conifer is a stiff, heavy thing, and the palm's
+    // amplitude on one of these reads as rubber.
+    const mat = this._mat(applyWind(
+      propMaterial({ roughness: 0.93, envMapIntensity: 0.30 }),
+      { amp: 0.014, freq: 0.75, height: 15, pow: 2.6, dirX: 1, dirZ: 0.4 },
+    ));
+
+    const sites = scatterAlong(this.rng, this.terrain, {
+      count: this._n(300), band: [NEAR_D + 1.0, 96], cycles: 8, threshold: 0.04,
+      bias: 2.6, cluster: [4, 12], clusterArc: 12, clusterLat: 9, minGap: 2.6, depthPow: 1.4,
+    });
+
+    const buckets = [[], [], []];
+    const n = new THREE.Vector3();
+    for (const it of sites) {
+      const vi = it.w < 0.30 ? 0 : it.w < 0.68 ? 1 : 2;
+      terrainNormal(this.terrain, it.s, it.lateral, n, 4);
+      const sc = lerp(0.60, 1.30, Math.pow(it.u, 0.9));
+      // Planted on the low corner of its own footprint, like the mesas and the
+      // cacti. A conifer's skirt is wide and this terrain is not flat.
+      it.pos.y = this.terrain.groundMin(it.s, it.lateral, variants[vi].w * sc * 0.7) - 0.30;
+      buckets[vi].push({
+        s: it.s,
+        m: poseMatrix(it.pos, {
+          yaw: it.v * TAU, normal: n, align: 0.25,
+          lean: (it.u - 0.5) * 0.09, leanDir: it.w * TAU,
+          scale: [sc, sc * lerp(0.85, 1.25, it.v), sc],
+        }, new THREE.Matrix4()),
+      });
+      this._blob(it, sc * variants[vi].w * 1.15, { opacity: 0.82 });
+    }
+    for (let i = 0; i < 3; i++) {
+      this._spread(`pine${i}`, geos[i], mat, buckets[i], { per: 30, maxChunks: 8, cast: true, receive: true, inflate: 1.6 });
+    }
+  }
+
+  /**
+   * What is left of the ground cover: dead bunch grass standing through the
+   * snow, and the wind-blown mounds around it.
+   *
+   * Nearly all of this is the grass, and it is here for one reason — a
+   * continuous white sheet has no scale. A metre-high tuft every few metres is
+   * what tells a driver how fast the near band of the frame is moving, and on
+   * this track it is the only thing in that band with any contrast at all.
+   */
+  _frostCover() {
+    const items = scatterAlong(this.rng, this.terrain, {
+      count: this._n(1500), band: [NEAR_D, 54], cycles: 16, threshold: -0.30,
+      bias: 1.5, cluster: [4, 11], clusterArc: 5.0, clusterLat: 3.6, depthPow: 1.9,
+    });
+    const geo = tuftGeometry(makeRng(96), { blades: 5, height: 0.82, width: 0.06, segs: 2, spread: 0.62, curl: 0.55 });
+    paintGeometry(geo, (v, col) => {
+      const t = clamp01(v.y / 0.9);
+      // Bleached straw. Warm, because it is the only warm thing on the circuit
+      // and a basin of pure blue-white has nothing for the eye to rest on.
+      col.setRGB(lerp(0.30, 0.68, t), lerp(0.25, 0.58, t), lerp(0.17, 0.36, t));
+    });
+    const mat = this._mat(applyWind(
+      propMaterial({ roughness: 0.95, side: THREE.DoubleSide, envMapIntensity: 0.30 }),
+      { amp: 0.11, freq: 2.6, height: 1.0, pow: 1.4 },
+    ));
+    const out = [];
+    const n = new THREE.Vector3();
+    for (const it of items) {
+      terrainNormal(this.terrain, it.s, it.lateral, n, 3);
+      const sc = lerp(0.6, 1.7, it.u * it.u);
+      // Buried to the shins. Grass that meets the snow at its own base is
+      // standing *on* the surface; grass that comes *through* it is what a
+      // winter field looks like.
+      it.pos.y -= sc * lerp(0.10, 0.30, it.v);
+      out.push({
+        s: it.s,
+        m: poseMatrix(it.pos, { yaw: it.v * TAU, normal: n, align: 0.7, scale: [sc, sc * lerp(0.7, 1.4, it.w), sc] }, new THREE.Matrix4()),
+        color: new THREE.Color().setHSL(lerp(0.08, 0.13, it.w), lerp(0.14, 0.34, it.u), lerp(0.24, 0.42, it.v), THREE.SRGBColorSpace),
+      });
+    }
+    this._spread('frostGrass', geo, mat, out, { per: 175, maxChunks: 10, inflate: 0.8 });
+
+    // Drift mounds: the mid-size mass between grass and boulder, and the thing
+    // that stops the snowfield reading as a plane.
+    const drifts = scatterAlong(this.rng, this.terrain, {
+      count: this._n(300), band: [NEAR_D + 1, 82], cycles: 9, threshold: -0.06,
+      bias: 1.8, cluster: [2, 5], clusterArc: 9, clusterLat: 7, minGap: 2.2,
+    });
+    const driftGeo = blobClusterGeometry(makeRng(97), { lobes: 3, detail: 0, spread: 0.75, squash: 0.34 });
+    paintGeometry(driftGeo, (v, col) => {
+      const t = clamp01(v.y / 0.9);
+      col.setRGB(lerp(0.72, 0.99, t), lerp(0.75, 1.00, t), lerp(0.82, 1.02, t));
+    });
+    const driftMat = this._mat(propMaterial({ roughness: 0.88, flatShading: false, envMapIntensity: 0.55 }));
+    const dItems = [];
+    for (const it of drifts) {
+      terrainNormal(this.terrain, it.s, it.lateral, n, 3);
+      const sc = lerp(1.1, 4.2, it.u);
+      // Sunk deep: a drift is a swelling of the ground, not an object resting
+      // on it, and any daylight under its edge destroys that read instantly.
+      it.pos.y -= sc * 0.30;
+      dItems.push({
+        s: it.s,
+        m: poseMatrix(it.pos, {
+          yaw: it.v * TAU, normal: n, align: 0.85,
+          scale: [sc * lerp(0.9, 1.6, it.v), sc * lerp(0.30, 0.55, it.w), sc],
+        }, new THREE.Matrix4()),
+      });
+    }
+    // No contact blobs. A drift *is* the ground here, and an occlusion ring
+    // around one would draw the seam the sinking exists to hide.
+    this._spread('snowDrift', driftGeo, driftMat, dItems, { per: 55, maxChunks: 8, cast: true, receive: true });
+  }
+
+  /** Boulders under snow caps: the same rock the peaks are cut from. */
+  _frostRocks() {
+    const geos = [0, 1, 2].map((i) => {
+      const g = rockGeometry(makeRng(940 + i), { detail: i === 2 ? 1 : 0, rough: 0.32 + i * 0.05, squash: 0.58 + i * 0.1 });
+      paintGeometry(g, (v, col) => {
+        // A cap, not a coating: snow lies on what faces up and nowhere else,
+        // and the height at which it stops is what says a boulder is *under*
+        // snow rather than made of it.
+        const cap = smoothstep(clamp01((v.y - 0.18) / 0.34));
+        const k = (0.86 + (Math.sin(v.x * 5.1 + v.y * 4.3 + v.z * 6.1 + i) * 0.5 + 0.5) * 0.22);
+        const rock = k * 0.42;
+        col.setRGB(lerp(rock, k * 1.02, cap), lerp(rock * 1.01, k * 1.03, cap), lerp(rock * 1.06, k * 1.06, cap));
+      });
+      return g;
+    });
+    const mat = this._rock({
+      tile: 2.8, macro: 0.22, macroDepth: 0.28,
+      strata: 1.0, strataDepth: 0.12, strataWarp: 0.8,
+      contact: 0.32, contactFall: 1.5, normalStrength: 0.6,
+      roughness: 1.0, envMapIntensity: 0.45, flatShading: true,
+    });
+    const sites = scatterAlong(this.rng, this.terrain, {
+      count: this._n(300), band: [NEAR_D, 110], cycles: 12, threshold: -0.18,
+      bias: 2.0, cluster: [2, 8], clusterArc: 9, clusterLat: 7, minGap: 1.4, depthPow: 1.25,
+    });
+    const buckets = [[], [], []];
+    const n = new THREE.Vector3();
+    for (const it of sites) {
+      terrainNormal(this.terrain, it.s, it.lateral, n, 3);
+      const sc = lerp(0.5, 4.4, Math.pow(it.u, 2.8));
+      // Deeper than the canyon's, because these are drifted around as well as
+      // sunk: a boulder in a snowfield shows less of itself than one in sand.
+      it.pos.y -= sc * 0.46;
+      buckets[Math.floor(it.w * 3) % 3].push({
+        s: it.s,
+        m: poseMatrix(it.pos, {
+          yaw: it.v * TAU, normal: n, align: 0.8,
+          scale: [sc * lerp(0.8, 1.5, it.v), sc * lerp(0.5, 1.0, it.w), sc * lerp(0.8, 1.4, it.u)],
+        }, new THREE.Matrix4()),
+      });
+      if (sc > 0.8) this._blob(it, sc * 1.3, { opacity: 0.55 * clamp01((sc - 0.7) / 0.8) });
+    }
+    for (let i = 0; i < 3; i++) this._spread(`frostRock${i}`, geos[i], mat, buckets[i], { per: 52, maxChunks: 7, cast: true, receive: true });
+  }
+
+  /**
+   * The plough banks: a continuous ridge of cleared snow immediately behind
+   * the barrier, both sides, the whole way round.
+   *
+   * This is the circuit's signature and the one prop family that is not
+   * landscape. Everything else here would be true of an empty valley; a bank
+   * of snow pushed into a wall says a machine came through this morning and
+   * opened the road, which is the difference between a winter place and a
+   * winter *race*.
+   *
+   * Regular by construction, like the telegraph poles and for the same reason:
+   * it is man-made, so a rhythm is correct rather than a tell. It also fills
+   * the fastest-moving band of the frame, which on the other circuits is the
+   * verge's job — and here the verge cannot do it alone because a white post
+   * on a white field is invisible.
+   */
+  _snowBanks() {
+    const L = this.track.length;
+    const geo = blobClusterGeometry(makeRng(98), { lobes: 4, detail: 0, spread: 0.9, squash: 0.42 });
+    paintGeometry(geo, (v, col) => {
+      // The cut face a blade leaves is bluer and slightly darker than the
+      // wind-finished top: it is fresh, packed, and sees only sky.
+      const t = clamp01(v.y / 0.9);
+      col.setRGB(lerp(0.66, 1.00, t), lerp(0.70, 1.01, t), lerp(0.80, 1.02, t));
+    });
+    const mat = this._mat(propMaterial({ roughness: 0.86, envMapIntensity: 0.60 }));
+
+    const items = [];
+    const p = new THREE.Vector3();
+    const nrm = new THREE.Vector3();
+    // Height wanders on a loop field rather than randomly: a plough throws more
+    // where it turned in, so the bank is deep on the outside of the corners it
+    // was cleared around, and that variation has to be continuous.
+    const heap = loopField(this.rng, { cycles: 6, octaves: 2 });
+    const STEP = 5.2;
+    for (let s = 0; s < L; s += STEP) {
+      const f = this.track.frameAt(s, {});
+      const swell = 0.5 + 0.5 * heap(s / L);
+      for (const side of [-1, 1]) {
+        // Thrown further on the outside of a bend, which is also where a car
+        // leaving the road arrives.
+        const outside = this._outsideSign(s) === side ? 1 : 0;
+        // Just outside the verge's tyre stacks, which then sit half-buried in
+        // front of it — the layering a plough actually produces. Anything
+        // nearer than `NEAR_D` is over the hole the terrain mesh leaves around
+        // the road and would hang in the air.
+        const lateral = side * (this.track.halfWidthAt(s) + WALL_OFFSET + NEAR_D + 1.6);
+        this.terrain.place(s, lateral, p);
+        terrainNormal(this.terrain, s, lateral, nrm, 3);
+        const h = lerp(1.15, 2.35, swell) * lerp(1.0, 1.28, outside);
+        const long = STEP * 0.78;
+        p.y -= h * 0.42;
+        items.push({
+          s,
+          m: poseMatrix(p.clone(), {
+            // Along the road, not across it: `heading` is the tangent, and the
+            // geometry's long axis is X.
+            yaw: f.heading, normal: nrm, align: 0.6,
+            scale: [long, h, lerp(2.0, 3.1, swell)],
+          }, new THREE.Matrix4()),
+        });
+      }
+    }
+    this._spread('snowBank', geo, mat, items, { per: 46, maxChunks: 9, cast: true, receive: true });
+  }
+
+  /**
+   * Timber lodges on the slopes above the circuit.
+   *
+   * Three of them, and they are the only right angles in the landscape. A
+   * mountainside with nothing built on it has no scale — a peak could be two
+   * hundred metres or two thousand — and one building with a known storey
+   * height fixes the whole range. That is the entire job, which is why there
+   * are three and not thirty.
+   */
+  _chalets() {
+    const parts = [];
+    const W = 7.0, D = 5.0, H = 3.4, EAVE = 0.9;
+    // Body, then a gable roof as two slabs, then the snow lying on it.
+    parts.push({ geo: new THREE.BoxGeometry(W, H, D), color: 0x5a4030, m: T([0, H * 0.5, 0]) });
+    parts.push({ geo: new THREE.BoxGeometry(W * 0.94, 0.32, D * 0.94), color: 0x3e2c20, m: T([0, H, 0]) });
+    for (const sx of [-1, 1]) {
+      const slope = 0.72;
+      const len = Math.hypot(D * 0.5 + EAVE, (D * 0.5 + EAVE) * slope);
+      parts.push({
+        geo: new THREE.BoxGeometry(W + EAVE * 2, 0.26, len * 2),
+        color: 0x2f2118,
+        m: T([0, H + 0.34 + (D * 0.5 + EAVE) * slope * 0.5, sx * (D * 0.25 + EAVE * 0.5)],
+             [sx * -Math.atan(slope), 0, 0]),
+      });
+      // The snow on the roof, a shade proud of it and slightly short of the
+      // eaves — it slides, and a slab that reaches the very edge reads as
+      // paint. This is also the only bright plane on the building, so it is
+      // what makes a chalet legible at four hundred metres.
+      parts.push({
+        geo: new THREE.BoxGeometry(W + EAVE * 1.3, 0.22, len * 1.72),
+        color: 0xf4f8fc,
+        m: T([0, H + 0.56 + (D * 0.5 + EAVE) * slope * 0.5, sx * (D * 0.25 + EAVE * 0.5)],
+             [sx * -Math.atan(slope), 0, 0]),
+      });
+    }
+    // Gable ends, so the roof does not float over an open box.
+    for (const sz of [-1, 1]) {
+      parts.push({
+        geo: new THREE.BoxGeometry(W * 0.98, (D * 0.5 + EAVE) * 0.72, 0.3),
+        color: 0x6b4c38,
+        m: T([0, H + (D * 0.5 + EAVE) * 0.72 * 0.5, sz * D * 0.48]),
+      });
+    }
+    // Lit windows. Unlit glass on a dark wall is a black rectangle, which at
+    // this distance is a hole; a warm one is the only saturated colour in the
+    // frame and it is worth far more than its four hundred triangles.
+    for (const [wx, wy, wz, rot] of [[-1.9, 1.9, 1, 0], [1.9, 1.9, 1, 0], [1, 1.9, -1, 0]]) {
+      parts.push({
+        geo: new THREE.BoxGeometry(1.15, 0.95, 0.16),
+        color: 0xffcf7a,
+        m: T([wx, wy, wz * (D * 0.5 + 0.02)], [0, rot, 0]),
+      });
+    }
+    const geo = mergeParts(parts);
+    darkenBase(geo, { height: 1.0, amount: 0.30 });
+    const mat = this._mat(propMaterial({ roughness: 0.88, envMapIntensity: 0.45, flatShading: true }));
+
+    const items = [];
+    const p = new THREE.Vector3();
+    const nrm = new THREE.Vector3();
+    for (const [frac, side, dist, sc] of [[0.16, 1, 132, 1.35], [0.52, -1, 96, 1.0], [0.83, 1, 158, 1.6]]) {
+      const st = mod(frac * this.track.length, this.track.length);
+      const lateral = side * (this.track.halfWidthAt(st) + WALL_OFFSET + dist);
+      this.terrain.place(st, lateral, p);
+      terrainNormal(this.terrain, st, lateral, nrm, 6);
+      // A building is levelled into its slope, not laid on it — a chalet tilted
+      // with the hill is the single most obvious "prop dropped on terrain" tell
+      // there is. It is cut in instead, so the downhill side is buried.
+      p.y = this.terrain.groundMin(st, lateral, W * sc * 0.6) - 0.25;
+      items.push({
+        s: st,
+        m: poseMatrix(p.clone(), { yaw: (frac * 7.3) % TAU, scale: sc }, new THREE.Matrix4()),
+      });
+      this._blob({ s: st, lateral, u: frac, v: 0.5 }, W * sc * 0.62, { opacity: 0.7 });
+    }
+    this._spread('chalet', geo, mat, items, { per: 3, maxChunks: 3, cast: true, receive: true });
+  }
 
   /** Gas giants and a ringed world: the far layer this track otherwise lacks. */
   _planets() {

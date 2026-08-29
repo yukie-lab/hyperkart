@@ -968,6 +968,251 @@ export function grass({ size = 1024, seed = 61, tint = 0x4e8a3c } = {}) {
 }
 
 /**
+ * Wind-packed snow: sastrugi over drifted powder.
+ *
+ * Snow is the one ground surface in this file whose form is almost entirely
+ * *relief*. Fresh snow is around 0.8 linear albedo and flat to within a few
+ * percent across a whole field, so the tonal tricks the sand and dirt lean on —
+ * wind sorting, damp troughs, bleached crests — have almost nothing to work
+ * with here. Drive albedo variation as hard as those tiles do and the result is
+ * not snow, it is grey cloth. So the albedo stays inside +-5% and the height
+ * field carries the read, which is also why the sastrugi are the largest
+ * feature in the tile rather than a detail laid over one.
+ *
+ * The one colour move that is real: a trough sees less sky and more of its own
+ * blue-scattered walls, so it goes *bluer* as it goes darker rather than just
+ * darker. That hue shift is most of what separates snow from white sand at a
+ * glance, and it costs one lerp.
+ *
+ * Sparkle lives in the roughness map and nowhere else. A specular glitter field
+ * written into the *normal* map is exactly the one-texel-ridge defect that made
+ * the asphalt and the dirt boil, and snow — bright, and viewed at a grazing
+ * angle for an entire lap — is the worst possible surface to repeat it on.
+ */
+export function snow({ size = 1024, seed = 137, tint = 0xe6edf6 } = {}) {
+  const key = `snow_${size}_${seed}_${tint}`;
+  if (_textureCache.has(key)) return _textureCache.get(key);
+  const grainN = tiling(seed, size, 12);        // ~16 cm: the crystal crust
+  const crustN = tiling(seed + 47, size, 64);   // ~87 cm: where the wind packed it
+  const warpN = tiling(seed + 5, size, 128);
+  const driftN = tiling(seed + 211, size, 224); // ~3.1 m: the drifts themselves
+
+  const base = paintTint(tint);
+
+  // Sastrugi, as whole periods per tile axis so the train tiles exactly — the
+  // same construction as the sand's ripples and for the same reason. hypot(4,7)
+  // = 8.06 periods across 14 m is a 1.74 m wavelength running 30 degrees off
+  // the tile grid: coarse enough to survive four mip levels, and off-axis
+  // enough never to read as drawn to the texture.
+  const RX = 4, RY = 7;
+
+  const height = new Float32Array(size * size);
+  const crestBuf = new Float32Array(size * size);
+  const driftBuf = new Float32Array(size * size);
+  const crustBuf = new Float32Array(size * size);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = y * size + x;
+      const warp = (fbm2D(warpN.n, x / warpN.k, y / warpN.k, 3) - 0.5) * 0.45;
+      const phase = ((x * RX + y * RY) / size + warp) * TAU;
+      // Sastrugi are cut by erosion, not deposited: the windward face is
+      // scoured to a long shallow ramp and the lee face is a short scarp. That
+      // asymmetry is the difference between snow and a sine wave, so the
+      // exponent runs the other way from the sand's ripples.
+      const c = Math.cos(phase);
+      const ridge = 0.5 + 0.5 * Math.sign(c) * Math.pow(Math.abs(c), 1.6);
+      const grain = fbm2D(grainN.n, x / grainN.k, y / grainN.k, 2);
+      const crust = fbm2D(crustN.n, x / crustN.k, y / crustN.k, 3);
+      const drift = fbm2D(driftN.n, x / driftN.k, y / driftN.k, 4);
+      crestBuf[i] = ridge;
+      crustBuf[i] = crust;
+      driftBuf[i] = drift;
+      // Weighted towards the two coarse terms. The 16 cm grain is worth well
+      // under a pixel by thirty metres and carries a twelfth of the relief, so
+      // when it falls off the end of the mip chain there is nothing there to
+      // shimmer.
+      height[i] = ridge * 0.40 + drift * 0.38 + crust * 0.14 + grain * 0.08;
+    }
+  }
+
+  const c = paint(size, (x, y, o) => {
+    const i = y * size + x;
+    // Depth in the surface, 0 at a scoured trough and 1 on a crest.
+    const d = clamp01(crestBuf[i] * 0.62 + driftBuf[i] * 0.38);
+    const l = lerp(0.955, 1.030, d) * lerp(0.985, 1.012, crustBuf[i]);
+    // Troughs bluer, crests very slightly warm: a crest is lit by the sun and
+    // a trough only by the sky, and the tile can pre-empt a little of that.
+    o[0] = base.r * l * lerp(0.965, 1.005, d) * 255;
+    o[1] = base.g * l * lerp(0.985, 1.002, d) * 255;
+    o[2] = base.b * l * lerp(1.030, 0.998, d) * 255;
+  });
+
+  const roughC = paint(size, (x, y, o) => {
+    const i = y * size + x;
+    // Wind-packed crust is glossy; the powder the wind has not reached is not.
+    // The crystal grain rides here and only here — this is the sparkle, and in
+    // the roughness map it survives minification as a smooth average instead of
+    // turning into moving specular noise.
+    let rgh = lerp(0.93, 0.62, smoothstep(crustBuf[i] * 1.15));
+    rgh *= lerp(1.02, 0.94, crestBuf[i]);
+    rgh *= lerp(1.01, 0.97, grainNoiseAt(grainN, x, y));
+    o[0] = o[1] = o[2] = clamp01(rgh) * 255;
+  });
+
+  const result = {
+    map: makeTexture(c, { srgb: true }),
+    // Snow genuinely has more relief per metre than sand does, but it is also
+    // the brightest ground in the game and sits under a low sun for the whole
+    // lap — the two conditions that turn an honest normal map into glare. This
+    // is a little under the sand's, deliberately.
+    normalMap: makeTexture(heightToNormal(height, size, 1.20)),
+    roughnessMap: makeTexture(roughC),
+    normalScale: 0.50,
+    meanLuma: meanLinearLuma(c),
+    meanColor: meanLinearColor(c),
+  };
+  _textureCache.set(key, result);
+  return result;
+}
+
+/** One fbm sample of a `tiling` basis, for callers that need it a second time. */
+function grainNoiseAt(t, x, y) {
+  return fbm2D(t.n, x / t.k, y / t.k, 2);
+}
+
+/**
+ * Race ice: refrozen plates over swept, gritted hardpack.
+ *
+ * This is a *road* surface and returns the same shape the asphalt does, so it
+ * runs through the identical road-space wear pass — patches, screed joints, the
+ * racing line, the bleached last metre before the kerb. All of that reads
+ * correctly on ice and one part of it reads better: the polished core of the
+ * racing line is literally true here, because that is the strip the field has
+ * swept clean and burnished for three laps.
+ *
+ * Ice separates from the snow beside it by *value*, not by hue. The run-off is
+ * near 0.8 linear albedo; this tile sits around 0.20, which is the whole reason
+ * a driver can see where the circuit goes. A pale ice road on a white basin is
+ * the same mistake as a dark road under a 16-degree sun, in the other
+ * direction, and it is not recoverable by exposure because exposure moves both.
+ *
+ * Relief is nearly nothing, and that is not laziness: ice is flat, and every
+ * bump written here would be resolved by the specular lobe of the glossiest
+ * surface in the game. The roughness map does the work instead — polished
+ * plates against frosted rime is what says "ice" long before any normal does.
+ */
+export function ice({ size = 1024, seed = 19, tint = 0x8fa3b5 } = {}) {
+  const key = `ice_${size}_${seed}_${tint}`;
+  if (_textureCache.has(key)) return _textureCache.get(key);
+
+  // Scales in texels of the 6 m road tile: ~3.5 cm grit, ~23 cm sweep streak,
+  // ~56 cm fracture cells, ~75 cm refrozen plates, ~1.5 m rime bloom.
+  const gritN = tiling(seed, size, 6);
+  const sweepN = tiling(seed + 73, size, 40);
+  const fracN = tiling(seed + 157, size, 96);
+  const plateN = tiling(seed + 229, size, 128);
+  const rimeN = tiling(seed + 331, size, 256);
+
+  const base = paintTint(tint);
+
+  const height = new Float32Array(size * size);
+  const plateBuf = new Float32Array(size * size);
+  const rimeBuf = new Float32Array(size * size);
+  const fracBuf = new Float32Array(size * size);
+  const gritBuf = new Float32Array(size * size);
+
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = y * size + x;
+      const plate = fbm2D(plateN.n, x / plateN.k, y / plateN.k, 3);
+      const rime = fbm2D(rimeN.n, x / rimeN.k, y / rimeN.k, 3);
+      const grit = fbm2D(gritN.n, x / gritN.k, y / gritN.k, 2);
+      // Fractures: a ridged basis, but broad and taken to a low power. The
+      // asphalt's crack field was ridged noise to the ninth, which leaves
+      // crests one or two texels wide — a normal spike no mip chain and no
+      // anisotropy can average away, and measurably the whole of that
+      // surface's temporal instability. A fissure in ice is a millimetre of
+      // relief and centimetres of white; it belongs in albedo, not in height.
+      const fr = fbm2D(fracN.n, x / fracN.k, y / fracN.k, 4);
+      const frac = Math.pow(1 - Math.abs(fr * 2 - 1), 3.0);
+      // The sweep: the one thing on this tile with a direction. Stretched
+      // eight to one along the direction of travel, because a road surface
+      // whose grain runs across it reads as a slab rather than as something
+      // that has been driven on.
+      const sweep = fbm2D(sweepN.n, x / sweepN.k, y / (sweepN.k * 8), 3);
+      plateBuf[i] = plate;
+      rimeBuf[i] = rime;
+      fracBuf[i] = frac;
+      gritBuf[i] = grit;
+      // A fifth of the relief the asphalt carries, and all of it at 20 cm and
+      // above.
+      height[i] = plate * 0.52 + sweep * 0.30 + rime * 0.18;
+    }
+  }
+
+  const mapC = paint(size, (x, y, o) => {
+    const i = y * size + x;
+    // Clear ice is dark because you are looking *through* it at the packed
+    // ground below; rime is opaque and near-white. That is the tile's contrast,
+    // and it is a depth cue rather than a paint job.
+    const clear = clamp01(plateBuf[i] * 1.15 - 0.10);
+    const bloom = clamp01(rimeBuf[i] * 1.35 - 0.30);
+    let l = lerp(0.70, 0.98, clear);
+    l = lerp(l, 1.34, bloom * 0.50);
+    l *= lerp(0.97, 1.03, gritBuf[i]);
+    // Fractures are shattered ice: white, and the brightest thing in the tile.
+    // Held down from 2.05 — measured, the highlights were pulling the tile's
+    // mean up far enough that the far road, which fades towards that mean,
+    // converged on the snow beside it.
+    l = lerp(l, 1.55, fracBuf[i] * 0.38);
+    // Traction grit, in albedo only. Dark specks are what stops a 20% surface
+    // reading as wet tarmac, and at 3.5 cm they must never touch the height.
+    const grit = clamp01(gritBuf[i] * 1.9 - 1.05);
+    l *= lerp(1.0, 0.58, grit);
+    // Clear ice is blue for the same reason deep water is; frosted ice is not.
+    const blue = clear * (1 - bloom * 0.7);
+    o[0] = base.r * l * lerp(1.00, 0.92, blue) * 255;
+    o[1] = base.g * l * lerp(1.00, 0.98, blue) * 255;
+    o[2] = base.b * l * lerp(1.00, 1.10, blue) * 255;
+  });
+
+  const roughC = paint(size, (x, y, o) => {
+    const i = y * size + x;
+    // The whole signature of the surface: a polished plate against chalky
+    // rime, with a steep ramp between them because nothing in the middle reads
+    // as ice.
+    //
+    // The polished floor was 0.11 — skating-rink glass — and that is what
+    // broke the circuit's readability. On the half of the lap that faces the
+    // sun, a near-mirror road returns the sky *and* the disc on top of a
+    // mid-grey albedo, and the driving surface measured 0.021 *brighter* than
+    // the snow beside it against -0.09 to -0.21 on the other three circuits.
+    // Race ice is swept, gritted and scored by blades; it is not a mirror. At
+    // 0.24 this is still by some way the glossiest driving surface in the game
+    // — the asphalt tile runs 0.76 to 0.99 — and it no longer blows out.
+    const clear = clamp01(plateBuf[i] * 1.15 - 0.10);
+    let rgh = lerp(0.55, 0.24, smoothstep(clear));
+    rgh = lerp(rgh, 0.88, clamp01(rimeBuf[i] * 1.35 - 0.30));
+    rgh = lerp(rgh, 0.93, fracBuf[i] * 0.7);
+    rgh = lerp(rgh, 0.84, clamp01(gritBuf[i] * 1.9 - 1.05));
+    o[0] = o[1] = o[2] = clamp01(rgh) * 255;
+  });
+
+  const result = {
+    map: makeTexture(mapC, { srgb: true }),
+    normalMap: makeTexture(heightToNormal(height, size, 0.85)),
+    roughnessMap: makeTexture(roughC),
+    // A third of the asphalt's. On the glossiest driving surface in the game,
+    // normal detail is not read as texture — it is read as a moving highlight.
+    normalScale: 0.22,
+    meanLuma: meanLinearLuma(mapC),
+    meanColor: meanLinearColor(mapC),
+  };
+  _textureCache.set(key, result);
+  return result;
+}
+
+/**
  * Boost strip: forward-pointing chevrons painted onto the tarmac.
  *
  * The shape is the whole point. A pad has to answer two questions in the
@@ -1650,7 +1895,7 @@ export function groundTexturesFor(theme) {
   return fn({ size: 1024, tint: theme?.groundColor });
 }
 
-const GROUND_TEXTURES = { sand, dirt, grass };
+const GROUND_TEXTURES = { sand, dirt, grass, snow };
 
 export function clearTextureCache() {
   for (const v of _textureCache.values()) {
@@ -1659,4 +1904,4 @@ export function clearTextureCache() {
   _textureCache.clear();
 }
 
-export const SURFACE_TEXTURES = { asphalt, sand, dirt, groundDetail, grass, curb, checker, gridBox, rainbow, paintedMetal, laneMarkings, waterNormal, boostPad, boostSpill };
+export const SURFACE_TEXTURES = { asphalt, ice, sand, dirt, snow, groundDetail, grass, curb, checker, gridBox, rainbow, paintedMetal, laneMarkings, waterNormal, boostPad, boostSpill };

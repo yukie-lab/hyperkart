@@ -289,12 +289,160 @@ export const TRACKS = {
     startLineT: 0.0,
   },
 
+  frostlineBasin: {
+    id: 'frostlineBasin',
+    name: 'Frostline Basin',
+    subtitle: 'Alpine Ice Circuit',
+    laps: 3,
+    difficulty: 3,
+    /**
+     * The layout is built around one number: the road's grip is 0.80, not 1.0.
+     *
+     * Steering authority and acceleration both scale with it, so this circuit
+     * turns roughly a fifth less than the others for the same input. The
+     * answer is width, not gentler corners — a slippery road that is also
+     * narrow is a road you hit walls on, which is punishment rather than
+     * character. So the minimum width here is 15 m against 12-12.5 m on the
+     * other three, the corners are long and open, and there is exactly one
+     * genuinely tight turn in the lap for the width to be worth having.
+     */
+    nodes: makeLoopNodes({
+      base: 222,
+      squash: 1.00,
+      harmonics: [
+        [1, 40, 1.9],
+        [2, 34, 0.9],
+        [3, 14, 2.6],
+      ],
+      // Half the canyon's relief. A basin floor is not a mesa range, and on a
+      // low-grip surface a crest that unloads the kart mid-corner is the one
+      // combination a player cannot read in advance.
+      elevation: [
+        [1, 11, 1.0],
+        [2, 6, 2.2],
+        [3, -3, 0.5],
+      ],
+      features: [
+        // The long outer sweeper, taken flat. This is the corner the whole
+        // layout exists to set up: wide, banked away from the lake, and long
+        // enough that a drift held through it is worth a full charge.
+        { theta: 1.15, sigma: 0.30, amp: 48, rise: 4 },
+        // Compound descent to the lake shore, and the tightest point of the
+        // lap — the geometry report puts its apex at t=0.412. Opened from a
+        // 17 m radius: with steering authority scaled by the road's 0.80 grip
+        // that corner asked for 1.01 rad/s against 1.72 available, and 10% of
+        // the lap sat within a whisker of it. The other three circuits run a
+        // 2.3x margin at their worst corner.
+        { theta: 2.65, sigma: 0.265, amp: -43, rise: -6 },
+        // The second-tightest, and the one the lap's long drift is taken
+        // through. Left alone: at 43 m it is well inside what 0.80 grip can
+        // point, and it is the only place on the circuit that asks a driver
+        // to actually slow down.
+        { theta: 4.40, sigma: 0.19, amp: -60, rise: 3 },
+        { theta: 5.40, sigma: 0.28, amp: 40, rise: -4 },
+      ],
+      widthProfile: [
+        [0.0, 21],
+        [1.15, 23],       // the sweeper is the widest road in the game
+        [2.65, 17],       // the descent: narrowest, because it is the apex
+        [4.40, 18],
+        [5.40, 20],
+      ],
+      count: 110,
+    }),
+    theme: {
+      key: 'frost',
+      timeOfDay: 'overcast',
+      sunAzimuth: 2.35,
+      sunElevation: 0.22,
+      sunColor: 0xfff2e4,
+      // x the preset's sunScale 1.60 = 8.96, just under the coast's 9.99. A
+      // soft key on purpose: hard shadows on snow are a clear-day phenomenon
+      // and this is a cloud deck.
+      sunStrength: 5.60,
+      // The lowest in the game, and the one number this whole track hangs on.
+      // Snow is ~0.8 linear albedo against sand's 0.5 and tarmac's 0.07, so
+      // metering the sky where the coast does would put the *ground* on the
+      // shoulder of the tone curve and leave the karts nowhere to go.
+      exposureTarget: 0.40,
+      // x envScale 1.25 = 1.0: believe the probe, exactly as the other two
+      // daylight circuits do.
+      envIntensity: 0.80,
+      ambientColor: 0xa8c2e0,
+      // Twice the coast's. This is where snow's bounce is bought — the
+      // hemisphere light's ground colour is the snow itself, so it is the one
+      // term in the lighting rig that actually represents light coming back
+      // *up* off the world. The environment probe is generated from the sky
+      // dome alone and contains none of it.
+      ambientIntensity: 0.34,
+      fill: 0.055,
+      water: { enabled: false },
+      // A bowl, which is what a basin is: the ground rises on every side, so
+      // the pines and the lodges have real slopes to stand on and the peaks on
+      // the horizon are the top of ground the player can see all the way up.
+      //
+      // `shore` was tried first, for a frozen lake. It falls away on *both*
+      // sides of the road — the terrain profile is a function of distance from
+      // the barrier and knows nothing about inside and outside — so it puts
+      // water in the middle of the loop as well as around it, and drowns the
+      // entire mid layer this circuit's depth depends on.
+      terrain: 'walled',
+      terrainSeed: 7717,
+      groundColor: 0xe6edf6,
+      roadSurface: 'ice',
+      // Mid-tone, and deliberately the darkest driving surface in the game
+      // after tarmac. The run-off beside it is near-white; if the road is pale
+      // too there is no value separation anywhere in the frame and no exposure
+      // recovers it, because exposure moves both. See ProcTex.ice.
+      roadTint: 0x76889a,
+      shoulder: 'snow',
+      offroad: 'snow',
+      props: ['frostBackdrop', 'frostCover', 'pines', 'frostRocks', 'chalets', 'snowBanks'],
+      grandstands: {
+        at: [0.0, 0.28, 0.56, 0.81],
+        crowd: 40,
+        flags: [0x2f6f9e, 0xe8eef5, 0xc23b46, 0x1d3145, 0xf0c05a],
+      },
+      signage: { sponsors: 'frost', gantries: [0.0, 0.45] },
+      verge: 0x2f6f9e,
+      barrierAccent: 0x2f6f9e,
+      // Few, high and dark: the only things in the sky, and the only dark
+      // shapes above the horizon line.
+      birds: { count: 14, color: 0x2a2f38, radius: 300, height: 92 },
+    },
+    itemBoxes: [
+      { t: 0.09, lanes: [-0.6, -0.2, 0.2, 0.6] },
+      { t: 0.31, lanes: [-0.5, 0, 0.5] },
+      { t: 0.55, lanes: [-0.62, -0.21, 0.21, 0.62] },
+      { t: 0.78, lanes: [-0.5, 0, 0.5] },
+      { t: 0.93, lanes: [-0.45, 0, 0.45] },
+    ],
+    // One more than the other circuits, and two of them in the corners rather
+    // than on the straights. A boost on ice is the only way to make up the
+    // exit speed the surface takes away, so this is where the lap time is.
+    boostPads: [
+      { t: 0.135, lane: 0.0, length: 13 },
+      { t: 0.335, lane: 0.32, length: 12 },
+      { t: 0.505, lane: -0.30, length: 12 },
+      { t: 0.715, lane: 0.0, length: 14 },
+      { t: 0.885, lane: 0.0, length: 14 },
+    ],
+    // Low and long. A big launch onto a surface that cannot be steered on
+    // landing is a corner taken blind, so these lift the kart rather than
+    // throwing it.
+    ramps: [
+      { t: 0.225, lane: 0, height: 2.4, length: 24 },
+      { t: 0.635, lane: 0, height: 2.8, length: 26 },
+    ],
+    startLineT: 0.0,
+  },
+
   rainbowSkyway: {
     id: 'rainbowSkyway',
     name: 'Rainbow Skyway',
     subtitle: 'Celestial Grand Prix',
     laps: 3,
-    difficulty: 3,
+    difficulty: 4,
     nodes: makeLoopNodes({
       base: 245,
       squash: 0.97,
@@ -386,16 +534,16 @@ export const TRACKS = {
 
 // Ordered by difficulty, which is also the order the circuit picker and
 // NEXT CIRCUIT walk in.
-export const TRACK_ORDER = ['sunsetCoast', 'canyonRush', 'rainbowSkyway'];
+export const TRACK_ORDER = ['sunsetCoast', 'canyonRush', 'frostlineBasin', 'rainbowSkyway'];
 
 /**
  * Surface constants shared by physics and audio.
  *
  * `grip` is steering authority and acceleration, not a lateral friction limit —
  * this physics has none (see AIDriver). So a low-grip surface understeers; it
- * does not break away. A circuit may therefore put one under the *driving*
- * surface and not only beside it: the kart runs wide, which a player can read
- * and correct, rather than snapping around.
+ * does not break away. That is what makes ICE safe to put under the *driving*
+ * surface rather than only off it: the kart runs wide, which a player can read
+ * and correct, instead of snapping around.
  */
 export const SURFACE = {
   ROAD:   { id: 0, grip: 1.00, speed: 1.00, drag: 0.0,  rumble: 0.00, dust: 0.0 },
@@ -405,6 +553,12 @@ export const SURFACE = {
   SAND:   { id: 4, grip: 0.58, speed: 0.55, drag: 0.55, rumble: 0.42, dust: 1.2 },
   GRASS:  { id: 5, grip: 0.72, speed: 0.68, drag: 0.36, rumble: 0.48, dust: 0.7 },
   VOID:   { id: 6, grip: 0.00, speed: 1.00, drag: 0.0,  rumble: 0.00, dust: 0.0 },
+  // Polished ice, as a *road* surface. Slightly faster than tarmac because
+  // there is nothing to roll against, and appreciably harder to point.
+  ICE:    { id: 7, grip: 0.80, speed: 1.02, drag: 0.0,  rumble: 0.04, dust: 0.0 },
+  // Loose snow off the circuit: the most forgiving run-off in the game on
+  // purpose, because the road it borders is already the least forgiving.
+  SNOW:   { id: 8, grip: 0.74, speed: 0.66, drag: 0.34, rumble: 0.50, dust: 0.9 },
 };
 
 /** Physics for a surface named by a theme (`offroad`, `shoulder`, `roadSurface`). */
