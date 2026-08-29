@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { clamp01, lerp, makeRng, mod, smoothstep, TAU } from '../core/MathX.js';
+import * as Tex from '../render/ProcTex.js';
 import {
   TerrainSampler, WALL_OFFSET, TERRAIN_INNER, TERRAIN_REACH,
   scatterAlong, terrainNormal, poseMatrix, gauss, loopField,
@@ -49,6 +50,12 @@ const _v2 = new THREE.Vector3();
  *    which is also the first place the terrain mesh actually exists.
  */
 
+// The window grid one facade tile carries. Shared by the texture and by the
+// UV repeat that lays it on a building, because a repeat that disagrees with
+// the tile is how a skyline becomes graph paper.
+const WIN_COLS = 10;
+const WIN_ROWS = 20;
+
 // Anything closer than this to the barrier is floating over the hole the
 // terrain mesh leaves around the road.
 const NEAR_D = TERRAIN_INNER + 0.9;
@@ -90,7 +97,19 @@ const FROST_SPONSORS = [
 ];
 
 /** Sponsor palettes a theme's `signage.sponsors` may name. */
-const SPONSOR_PALETTES = { coast: COAST_SPONSORS, canyon: CANYON_SPONSORS, frost: FROST_SPONSORS };
+const NEON_SPONSORS = [
+  { bg: '#12071f', accent: '#ff2f8e', fg: '#ffe6f3' },
+  { bg: '#04141c', accent: '#24d6ff', fg: '#dff8ff' },
+  { bg: '#1c1206', accent: '#ffc23c', fg: '#fff3d8' },
+  { bg: '#0d0620', accent: '#8a4dff', fg: '#eee4ff' },
+  { bg: '#f0f2f5', accent: '#1b2430', fg: '#12181f' },
+  { bg: '#071a12', accent: '#3bff9e', fg: '#dcffee' },
+  { bg: '#200810', accent: '#ff5a3c', fg: '#ffe4dc' },
+  { bg: '#0a0f18', accent: '#6f7c92', fg: '#dfe6f0' },
+];
+
+/** Sponsor palettes a theme's `signage.sponsors` may name. */
+const SPONSOR_PALETTES = { coast: COAST_SPONSORS, canyon: CANYON_SPONSORS, frost: FROST_SPONSORS, neon: NEON_SPONSORS };
 
 /**
  * The prop vocabulary a theme's `props` list may draw on.
@@ -128,6 +147,12 @@ const PROP_BUILDERS = {
   frostRocks: '_frostRocks',
   snowBanks: '_snowBanks',
   chalets: '_chalets',
+  // Harbour, at night
+  harbourBackdrop: '_harbourBackdrop',
+  cranes: '_cranes',
+  containers: '_containers',
+  lightTowers: '_lightTowers',
+  harbourCover: '_harbourCover',
   // Space
   planets: '_planets',
   skyDust: '_skyDust',
@@ -2404,6 +2429,309 @@ export class Scenery {
       this._blob({ s: st, lateral, u: frac, v: 0.5 }, W * sc * 0.62, { opacity: 0.7 });
     }
     this._spread('chalet', geo, mat, items, { per: 3, maxChunks: 3, cast: true, receive: true });
+  }
+
+  // -- harbour, at night ----------------------------------------------------
+
+
+  /**
+   * The city across the water: towers at 700-1600 m, lit from within.
+   *
+   * The far layer on the other four circuits is a silhouette — a headland, a
+   * butte range, a peak — and it works because there is a bright sky behind it.
+   * At night that trick is not available in either direction: the sky is dark,
+   * so a dark mass against it is nothing at all. The skyline has to be the
+   * *source* rather than the subject, which is why these carry an emissive
+   * window map and why they are the brightest thing in the frame after the
+   * karts' own lights.
+   *
+   * Placed as a ring like every other backdrop here, but pushed past the
+   * water: the quay falls away to the basin by about 90 m, and a tower
+   * standing in the middle of it would be standing in the harbour.
+   */
+  _harbourBackdrop() {
+    const rng = makeRng(7701);
+    const c = this.terrain.centre;
+    const baseY = this.track.waterLevel - 2;
+    const clear = Math.max(this._horizonClear(), 360);
+    const tex = Tex.cityWindows({ size: 512, seed: 61, cols: WIN_COLS, rows: WIN_ROWS, tint: 0x0d1017 });
+
+    const parts = [];
+    const count = 54;
+    for (let i = 0; i < count; i++) {
+      const th = (i / count) * TAU + (rng() - 0.5) * 0.22;
+      // 380-860 m, not the 700-1600 the first pass used. Even at the reduced
+      // fog density a tower at a kilometre is two thirds haze, and the skyline
+      // is the one element on this circuit that has to survive the trip.
+      const face = lerp(380, 860, Math.pow(rng(), 0.55));
+      // A skyline is a *distribution*, not a row: a few towers, many mid-rise
+      // blocks, and the tall ones clustered rather than evenly spaced. The
+      // cubic pushes most of the mass low and leaves the occasional spike.
+      const h = lerp(45, 300, Math.pow(rng(), 2.6));
+      const w = lerp(26, 62, rng()) * lerp(0.8, 1.5, h / 300);
+      const d = w * lerp(0.7, 1.3, rng());
+      const r = face + Math.max(w, d);
+      const g = new THREE.BoxGeometry(w, h, d);
+      // Whole repeats of the *tile*, which already carries `cols` x `rows`
+      // windows. The first pass multiplied by the window count as well, so a
+      // 42 m facade came out a hundred windows wide and the skyline read as
+      // graph paper — the "lightbox with a grid drawn on it" this texture was
+      // written to avoid. Integer repeats because a fractional one cuts a
+      // window in half at the corner.
+      const uv = g.attributes.uv;
+      const repX = Math.max(1, Math.round(w / (4.2 * WIN_COLS)));
+      const repY = Math.max(1, Math.round(h / (4.0 * WIN_ROWS)));
+      for (let k = 0; k < uv.count; k++) uv.setXY(k, uv.getX(k) * repX, uv.getY(k) * repY);
+      parts.push({ geo: g, color: 0xffffff, m: T([c.x + Math.cos(th) * r, baseY + h * 0.5, c.z + Math.sin(th) * r], [0, rng() * 0.5, 0]) });
+    }
+    const geo = mergeParts(parts);
+    geo.computeBoundingSphere();
+    const map = tex.map.clone(); map.wrapS = map.wrapT = THREE.RepeatWrapping; map.needsUpdate = true;
+    const em = tex.emissiveMap.clone(); em.wrapS = em.wrapT = THREE.RepeatWrapping; em.needsUpdate = true;
+    this._textures.push(map, em);
+    const mat = this._mat(new THREE.MeshStandardMaterial({
+      map, emissiveMap: em, emissive: 0xffffff,
+      // Tone-mapped rather than raw, unlike the Skyway's neon: these are a
+      // kilometre away and behind the densest fog in the game, and something
+      // that bypasses the tone curve at that distance punches a hole in the
+      // haze it is supposed to be sitting behind.
+      emissiveIntensity: 2.8,
+      roughness: 0.55, metalness: 0.15, envMapIntensity: 0.4,
+    }));
+    addMesh(this.group, geo, mat, { name: 'harbourBackdrop', receive: false });
+  }
+
+  /**
+   * Container cranes on the far quay: the harbour's own silhouette.
+   *
+   * These are the one thing in the scene allowed to be nearly black. A crane
+   * is a lattice a hundred metres tall standing in front of a lit city, and
+   * the city is what makes it visible — so it reads as a cut-out, which is
+   * exactly what a crane looks like at night and exactly the mid-layer this
+   * frame needs between the towers and the track.
+   */
+  _cranes() {
+    const legH = 34, spanW = 46, boomL = 52;
+    const beam = (w, h, d) => new THREE.BoxGeometry(w, h, d);
+    const parts = [];
+    for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+      parts.push({ geo: beam(2.2, legH, 2.2), color: 0xffffff, m: T([sx * spanW * 0.5, legH * 0.5, sz * 7]) });
+      // Portal braces. A crane read as four bare posts is a table.
+      parts.push({ geo: beam(1.1, 1.1, 14), color: 0xffffff, m: T([sx * spanW * 0.5, legH * 0.62, 0]) });
+    }
+    parts.push({ geo: beam(spanW + 5, 4.2, 15), color: 0xffffff, m: T([0, legH + 2, 0]) });
+    // The boom, out over the water, and the counterweight that lets it be.
+    parts.push({ geo: beam(3.0, 3.0, boomL), color: 0xffffff, m: T([0, legH + 6.5, -boomL * 0.5 - 6]) });
+    parts.push({ geo: beam(3.0, 3.0, boomL * 0.42), color: 0xffffff, m: T([0, legH + 6.5, boomL * 0.21 + 7]) });
+    parts.push({ geo: beam(7, 6, 9), color: 0xffffff, m: T([0, legH + 6.5, boomL * 0.42 + 7]) });
+    // A-frame and stays: the diagonal is what makes the silhouette a crane.
+    parts.push({ geo: beam(2.0, 20, 2.0), color: 0xffffff, m: T([0, legH + 15, 6]) });
+    for (const [z, len, ang] of [[-boomL * 0.55, boomL * 0.62, -0.42], [boomL * 0.30, boomL * 0.36, 0.55]]) {
+      parts.push({ geo: beam(1.2, 1.2, len), color: 0xffffff, m: T([0, legH + 16, z], [ang, 0, 0]) });
+    }
+    // Machinery house, and the one lit thing on the whole structure.
+    parts.push({ geo: beam(8, 5, 10), color: 0xffd08a, m: T([0, legH + 5.5, 12]) });
+    const geo = mergeParts(parts);
+    paintGeometry(geo, (v, col) => {
+      if (col.r > 0.5 && col.g < col.r * 0.9) return;      // leave the lit house alone
+      // Barely-there vertical falloff. Steel this dark carries no detail at
+      // this distance; all it has to do is not be a flat stencil.
+      const t = clamp01(v.y / (legH + 26));
+      const k = lerp(0.030, 0.085, t);
+      col.setRGB(k * 1.05, k, k * 0.92);
+    });
+    const mat = this._mat(propMaterial({ roughness: 0.85, metalness: 0.35, envMapIntensity: 0.5, flatShading: true }));
+
+    const items = [];
+    const p = new THREE.Vector3();
+    // On the water side, spaced along the quay like the real thing: cranes
+    // share a rail, so they are evenly spaced and that is correct here.
+    for (const [frac, d, sc] of [[0.10, 120, 1.0], [0.17, 126, 0.92], [0.62, 138, 1.15], [0.69, 132, 1.05], [0.88, 150, 0.85]]) {
+      const st = mod(frac * this.track.length, this.track.length);
+      const side = this._outsideSign(st);
+      const lateral = side * (this.track.halfWidthAt(st) + WALL_OFFSET + d);
+      this.track.placeOnRoad(st, lateral, p);
+      p.y = this.track.waterLevel + 1.0;
+      items.push({ s: st, m: poseMatrix(p.clone(), { yaw: this.track.frameAt(st, {}).heading, scale: sc }, new THREE.Matrix4()) });
+    }
+    this._spread('crane', geo, mat, items, { per: 2, maxChunks: 3, cast: false, receive: false });
+  }
+
+  /**
+   * Stacked shipping containers, trackside.
+   *
+   * The only saturated colour in the mid layer, and the reason it is here: a
+   * night scene assembled entirely from lights and silhouettes has nothing at
+   * the middle of its value range, and the eye reads such a frame as two flat
+   * planes. A wall of containers is a mass that is neither lit nor black.
+   */
+  _containers() {
+    const geos = [0, 1].map((i) => {
+      const g = new THREE.BoxGeometry(12.2, 2.6, 2.44);
+      // Corrugation as paint, not geometry: at this distance a 5 cm rib is
+      // well under a pixel, and it is the *stripes* that read, not the relief.
+      paintGeometry(g, (v, col) => {
+        const rib = 0.5 + 0.5 * Math.cos(v.x * 4.4);
+        const k = lerp(0.72, 1.0, rib) * (i ? 0.92 : 1.0);
+        col.setRGB(k, k, k);
+      });
+      return g;
+    });
+    const mat = this._mat(propMaterial({ roughness: 0.82, metalness: 0.20, envMapIntensity: 0.45, flatShading: true }));
+    // Six liveries, dark enough to sit under a night key. Container red at
+    // full saturation under a warm ambient is a traffic cone.
+    const LIVERY = [0x8c3a2e, 0x2f5f7a, 0x6a6f3a, 0x7a5230, 0x3d4a5c, 0x6b3352];
+
+    const sites = scatterAlong(this.rng, this.terrain, {
+      count: this._n(120), band: [NEAR_D + 2, 62], cycles: 7, threshold: 0.10,
+      bias: 2.8, cluster: [3, 9], clusterArc: 9, clusterLat: 7, minGap: 3.4, depthPow: 1.2,
+      accept: (it) => it.pos.y > this.track.waterLevel + 1.5,
+    });
+    const buckets = [[], []];
+    const n = new THREE.Vector3();
+    for (const it of sites) {
+      terrainNormal(this.terrain, it.s, it.lateral, n, 3);
+      // Stacked two or three high, and squared up to the quay rather than
+      // scattered: containers are put down by a machine on a grid.
+      const stack = 1 + Math.floor(it.u * 3);
+      const yaw = this.track.frameAt(it.s, {}).heading + (it.v < 0.5 ? 0 : Math.PI * 0.5) + (it.w - 0.5) * 0.09;
+      for (let k = 0; k < stack; k++) {
+        const pos = it.pos.clone();
+        pos.y += 1.3 + k * 2.62;
+        buckets[(k + Math.floor(it.w * 2)) % 2].push({
+          s: it.s,
+          m: poseMatrix(pos, { yaw, normal: n, align: 0.25, scale: 1 }, new THREE.Matrix4()),
+          color: new THREE.Color(LIVERY[Math.floor((it.u * 7 + k * 3 + it.w * 5) % 1 * LIVERY.length) % LIVERY.length]),
+        });
+      }
+      this._blob(it, 7.5, { opacity: 0.72 });
+    }
+    for (let i = 0; i < 2; i++) this._spread(`container${i}`, geos[i], mat, buckets[i], { per: 40, maxChunks: 8, cast: true, receive: true });
+  }
+
+  /**
+   * Floodlight masts along the circuit.
+   *
+   * These are the reason the road is lit, and saying so out loud is the point:
+   * a night race is a *floodlit* race, and a circuit that is bright with no
+   * visible cause reads as a daylight scene that has been graded dark. The
+   * heads are emissive so the masts are self-evidently the source, and they
+   * are the one evenly-spaced family here — a lighting rig is surveyed in.
+   */
+  _lightTowers() {
+    const H = 15.5;
+    const parts = [
+      { geo: columnGeometry(H, 0.42, 0.22, { segs: 3, sides: 6, curve: 1, capStart: true }), color: 0x2a2f38 },
+      { geo: new THREE.BoxGeometry(3.6, 0.5, 1.0), color: 0x2a2f38, m: T([0, H + 0.4, 0]) },
+    ];
+    for (let i = -1; i <= 1; i++) {
+      // The lamps themselves, tilted down at the road.
+      parts.push({ geo: new THREE.BoxGeometry(1.02, 0.62, 0.30), color: 0xfff0cf, m: T([i * 1.2, H + 0.05, 0.28], [-0.55, 0, 0]) });
+    }
+    const geo = mergeParts(parts);
+    darkenBase(geo, { height: 1.2, amount: 0.35 });
+    // The lamp faces bypass the tone curve; the mast does not. A light source
+    // that grades with the rest of the frame stops being a light source.
+    const mat = this._mat(propMaterial({ roughness: 0.7, metalness: 0.4, envMapIntensity: 0.5, vertexColors: true }));
+
+    const L = this.track.length;
+    const items = [], glows = [];
+    const p = new THREE.Vector3();
+    const STEP = 46;
+    let k = 0;
+    for (let st = 0; st < L; st += STEP, k++) {
+      const side = k % 2 ? 1 : -1;
+      const lateral = side * (this.track.halfWidthAt(st) + WALL_OFFSET + NEAR_D + 0.6);
+      this.terrain.place(st, lateral, p);
+      // Face the road: the heads are modelled pointing +Z, so the mast is
+      // yawed to put +Z inward.
+      const yaw = this.track.frameAt(st, {}).heading + (side > 0 ? Math.PI * 0.5 : -Math.PI * 0.5);
+      items.push({ s: st, m: poseMatrix(p.clone(), { yaw, scale: 1 }, new THREE.Matrix4()) });
+      // A halo billboard at the head. Harbour air is thick and every real lamp
+      // in it has one; without it the lamps are three small hard rectangles.
+      const g = p.clone(); g.y += H + 0.2;
+      glows.push({ s: st, m: poseMatrix(g, { yaw, scale: [7.5, 7.5, 7.5] }, new THREE.Matrix4()) });
+      this._blob({ s: st, lateral, u: (k % 5) / 5, v: 0.5 }, 1.5, { opacity: 0.7 });
+    }
+    this._spread('lightTower', geo, mat, items, { per: 8, maxChunks: 6, cast: true, receive: true });
+
+    const halo = new THREE.PlaneGeometry(1, 1);
+    paintGeometry(halo, (v, col) => {
+      const d = clamp01(1 - Math.hypot(v.x, v.y) * 2);
+      const k2 = Math.pow(d, 2.4);
+      col.setRGB(k2 * 1.0, k2 * 0.92, k2 * 0.74);
+    });
+    const haloMat = this._mat(new THREE.MeshBasicMaterial({
+      vertexColors: true, transparent: true, blending: THREE.AdditiveBlending,
+      depthWrite: false, toneMapped: false, side: THREE.DoubleSide, opacity: 0.55,
+    }), { env: false });
+    this._spread('lampHalo', halo, haloMat, glows, { per: 8, maxChunks: 6, cast: false, receive: false });
+  }
+
+  /**
+   * Dockside clutter in the first thirty metres: bollards, pallets, weeds
+   * through the concrete.
+   *
+   * Same job as the frost circuit's bunch grass and the coast's marram — the
+   * near band of the frame is the one the eye reads speed from, and a bare
+   * apron gives it nothing to measure against.
+   */
+  _harbourCover() {
+    const items = scatterAlong(this.rng, this.terrain, {
+      count: this._n(900), band: [NEAR_D, 40], cycles: 14, threshold: -0.20,
+      bias: 1.7, cluster: [3, 9], clusterArc: 4.5, clusterLat: 3.0, depthPow: 2.0,
+      accept: (it) => it.pos.y > this.track.waterLevel + 1.0,
+    });
+    const geo = tuftGeometry(makeRng(112), { blades: 4, height: 0.62, width: 0.055, segs: 2, spread: 0.7, curl: 0.8 });
+    paintGeometry(geo, (v, col) => {
+      const t = clamp01(v.y / 0.7);
+      // Sodium light on a weed is not green. Anything genuinely green under
+      // this key reads as lit by something that is not in the scene.
+      col.setRGB(lerp(0.10, 0.26, t), lerp(0.10, 0.22, t), lerp(0.07, 0.12, t));
+    });
+    const mat = this._mat(applyWind(
+      propMaterial({ roughness: 0.95, side: THREE.DoubleSide, envMapIntensity: 0.3 }),
+      { amp: 0.09, freq: 2.4, height: 0.8, pow: 1.4 },
+    ));
+    const out = [];
+    const n = new THREE.Vector3();
+    for (const it of items) {
+      terrainNormal(this.terrain, it.s, it.lateral, n, 3);
+      const sc = lerp(0.5, 1.4, it.u * it.u);
+      out.push({
+        s: it.s,
+        m: poseMatrix(it.pos, { yaw: it.v * TAU, normal: n, align: 0.8, scale: [sc, sc * lerp(0.7, 1.4, it.w), sc] }, new THREE.Matrix4()),
+      });
+    }
+    this._spread('dockWeed', geo, mat, out, { per: 175, maxChunks: 9, inflate: 0.6 });
+
+    // Mooring bollards along the water's edge: cast iron, chest high, and the
+    // one man-made object at eye level on the outside of the circuit.
+    const bollard = mergeParts([
+      { geo: columnGeometry(0.85, 0.30, 0.24, { segs: 2, sides: 8, curve: 1, capStart: true }), color: 0x2b2b30 },
+      { geo: new THREE.SphereGeometry(0.32, 8, 6), color: 0x33333a, m: T([0, 0.86, 0]) },
+    ]);
+    darkenBase(bollard, { height: 0.3, amount: 0.4 });
+    const bMat = this._mat(propMaterial({ roughness: 0.78, metalness: 0.45, envMapIntensity: 0.55, flatShading: true }));
+    const bItems = [];
+    const p = new THREE.Vector3();
+    const wl = this.track.waterLevel;
+    for (let st = 0; st < this.track.length; st += 17) {
+      const side = this._outsideSign(st);
+      // Walk out until the quay is about to fall into the basin, and stand on
+      // the last piece of it.
+      let lateral = side * (this.track.halfWidthAt(st) + WALL_OFFSET + 40);
+      for (let d = 40; d < 96; d += 3) {
+        const lat = side * (this.track.halfWidthAt(st) + WALL_OFFSET + d);
+        if (this.terrain.heightAt(st, lat) < wl + 1.4) break;
+        lateral = lat;
+      }
+      this.terrain.place(st, lateral, p);
+      if (p.y < wl + 1.0) continue;
+      p.y -= 0.12;
+      bItems.push({ s: st, m: poseMatrix(p.clone(), { yaw: this.track.frameAt(st, {}).heading, scale: lerp(0.9, 1.1, (st % 7) / 7) }, new THREE.Matrix4()) });
+    }
+    this._spread('bollard', bollard, bMat, bItems, { per: 24, maxChunks: 5, cast: true, receive: true });
   }
 
   /** Gas giants and a ringed world: the far layer this track otherwise lacks. */

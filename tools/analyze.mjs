@@ -12,7 +12,7 @@ import { DRIVE, DRIFT } from '../src/kart/KartTuning.js';
 const argv = process.argv.slice(2);
 const arg = (n, d) => { const i = argv.indexOf(`--${n}`); return i >= 0 ? argv[i + 1] : d; };
 
-for (const id of (arg('track', 'sunsetCoast,canyonRush,frostlineBasin,rainbowSkyway')).split(',')) {
+for (const id of (arg('track', 'sunsetCoast,canyonRush,frostlineBasin,neonHarbor,rainbowSkyway')).split(',')) {
   const def = TRACKS[id];
   if (!def) continue;
   const track = new Track(def);

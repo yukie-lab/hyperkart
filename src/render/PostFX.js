@@ -259,6 +259,29 @@ export class PostFX {
         this.bloom.threshold = 1.24;
         this.bloom.radius = 0.55;
         break;
+      case 'neon':
+        // Grain is capped as a fraction of local luminance, and this frame is
+        // mostly *dark* — the band where that cap is loosest. Held near the
+        // Skyway's figure for the same reason.
+        this.u.uGrain.value = 0.010;
+        this.u.uSaturation.value = 1.22;
+        // Lower than the daylight circuits. A night frame already has its
+        // contrast: it is nearly all shadow with a few small bright sources,
+        // and pushing it crushes everything that is not a light into black.
+        this.u.uContrast.value = 1.04;
+        this.u.uGain.value.setRGB(1.02, 0.99, 1.04);
+        // The one lifted black point in the game. Night in a city is not
+        // black — it is a very dark warm grey, and clamping it to zero is what
+        // makes a night scene read as a switched-off one.
+        this.u.uLift.value.setRGB(0.020, 0.016, 0.026);
+        // Bloom is not a finishing touch here, it is the subject. Neon in
+        // harbour haze *is* a halo, and the threshold sits low because the
+        // things meant to bloom are small, bright and deliberate — signs,
+        // lamps, lit windows — rather than a whole sunlit ground plane.
+        this.bloom.strength = 0.42;
+        this.bloom.threshold = 0.72;
+        this.bloom.radius = 0.72;
+        break;
       case 'rainbow':
         // A quarter of the others'. Grain is capped as a fraction of local
         // luminance, and this road sits squarely in the mid band where that cap

@@ -437,12 +437,166 @@ export const TRACKS = {
     startLineT: 0.0,
   },
 
+  neonHarbor: {
+    id: 'neonHarbor',
+    name: 'Neon Harbor',
+    subtitle: 'Waterfront Night Race',
+    laps: 3,
+    difficulty: 4,
+    /**
+     * A street circuit, and the difference is the *number* of corners rather
+     * than their severity. Seven features against the four or five the other
+     * circuits carry, at amplitudes inside the range they already use — the
+     * geometry report puts the worst corner at 0.93 rad/s, the same figure as
+     * Sunset Coast and Rainbow Skyway, so nothing here is harder to point than
+     * what the game already asks for. What is new is that they keep coming.
+     *
+     * The road is the narrowest in the game at 11.5 m, and the elevation is
+     * the flattest: a harbour is built on reclaimed flat ground, and a street
+     * circuit's walls are close because they are the actual walls of a street.
+     */
+    nodes: makeLoopNodes({
+      base: 222,
+      squash: 0.90,
+      harmonics: [
+        [1, 36, 0.7],
+        [2, 30, 2.2],
+        [3, 15, 0.3],
+      ],
+      // A tenth of the canyon's relief. There is a dock under this circuit.
+      elevation: [
+        [1, 5.0, 1.1],
+        [2, 2.8, 0.2],
+      ],
+      features: [
+        { theta: 0.42, sigma: 0.240, amp: -50 },   // turn 1, hard right off the quay
+        { theta: 1.22, sigma: 0.300, amp:  36 },   // the long left round the basin
+        { theta: 1.98, sigma: 0.221, amp: -52 },   // the tightest of the lap
+        { theta: 2.72, sigma: 0.240, amp: -40 },
+        { theta: 3.58, sigma: 0.324, amp:  42 },   // back straight, such as it is
+        { theta: 4.46, sigma: 0.228, amp: -50 },
+        { theta: 5.42, sigma: 0.276, amp:  30 },   // sweeper onto the start line
+      ],
+      widthProfile: [
+        [0.0, 17],
+        [0.42, 12],
+        [1.98, 11.5],     // narrowest road in the game
+        [3.58, 15.5],
+        [4.46, 12],
+        [5.42, 13.5],
+      ],
+      count: 116,
+    }),
+    theme: {
+      key: 'neon',
+      // Drives the star field and, with `meterSky`, the decision not to expose
+      // for the dome. See SkySystem.
+      timeOfDay: 'night',
+      // The moon, and it is not the主 light source on this circuit — the city
+      // is. Low and cool so it rakes the towers rather than lighting the road.
+      sunAzimuth: 1.62,
+      sunElevation: 0.30,
+      sunColor: 0xc2cff2,
+      // A moon, and it has to actually be one. At 3.20 — the figure the other
+      // circuits' suns use — the key measured nine times the hemisphere light
+      // and lit the terrain evenly to the horizon, which is a dusk scene with
+      // a dark grade on it, not a night one. Everything about this circuit's
+      // light comes from the city; the moon only puts a cool rim on what faces
+      // it.
+      sunStrength: 0.85,
+      // Absolute, because the sky is not metered. Matched to the Skyway's
+      // logic at a different hour: a dark dome sent through auto-exposure
+      // opens all the way up and the night is gone.
+      meterSky: false,
+      exposureTarget: 0.86,
+      // The probe is a night sky. There is little in it, but what there is —
+      // the cool zenith and the warm dome on the horizon — is exactly the rim
+      // that separates an unlit face from the sky behind it.
+      envIntensity: 0.90,
+      // The sky half of the hemisphere light: dark, cool, and almost nothing.
+      ambientColor: 0x24345f,
+      // The highest in the game, and the whole lighting design in one number.
+      // A city at night is lit from *below* — every surface in frame is
+      // catching sodium off wet ground and off its own signage — and the
+      // hemisphere light's ground colour is where that lives. Rainbow Skyway
+      // solved the same problem by making the road emit; a street circuit
+      // cannot, so it buys the separation here instead.
+      // `Lighting` scales the hemisphere light by the key, so an ambient this
+      // far above the key's own strength is how a circuit says "the light here
+      // does not come from the sky". It lands the hemisphere at ~0.57 against
+      // the moon's 0.85 — the only track in the game where those two numbers
+      // are close, and the reason it reads as a city rather than a field.
+      ambientIntensity: 1.75,
+      fill: 0.35,
+      // A harbour basin. `drop` is small on purpose: the quay is barely above
+      // the water, so the ground stays near track level out to ~70 m and gives
+      // the dockside props somewhere flat to stand before it falls away.
+      water: {
+        enabled: true, drop: 4.0, color: 0x08131f, sunColor: 0xffb469,
+        roughness: 0.07, clearcoatRoughness: 0.05, relief: 0.45, flow: 0.35,
+      },
+      terrain: 'shore',
+      terrainSeed: 9137,
+      // Wet dock concrete under sodium light. Warm, because it is also the
+      // ground half of the hemisphere light and therefore the colour of every
+      // bounce in the scene.
+      // Wet dock concrete: grey, and cool. The *bounce* off it is not, because
+      // what is falling on it is sodium — see `bounceColor`.
+      groundColor: 0x33302e,
+      bounceColor: 0xa8642c,
+      // Named `wet` so the physics table is asked for it too — `surfaceNamed`
+      // finds SURFACE.WET, while the mesh builder has no `wet` texture branch
+      // and falls through to asphalt, which is exactly right: it is tarmac,
+      // with water on it.
+      roadSurface: 'wet',
+      // Darker than any other circuit's tarmac. Water fills the voids between
+      // the chippings, and a wet road is genuinely darker than a dry one —
+      // which it can afford to be here, because what makes it readable is the
+      // neon lying on it rather than the amount of light coming back off it.
+      roadTint: 0x2e3138,
+      // Drives the neon spill and the gloss in the road shader. See
+      // TrackBuilder._asphaltWear — this is the only circuit with it above 0.
+      roadWet: 1.0,
+      shoulder: 'dirt',
+      offroad: 'dirt',
+      props: ['harbourBackdrop', 'cranes', 'harbourCover', 'containers', 'lightTowers'],
+      grandstands: {
+        at: [0.0, 0.30, 0.60, 0.84],
+        crowd: 44,
+        flags: [0xff2f8e, 0x24d6ff, 0xffc23c, 0xffffff, 0x8a4dff],
+      },
+      signage: { sponsors: 'neon', gantries: [0.0, 0.48] },
+      verge: 0xff2f8e,
+      barrierAccent: 0x24d6ff,
+      birds: { count: 10, color: 0x14161c, radius: 260, height: 70 },
+    },
+    itemBoxes: [
+      { t: 0.08, lanes: [-0.55, -0.18, 0.18, 0.55] },
+      { t: 0.27, lanes: [-0.45, 0, 0.45] },
+      { t: 0.46, lanes: [-0.58, -0.20, 0.20, 0.58] },
+      { t: 0.66, lanes: [-0.45, 0, 0.45] },
+      { t: 0.87, lanes: [-0.5, -0.17, 0.17, 0.5] },
+    ],
+    boostPads: [
+      { t: 0.175, lane: 0.0, length: 12 },
+      { t: 0.395, lane: -0.30, length: 12 },
+      { t: 0.605, lane: 0.30, length: 12 },
+      { t: 0.815, lane: 0.0, length: 13 },
+    ],
+    // One ramp, low. A street circuit's jump is a bridge expansion joint, not
+    // a stunt, and this road is too narrow to land a big one on.
+    ramps: [
+      { t: 0.315, lane: 0, height: 2.0, length: 22 },
+    ],
+    startLineT: 0.0,
+  },
+
   rainbowSkyway: {
     id: 'rainbowSkyway',
     name: 'Rainbow Skyway',
     subtitle: 'Celestial Grand Prix',
     laps: 3,
-    difficulty: 4,
+    difficulty: 5,
     nodes: makeLoopNodes({
       base: 245,
       squash: 0.97,
@@ -534,7 +688,7 @@ export const TRACKS = {
 
 // Ordered by difficulty, which is also the order the circuit picker and
 // NEXT CIRCUIT walk in.
-export const TRACK_ORDER = ['sunsetCoast', 'canyonRush', 'frostlineBasin', 'rainbowSkyway'];
+export const TRACK_ORDER = ['sunsetCoast', 'canyonRush', 'frostlineBasin', 'neonHarbor', 'rainbowSkyway'];
 
 /**
  * Surface constants shared by physics and audio.
@@ -559,6 +713,10 @@ export const SURFACE = {
   // Loose snow off the circuit: the most forgiving run-off in the game on
   // purpose, because the road it borders is already the least forgiving.
   SNOW:   { id: 8, grip: 0.74, speed: 0.66, drag: 0.34, rumble: 0.50, dust: 0.9 },
+  // Standing water on tarmac. A light touch, deliberately: the low-grip
+  // *circuit* is Frostline Basin's whole identity and 0.80 is its number, so
+  // this is only enough that a road drawn as wet is not driven as dry.
+  WET:    { id: 9, grip: 0.92, speed: 0.98, drag: 0.02, rumble: 0.02, dust: 0.0 },
 };
 
 /** Physics for a surface named by a theme (`offroad`, `shoulder`, `roadSurface`). */
