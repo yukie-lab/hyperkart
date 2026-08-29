@@ -233,7 +233,10 @@ export function createSkyDome(theme, sunDir) {
 
   const uniforms = {
     uTime: { value: 0 },
-    uMode: { value: theme.key === 'rainbow' ? 1 : 0 },
+    // A nebula field is what the space branch draws, so its presence in the
+    // preset *is* the mode. Naming one track here meant a second space circuit
+    // would have silently rendered as an atmosphere.
+    uMode: { value: p.nebula ? 1 : 0 },
     uSunDir: { value: sunDir.clone() },
 
     uZenith: { value: linColor(p.zenith) },

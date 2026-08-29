@@ -1634,6 +1634,24 @@ export function waterNormal({ size = 512, seed = 31 } = {}) {
 }
 
 /** Clear the cache — used when the art agents hot-reload texture code. */
+/**
+ * The texture set for a circuit's off-track ground.
+ *
+ * There used to be three copies of this decision — the shoulder's, the
+ * terrain's and the scenery's landforms' — keyed on two different theme fields,
+ * and they were only in step because all three happened to agree for the two
+ * tracks that existed. They must produce the *identical* object: the kerb has
+ * to know the colour of the ground that spills onto it, and a mesa has to be
+ * made of the same rock as the floor it stands on, or each reads as separately
+ * authored. Everything here is cached, so asking three times is free.
+ */
+export function groundTexturesFor(theme) {
+  const fn = GROUND_TEXTURES[theme?.shoulder] ?? GROUND_TEXTURES[theme?.offroad] ?? grass;
+  return fn({ size: 1024, tint: theme?.groundColor });
+}
+
+const GROUND_TEXTURES = { sand, dirt, grass };
+
 export function clearTextureCache() {
   for (const v of _textureCache.values()) {
     for (const k in v) if (v[k]?.isTexture) v[k].dispose();

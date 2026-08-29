@@ -116,7 +116,12 @@ export class Lighting {
     this.hemi.intensity = (theme.ambientIntensity ?? 0.2) * (sunIntensity ?? 1) * 0.38;
 
     this.fill.color.setHex(theme.ambientColor);
-    this.fill.intensity = (sunIntensity ?? 1) * (theme.key === 'rainbow' ? 0.10 : 0.045);
+    // How much of the key comes back as a broad opposite-side fill. A dark sky
+    // delivers almost no ambient through the probe, so a theme that meters no
+    // sky has to buy that separation back here — which is a property of the
+    // atmosphere, and so a number the theme states rather than a track name
+    // this line has to recognise.
+    this.fill.intensity = (sunIntensity ?? 1) * (theme.fill ?? 0.045);
     this.fill.position.copy(sunDirection).multiplyScalar(-160);
     this.fill.position.y = Math.abs(this.fill.position.y) * 0.6 + 60;
 

@@ -3,6 +3,9 @@ import { makeRng, lerp, TAU } from '../core/MathX.js';
 import { createSkyDome } from './SkyDome.js';
 import { skyPresetFor } from './SkyPresets.js';
 
+/** Times of day whose sky is dark enough to carry a star field. */
+const DARK_HOURS = new Set(['space', 'night']);
+
 /** Percentile of sky luminance that `exposureTarget` is placed at. */
 const METER_PERCENTILE = 0.80;
 
@@ -50,13 +53,15 @@ export class SkySystem {
 
     this.sky = createSkyDome(theme, this.sunDirection);
     this.scene.add(this.sky);
-    if (theme.key === 'rainbow') this._buildStars();
+    // Stars belong to the hour, not to one circuit. Any theme that declares a
+    // dark sky gets them.
+    if (DARK_HOURS.has(theme.timeOfDay)) this._buildStars();
 
     // A deliberately dark sky must not be metered — auto-exposure would open
-    // right up and destroy the point of setting a race in space.
-    this.skyRadiance = theme.meterSky === false || theme.key === 'rainbow'
-      ? 1
-      : this._measureSkyRadiance();
+    // right up and destroy the point of setting a race in space. The theme
+    // says so itself; it used to also be inferred from the track id, which is
+    // two ways of stating one fact and only one of them portable.
+    this.skyRadiance = theme.meterSky === false ? 1 : this._measureSkyRadiance();
 
     this._generateEnvironment();
     return this.sunDirection;

@@ -78,6 +78,48 @@ const CANYON_SPONSORS = [
   { bg: '#26343a', accent: '#5f8a72', fg: '#e7f0ea' },
 ];
 
+/** Sponsor palettes a theme's `signage.sponsors` may name. */
+const SPONSOR_PALETTES = { coast: COAST_SPONSORS, canyon: CANYON_SPONSORS };
+
+/**
+ * The prop vocabulary a theme's `props` list may draw on.
+ *
+ * Writing the set down is the point. A circuit now declares what it is dressed
+ * with, and what a circuit *can* be dressed with lives in one table instead of
+ * being implied by three hardcoded build methods that no data could reach.
+ *
+ * Builders take no arguments: anything a circuit needs to vary — where the sky
+ * rings hang, where the rock arches stand — is read from the theme by the
+ * builder itself, so every entry here dispatches the same way.
+ */
+const PROP_BUILDERS = {
+  // Shore
+  coastBackdrop: '_coastBackdrop',
+  coastCover: '_coastCover',
+  palms: '_palms',
+  coastRocks: '_coastRocks',
+  parasols: '_parasols',
+  driftwood: '_driftwood',
+  buoysAndBoats: '_buoysAndBoats',
+  lighthouse: '_lighthouse',
+  // Desert
+  canyonBackdrop: '_canyonBackdrop',
+  mesas: '_mesas',
+  canyonCover: '_canyonCover',
+  cacti: '_cacti',
+  canyonRocks: '_canyonRocks',
+  telegraphLine: '_telegraphLine',
+  rockArch: '_rockArch',
+  // Space
+  planets: '_planets',
+  skyDust: '_skyDust',
+  shards: '_shards',
+  pylons: '_pylons',
+  skyRings: '_skyRings',
+  skyPlatforms: '_skyPlatforms',
+  skyBanners: '_skyBanners',
+};
+
 /**
  * The circuit's advertisers.
  *
@@ -133,12 +175,49 @@ export class Scenery {
     // preset thins a scene out rather than rearranging it.
     this.detail = this.quality === 'low' ? 0.40 : this.quality === 'medium' ? 0.68 : 1;
 
-    if (track.isVoid) this._buildRainbow();
-    else if (this.theme.key === 'coast') this._buildCoast();
-    else this._buildCanyon();
+    this._buildProps();
 
     this._flushCrowd();
     this._flushBlobs();
+  }
+
+  /**
+   * Dress the circuit with exactly what its theme asks for.
+   *
+   * This used to be three hardcoded method lists behind a switch on the track
+   * id, with the themes carrying a `props` array that nothing read. Driving the
+   * build from that array is what makes a fourth circuit a data change.
+   *
+   * Order is load-bearing and is the theme's, not this method's: `this.rng` is
+   * one sequential stream shared by every scatter, so moving a builder moves
+   * every prop placed after it. The two shipping lists are in their original
+   * order for that reason — their captures still reproduce byte for byte.
+   *
+   * Landscape first, then circuit furniture. The furniture is parameterised
+   * rather than named because it is the *same* grandstand on every track; only
+   * its palette and its positions are the circuit's own.
+   */
+  _buildProps() {
+    const th = this.theme;
+    for (const name of th.props || []) {
+      const m = PROP_BUILDERS[name];
+      // Reported, not ignored. A prop list that silently drops its typos is
+      // exactly how it became decorative in the first place.
+      if (!m) { console.warn(`[scenery] theme "${th.key}" asks for unknown prop "${name}"`); continue; }
+      this[m]();
+    }
+
+    const sponsors = SPONSOR_PALETTES[th.signage?.sponsors] ?? COAST_SPONSORS;
+    if (th.signage) this._hoardings(sponsors);
+    if (th.grandstands) {
+      this._grandstands(th.grandstands.at);
+      this._spectatorPockets(this._n(th.grandstands.crowd ?? 40), th.grandstands.flags);
+    }
+    if (th.verge != null) this._verge(th.verge);
+    if (th.signage?.gantries) this._gantry(th.signage.gantries, sponsors);
+    if (th.birds) {
+      this._birds(this._n(th.birds.count), th.birds.color, th.birds.radius, this.track.maxY + th.birds.height);
+    }
   }
 
   // -- plumbing -------------------------------------------------------------
@@ -892,23 +971,6 @@ export class Scenery {
   // Sunset Coast
   // =========================================================================
 
-  _buildCoast() {
-    this._coastBackdrop();
-    this._coastCover();
-    this._palms();
-    this._coastRocks();
-    this._parasols();
-    this._driftwood();
-    this._buoysAndBoats();
-    this._lighthouse();
-    this._hoardings(COAST_SPONSORS);
-    this._grandstands([0.0, 0.235, 0.50, 0.735]);
-    this._spectatorPockets(this._n(40), [0xe2483c, 0xffcf3d, 0x7fd4ff, 0xffffff, 0x2b8a63]);
-    this._verge(0xd23c33);
-    this._gantry([0.0, 0.42], COAST_SPONSORS);
-    this._birds(this._n(30), 0xf2e6d8, 330, this.track.maxY + 60);
-  }
-
   /**
    * Headlands, sea stacks and islands ringing the bay at 500-1300 m.
    *
@@ -1443,22 +1505,6 @@ export class Scenery {
   // Canyon Rush
   // =========================================================================
 
-  _buildCanyon() {
-    this._canyonBackdrop();
-    this._mesas();
-    this._canyonCover();
-    this._cacti();
-    this._canyonRocks();
-    this._telegraphLine();
-    this._rockArch([0.30, 0.72]);
-    this._hoardings(CANYON_SPONSORS);
-    this._grandstands([0.0, 0.26, 0.545, 0.80]);
-    this._spectatorPockets(this._n(40), [0xc9541f, 0xf0a63c, 0xffffff, 0x2f3d52, 0xffe3a8]);
-    this._verge(0xdb8a2a);
-    this._gantry([0.0, 0.47], CANYON_SPONSORS);
-    this._birds(this._n(20), 0x3a2e26, 300, this.track.maxY + 78);
-  }
-
   /** A butte range on the horizon: the far layer the mid mesas read against. */
   _canyonBackdrop() {
     const rng = makeRng(4401);
@@ -1849,7 +1895,8 @@ export class Scenery {
    * A natural rock arch spanning the road. Landmark, gateway and the only
    * thing on this circuit that puts geometry over the driver's head.
    */
-  _rockArch(fractions) {
+  _rockArch() {
+    const fractions = this.theme.rockArches ?? [0.30, 0.72];
     for (const frac of fractions) {
       const s = mod(frac * this.track.length, this.track.length);
       const half = this.track.halfWidthAt(s);
@@ -1920,16 +1967,6 @@ export class Scenery {
   // =========================================================================
   // Rainbow Skyway
   // =========================================================================
-
-  _buildRainbow() {
-    this._planets();
-    this._skyDust();
-    this._shards();
-    this._pylons();
-    this._skyRings([0.10, 0.44, 0.79]);
-    this._skyPlatforms();
-    this._skyBanners();
-  }
 
   /** Gas giants and a ringed world: the far layer this track otherwise lacks. */
   _planets() {
@@ -2214,7 +2251,8 @@ vHkFade = smoothstep( 110.0, 260.0, - mvPosition.z );
   }
 
   /** Rings the road threads through: the Skyway's landmark and its verticality. */
-  _skyRings(fractions) {
+  _skyRings() {
+    const fractions = this.theme.skyRings ?? [0.10, 0.44, 0.79];
     const mat = this._mat(applyPulse(neonMaterial({ side: THREE.DoubleSide }), { freq: 1.3, depth: 0.28 }), { env: false });
     const items = [];
     for (const frac of fractions) {

@@ -1,7 +1,9 @@
 import * as THREE from 'three';
 import { TRACK_LAYOUT } from './Track.js';
 import * as Tex from '../render/ProcTex.js';
-import { clamp, clamp01, lerp, makeRng, makeValueNoise2D, fbm2D, mod, smoothstep, TAU } from '../core/MathX.js';
+import { groundTexturesFor } from '../render/ProcTex.js';
+import { makeTerrainProfile } from './SceneryKit.js';
+import { clamp, clamp01, lerp, mod, smoothstep } from '../core/MathX.js';
 
 /**
  * Turns a `Track` into renderable geometry.
@@ -622,10 +624,7 @@ normal = normalize( tbn * vec3( rN * normalScale, 1.0 ) );`);
    * a surface that already has one.
    */
   _groundTex() {
-    const fn = this.theme.shoulder === 'dirt' ? Tex.dirt
-      : this.theme.shoulder === 'sand' ? Tex.sand
-      : Tex.grass;
-    return fn({ size: 1024, tint: this.theme.groundColor });
+    return groundTexturesFor(this.theme);
   }
 
   _buildCurbs() {
@@ -1228,7 +1227,7 @@ normal = normalize( tbn * vec3( gTot, 1.0 ) );`);
       normalScale: new THREE.Vector2(tm.normalScale, tm.normalScale),
       metalness: 0.35, roughness: 0.55, envMapIntensity: 0.9,
     });
-    this._barrierWear(wallMat, this.theme.key === 'coast' ? 0xe2483c : 0xdb8a2a);
+    this._barrierWear(wallMat, this.theme.barrierAccent ?? 0xdb8a2a);
 
     // Distance along the section, so the U axis keeps a roughly square texel
     // density as the profile wraps over the cap rather than stretching across
@@ -1872,8 +1871,12 @@ roughnessFactor = clamp( roughnessFactor, 0.05, 1.0 );`);
    */
   _buildTerrain() {
     const n = Math.max(48, Math.round(this.track.length / TERRAIN_STEP));
-    const noise = makeValueNoise2D(this.theme.key === 'coast' ? 1201 : 3307, 256);
-    const isCoast = this.theme.key === 'coast';
+    // The land beyond the barrier has two shapes in this game: one that falls
+    // away to water, one that climbs into walls. Which one a circuit gets is a
+    // property of its landscape, so the theme names it — and `SceneryKit` gets
+    // the *same function object*, because that is what every prop in the game
+    // is placed with.
+    const shore = this.theme.terrain === 'shore';
     // Sea level follows the circuit's lowest point, never a fixed constant.
     const waterLevel = this.track.waterLevel;
     const wallOffset = TRACK_LAYOUT.shoulderWidth;
@@ -1884,24 +1887,7 @@ roughnessFactor = clamp( roughnessFactor, 0.05, 1.0 );`);
      * Coast: falls to a beach then into the sea.
      * Canyon: climbs into mesa walls that box the circuit in.
      */
-    const profile = (d, worldX, worldZ, edgeY) => {
-      const nz = fbm2D(noise, worldX * 0.006, worldZ * 0.006, 5);
-      const detail = fbm2D(noise, worldX * 0.05, worldZ * 0.05, 3);
-      if (isCoast) {
-        // Fall from the road edge down to a beach, meet the waterline, then
-        // continue onto the seabed so the shore reads as a real coast rather
-        // than a plane clipping through terrain.
-        const toWater = edgeY - waterLevel;
-        const shore = Math.pow(clamp01(d / 78), 1.45) * (toWater + 3.0);
-        const dune = Math.pow(clamp01(1 - d / 44), 2) * nz * 3.4;
-        const seabed = Math.pow(clamp01((d - 84) / 150), 1.3) * 22;
-        return edgeY - 0.9 - shore + dune - seabed + detail * 0.6 * clamp01(1 - d / 95);
-      }
-      // Canyon
-      const rise = Math.pow(clamp01((d - 18) / 90), 1.5) * (26 + nz * 34);
-      const dip = -1.2 - clamp01(d / 20) * 2.0;
-      return edgeY + dip + rise + detail * 1.4;
-    };
+    const profile = makeTerrainProfile(this.theme, waterLevel);
 
     /**
      * The one height field both the sheets and the cap sample.
@@ -2087,8 +2073,7 @@ roughnessFactor = clamp( roughnessFactor, 0.05, 1.0 );`);
     geo.computeVertexNormals();
     geo.computeBoundingSphere();
 
-    const texFn = isCoast ? Tex.sand : Tex.dirt;
-    const t = texFn({ size: 1024, tint: this.theme.groundColor });
+    const t = groundTexturesFor(this.theme);
     const mat = this._mat({
       map: t.map, normalMap: t.normalMap, roughnessMap: t.roughnessMap,
       normalScale: new THREE.Vector2(t.normalScale, t.normalScale),
@@ -2096,15 +2081,18 @@ roughnessFactor = clamp( roughnessFactor, 0.05, 1.0 );`);
     });
     this._groundWear(mat, t, {
       tile: 14,
-      waterLevel: isCoast && this.theme.water?.enabled ? waterLevel : null,
+      // Was additionally gated on the circuit being the coast, which meant a
+      // second track could declare water, get a water *plane*, and not get the
+      // damp band where its own ground met it. `water.enabled` is the fact.
+      waterLevel: this.theme.water?.enabled ? waterLevel : null,
       cacheKey: 'terrain',
-      // Only the canyon has walls to band. On the coast the far terrain is a
-      // beach going flat into the sea, and strata on a beach is a rock face.
-      strata: isCoast ? 0 : 1,
+      // Sedimentary banding belongs to a rock wall. A shore's far terrain is a
+      // beach going flat into the water, and strata on a beach is a cliff face.
+      strata: shore ? 0 : 1,
     });
     this._add(geo, mat, { receive: true }).name = 'terrain';
 
-    if (isCoast && this.theme.water?.enabled) this._buildWater(waterLevel);
+    if (this.theme.water?.enabled) this._buildWater(waterLevel);
   }
 
   /**
@@ -2236,7 +2224,20 @@ roughnessFactor = clamp( roughnessFactor, 0.05, 1.0 );`);
     };
   }
 
+  /**
+   * The water plane, for any circuit whose theme declares one.
+   *
+   * Everything an author would want to move between an open sea and a frozen
+   * lake is a parameter here rather than a constant: how rough the surface is,
+   * how much relief its two normal layers carry, and how fast they scroll.
+   * Ice is the degenerate case of all three — smooth, nearly flat, and still —
+   * and it costs no new code path because it is the same physical material with
+   * different numbers.
+   */
   _buildWater(level) {
+    const w = this.theme.water ?? {};
+    const flow = w.flow ?? 1;
+    const relief = w.relief ?? 1;
     // Two independent samplers over the same swell map: a long slow swell in
     // the base normal, a finer faster chop in the clearcoat normal. A single
     // scrolling layer only ever slides — the sea reads as moving because its
@@ -2259,14 +2260,14 @@ roughnessFactor = clamp( roughnessFactor, 0.05, 1.0 );`);
       // Not a mirror. At 0.11 the minified chop aliased into crawling speckle
       // across the whole bay, and the sea's own colour never showed through
       // the reflected sky — the surface read as corrugated cloth, not water.
-      roughness: 0.24,
+      roughness: w.roughness ?? 0.24,
       metalness: 0.0,               // water is a dielectric
       normalMap: swell,
-      normalScale: new THREE.Vector2(0.40, 0.40),
+      normalScale: new THREE.Vector2(0.40 * relief, 0.40 * relief),
       clearcoat: 0.6,
-      clearcoatRoughness: 0.14,
+      clearcoatRoughness: w.clearcoatRoughness ?? 0.14,
       clearcoatNormalMap: chop,
-      clearcoatNormalScale: new THREE.Vector2(0.16, 0.16),
+      clearcoatNormalScale: new THREE.Vector2(0.16 * relief, 0.16 * relief),
       envMapIntensity: 0.9,
       // The sun's own colour in the dielectric specular, so the glitter path
       // reads as sunlight on water rather than a grey highlight.
@@ -2282,8 +2283,8 @@ roughnessFactor = clamp( roughnessFactor, 0.05, 1.0 );`);
     this.group.add(mesh);
     this.waterMaterial = mat;
     this.animated.push((dt, time) => {
-      swell.offset.set(time * 0.0060, time * 0.0035);
-      chop.offset.set(time * -0.0140, time * 0.0210);
+      swell.offset.set(time * 0.0060 * flow, time * 0.0035 * flow);
+      chop.offset.set(time * -0.0140 * flow, time * 0.0210 * flow);
     });
   }
 
