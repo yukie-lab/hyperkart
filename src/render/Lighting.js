@@ -90,7 +90,12 @@ export class Lighting {
     this.sun.intensity = sunIntensity ?? (theme.sunStrength ?? 3.0);
 
     this.hemi.color.setHex(theme.ambientColor);
-    this.hemi.groundColor.setHex(theme.groundColor);
+    // The colour of the light coming back *up* off the world, which is not
+    // always the colour of the ground's albedo. On a night street circuit the
+    // ground is grey concrete and the light bouncing off it is sodium, so the
+    // two have to be separable; everywhere else they are the same thing and
+    // this falls through to the ground's own colour.
+    this.hemi.groundColor.setHex(theme.bounceColor ?? theme.groundColor);
     // On a road that emits its own light, the theme's `groundColor` is a lie.
     // Rainbow Skyway declares 0x0a0620 — near-black — while running a road at
     // emissiveIntensity 1.35, so the brightest surface in the game bounced

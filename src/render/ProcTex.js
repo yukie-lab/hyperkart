@@ -1213,6 +1213,110 @@ export function ice({ size = 1024, seed = 19, tint = 0x8fa3b5 } = {}) {
 }
 
 /**
+ * A tower block's facade at night: a grid of windows, most of them dark.
+ *
+ * Returns a second map for the lit ones. Emissive is the only way a building
+ * a kilometre away can be *seen* at night — the key is a moon and the
+ * environment probe is a night sky, so nothing out there receives enough light
+ * to register, and a skyline lit conventionally is a black rectangle against a
+ * dark sky. The windows have to be the light source.
+ *
+ * The lit fraction is low on purpose. A tower with every window burning reads
+ * as a lightbox with a grid drawn on it; what says "building" is the *pattern*
+ * of which windows are on — clusters where a floor is still working, columns
+ * of dark where the stairwells and lift cores are, and whole dead floors.
+ * Those three features are the entire design here.
+ */
+export function cityWindows({ size = 512, seed = 61, cols = 10, rows = 20, tint = 0x0d1017 } = {}) {
+  const key = `citywin_${size}_${seed}_${cols}_${rows}_${tint}`;
+  if (_textureCache.has(key)) return _textureCache.get(key);
+  const rng = makeRng(seed);
+  const base = paintTint(tint);
+
+  // Which windows are lit, decided once so the albedo and the emissive map
+  // cannot disagree about it.
+  const lit = new Float32Array(cols * rows);
+  const hue = new Float32Array(cols * rows);
+  // Service cores: two or three columns that are dark all the way up, because
+  // a lift shaft has no windows. This is the single most building-like thing
+  // in the tile and it costs one array.
+  const core = new Set();
+  for (let k = 0, n = 2 + Math.floor(rng() * 2); k < n; k++) core.add(Math.floor(rng() * cols));
+  // Floors that have gone home.
+  const dark = new Set();
+  for (let k = 0, n = Math.floor(rows * 0.30); k < n; k++) dark.add(Math.floor(rng() * rows));
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const i = r * cols + c;
+      if (core.has(c) || dark.has(r)) { lit[i] = 0; continue; }
+      // Clustered along a floor rather than sprinkled: offices are lit by the
+      // room, and a room is several windows wide.
+      const runBias = 0.5 + 0.5 * Math.sin(r * 2.7 + c * 0.9 + seed);
+      lit[i] = rng() < 0.16 + 0.26 * runBias ? 1 : 0;
+      // Mostly cool fluorescent, some warm. Two populations, not a gradient —
+      // a building lit in a continuum of colour temperatures looks like a
+      // gradient map, which is exactly what it would be.
+      hue[i] = rng() < 0.30 ? 1 : 0;
+    }
+  }
+
+  const cellW = size / cols, cellH = size / rows;
+  // The mullion, in texels. Kept at least two wide: a one-texel dark line
+  // between windows is the same sub-pixel defect the road tiles were rebuilt
+  // to remove, and a facade is viewed at a grazing angle from a kilometre.
+  const mull = Math.max(2, Math.round(Math.min(cellW, cellH) * 0.18));
+
+  const inWindow = (x, y) => {
+    const c = Math.floor(x / cellW), r = Math.floor(y / cellH);
+    const fx = x - c * cellW, fy = y - r * cellH;
+    if (fx < mull || fy < mull || fx > cellW - mull || fy > cellH - mull) return -1;
+    return r * cols + c;
+  };
+
+  const mapC = paint(size, (x, y, o) => {
+    const i = inWindow(x, y);
+    if (i < 0) {
+      // Concrete between the glazing, a shade above the glass so the grid
+      // still reads on the unlit faces the moon does catch.
+      o[0] = base.r * 1.55 * 255; o[1] = base.g * 1.5 * 255; o[2] = base.b * 1.45 * 255;
+      return;
+    }
+    if (lit[i]) {
+      const warm = hue[i] === 1;
+      o[0] = (warm ? 1.00 : 0.86) * 255;
+      o[1] = (warm ? 0.86 : 0.94) * 255;
+      o[2] = (warm ? 0.66 : 1.00) * 255;
+      return;
+    }
+    o[0] = base.r * 255; o[1] = base.g * 255; o[2] = base.b * 255;
+  });
+
+  const emC = paint(size, (x, y, o) => {
+    const i = inWindow(x, y);
+    if (i < 0 || !lit[i]) { o[0] = o[1] = o[2] = 0; return; }
+    const warm = hue[i] === 1;
+    // Not uniform: a window is brightest where the fitting is and falls off
+    // towards the frame, and that variation is what stops a lit facade
+    // reading as a punched card.
+    const c = Math.floor(x / cellW), r = Math.floor(y / cellH);
+    const fy = (y - r * cellH) / cellH;
+    const k = lerp(0.72, 1.0, 1 - Math.abs(fy - 0.38) * 1.6) * lerp(0.75, 1.0, ((c * 7 + r * 13) % 11) / 10);
+    o[0] = clamp01((warm ? 1.00 : 0.80) * k) * 255;
+    o[1] = clamp01((warm ? 0.82 : 0.90) * k) * 255;
+    o[2] = clamp01((warm ? 0.58 : 1.00) * k) * 255;
+  });
+
+  const result = {
+    map: makeTexture(mapC, { srgb: true }),
+    emissiveMap: makeTexture(emC, { srgb: true }),
+    meanLuma: meanLinearLuma(mapC),
+    meanColor: meanLinearColor(mapC),
+  };
+  _textureCache.set(key, result);
+  return result;
+}
+
+/**
  * Boost strip: forward-pointing chevrons painted onto the tarmac.
  *
  * The shape is the whole point. A pad has to answer two questions in the
@@ -1904,4 +2008,4 @@ export function clearTextureCache() {
   _textureCache.clear();
 }
 
-export const SURFACE_TEXTURES = { asphalt, ice, sand, dirt, snow, groundDetail, grass, curb, checker, gridBox, rainbow, paintedMetal, laneMarkings, waterNormal, boostPad, boostSpill };
+export const SURFACE_TEXTURES = { asphalt, ice, sand, dirt, snow, cityWindows, groundDetail, grass, curb, checker, gridBox, rainbow, paintedMetal, laneMarkings, waterNormal, boostPad, boostSpill };

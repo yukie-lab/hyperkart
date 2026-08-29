@@ -477,6 +477,7 @@ export class TrackMesh {
    */
   _asphaltWear(mat, tex) {
     const grime = new THREE.Color(this.theme.groundColor ?? 0x8a7a5c);
+    const wet = this.theme.roadWet ?? 0;
     // three keys its program cache on material *parameters*, so two standard
     // materials that differ only in injected source would silently share one
     // compiled shader — and the road would come out wearing the terrain's.
@@ -485,6 +486,10 @@ export class TrackMesh {
       shader.uniforms.uBaseLuma = { value: Math.max(tex.meanLuma ?? 0.05, 1e-3) };
       shader.uniforms.uGrime = { value: grime };
       shader.uniforms.uRoadFar = { value: tex.meanColor ?? new THREE.Color(0.07, 0.07, 0.08) };
+      // How wet the circuit is, 0..1. Zero on every dry track, and every term
+      // it drives is written so that zero is an exact no-op — the four dry
+      // circuits reproduce byte for byte with this compiled in.
+      shader.uniforms.uWet = { value: wet };
 
       shader.vertexShader = shader.vertexShader
         .replace('#include <common>', `#include <common>
@@ -499,6 +504,7 @@ varying vec3 vRoad;
 uniform float uBaseLuma;
 uniform vec3 uGrime;
 uniform vec3 uRoadFar;
+uniform float uWet;
 
 float hkHash( vec2 p ) {
   p = fract( p * vec2( 0.3183099, 0.3678794 ) );
@@ -596,6 +602,45 @@ diffuseColor.rgb  = mix( diffuseColor.rgb, diffuseColor.rgb * 0.94 + uGrime * 0.
 diffuseColor.rgb *= mix( 1.0, 0.90, rPatch );
 diffuseColor.rgb *= mix( 1.0, 0.58, rSeam );
 diffuseColor.rgb *= mix( 1.0, 0.74, rJoint );`)
+        .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+// Trackside neon, reflected in a wet road.
+//
+// This has to be authored, and it has to be authored *here*, because there is
+// nowhere else it could come from: the environment probe is generated from the
+// sky dome alone, so it holds a city's sky and none of its lights. A wet
+// street lit only by what the probe knows about is a black street.
+//
+// Road space, like the racing line and the resurfacing patches, and for the
+// same two reasons — it is low-frequency in world space so it cannot alias at
+// any distance, and it is the only space in which "under the third sign after
+// turn four" is a thing that can be said.
+//
+// The pools are long and narrow because that is what a reflection in a wet
+// road actually is: the surface is rough enough to smear its source along the
+// viewing direction, which on a circuit is the direction of travel. A round
+// pool reads as a painted spot; a twenty-metre streak reads as wet.
+float nCell = rArc * 0.042;                       // one sign every ~24 m
+float nId = floor( nCell );
+float nF = fract( nCell );
+float nSide = hkHash( vec2( nId, 3.0 ) ) < 0.5 ? -1.0 : 1.0;
+float nAlong = pow( 1.0 - abs( nF * 2.0 - 1.0 ), 2.2 );
+// Brightest under the kerb the sign hangs over and gone by the crown. Signage
+// is on the barriers, so its light has a side.
+float nAcross = pow( clamp( rLane * nSide, 0.0, 1.0 ), 1.6 );
+float nAmt = nAlong * nAcross * ( 0.55 + 0.45 * hkHash( vec2( nId, 7.0 ) ) );
+// Four colours, not a hue wheel. A street where every sign is a different
+// colour is a fairground; real signage repeats a small palette, and repetition
+// is what lets the eye read the *spacing* — which is the speed cue this whole
+// effect exists for.
+float nH = hkHash( vec2( nId, 11.0 ) );
+vec3 nCol = nH < 0.34 ? vec3( 1.00, 0.16, 0.60 )
+          : nH < 0.62 ? vec3( 0.14, 0.84, 1.00 )
+          : nH < 0.85 ? vec3( 1.00, 0.60, 0.15 )
+                      : vec3( 0.34, 1.00, 0.50 );
+// The racing line is swept clear of standing water, so it reflects least —
+// the one strip of a wet circuit that stays dark, and the reason the line
+// still reads at night.
+totalEmissiveRadiance += nCol * nAmt * uWet * ( 1.0 - rRacing * 0.55 );`)
         .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
 // Relief that has fallen off the end of the mip chain still scatters light, and
 // with the fine normal now retired by thirty metres this is where that energy
@@ -607,6 +652,10 @@ roughnessFactor = mix( roughnessFactor, 0.44, rPolish * 0.75 );
 roughnessFactor = mix( roughnessFactor, 0.98, rEdge * 0.35 );
 roughnessFactor = mix( roughnessFactor, 0.52, rSeam );
 roughnessFactor = mix( roughnessFactor, 0.88, rJoint * 0.6 );
+// Standing water fills the voids between the chippings, and a surface whose
+// voids are full is a mirror. Mixed rather than multiplied so a dry circuit
+// passes through untouched.
+roughnessFactor = mix( roughnessFactor, 0.16, uWet * 0.80 );
 roughnessFactor = clamp( roughnessFactor, 0.05, 1.0 );`)
         .replace('#include <normal_fragment_maps>', `vec3 rMapN = texture2D( normalMap, vNormalMapUv ).xyz * 2.0 - 1.0;
 vec3 rMacN = texture2D( normalMap, vNormalMapUv * 0.17 ).xyz * 2.0 - 1.0;

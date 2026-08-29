@@ -281,6 +281,101 @@ export const SKY_PRESETS = {
   },
 
   /**
+   * Neon Harbor — a city at night, which is not the same thing as darkness.
+   *
+   * The one fact this preset is built on: an urban night sky is not black. A
+   * city throws enough light back at its own haze to raise a sodium dome over
+   * the horizon that is an order of magnitude brighter than the zenith, and
+   * that gradient is not decoration — it is the only thing a skyline can be
+   * silhouetted *against*. Author a black sky and the towers vanish into it,
+   * the frame loses its horizon, and the circuit is left floating in a void
+   * with no sense of place. The Rainbow Skyway can afford a black sky because
+   * its road emits; a street circuit cannot.
+   *
+   * That is also why the sky is not metered here. A dark dome sent through
+   * auto-exposure opens all the way up and the night is gone, so the values
+   * below are absolute — the same rule the Skyway plays by, for the same
+   * reason, at a different hour.
+   *
+   * The key is a moon: cool, weak, and doing far less work than the city does.
+   * Most of the light in frame is ambient, warm, and comes from below — see
+   * `ambientIntensity` in the theme, which is the highest in the game.
+   */
+  neon: {
+    // Deep and only just blue. Any more saturation and it reads as evening
+    // rather than night; any less and it is a grey card.
+    zenith: [0.007, 0.009, 0.030],
+    upper: [0.019, 0.021, 0.055],
+    // The light dome. Twenty times the zenith, and warm — this is sodium and
+    // mercury vapour scattered back off haze, not sky.
+    horizon: [0.068, 0.043, 0.034],
+    sunHorizon: [0.145, 0.100, 0.080],
+    sunWash: [0.105, 0.070, 0.058],
+    // The moon's halo, and the one cool thing above the horizon.
+    sunGlow: [0.52, 0.58, 0.86],
+    sunDisc: [9.0, 9.6, 12.0],
+    groundHaze: [0.052, 0.033, 0.027],
+    // The dome's *shape* is the fix, not just its values. A light dome is a
+    // band a few degrees deep sitting on the horizon; the first pass ran the
+    // horizon colour more than half way to the zenith with a haze band seven
+    // times too tall, and the result measured a sky brighter than the ground
+    // under it — which is the one thing a night frame cannot be. The crossover
+    // is now low and the dark zenith owns most of the sky.
+    gradLow: 0.085,
+    gradHighA: 0.035,
+    gradHighB: 0.34,
+    // Wide and weak: a light dome has no direction to speak of, it is simply
+    // brighter towards the city. A tight warm band would read as a sunset.
+    washPower: 1.4,
+    washFalloff: 3.4,
+    washStrength: 0.85,
+    glowTight: 1.1,
+    glowBroad: 0.22,
+    // A moon is a quarter of a degree across and reads as a disc, not a blob.
+    sunSize: 0.012,
+    hazeFalloff: 18.0,
+    hazeStrength: 0.38,
+
+    // Cloud lit from *underneath* by the city. The dome shader keys its
+    // lighting off the sun, so this is bought in the palette instead: a lit
+    // side that is warm sodium rather than white, and a shadow side that
+    // never goes properly dark because there is a city under it.
+    // Measured: at 0.58 coverage these warm clouds owned most of the sky and
+    // the frame read as dusk rather than night — the sky metered *brighter*
+    // than the ground under it. A night sky needs the gaps: the dark blue
+    // between the clouds is what says the light in them came from below.
+    cloudLit: [0.185, 0.125, 0.092],
+    cloudShadow: [0.030, 0.028, 0.046],
+    cloudRim: [0.26, 0.175, 0.115],
+    cloudCoverage: 0.34,
+    cloudSharp: 0.13,
+    cloudScale: 0.00036,
+    cloudHeight: 900,
+    cloudOpacity: 0.94,
+    cloudSpeed: 0.0028,
+    cirrusStrength: 0.16,
+    cirrusCoverage: 0.44,
+
+    sunScale: 1.0,
+    envScale: 1.0,
+    // A dark sky must not be metered: auto-exposure would open right up and
+    // there would be no point setting a race at night.
+    fogColor: [0.042, 0.034, 0.044],
+    fogSunColor: [0.22, 0.20, 0.30],
+    // Harbour air, and the reason every light in the scene has a halo rather
+    // than a hard edge. It was 0.00140, which is 86% opacity at a kilometre —
+    // enough to erase the lit skyline this circuit is built around, and, being
+    // warm, to turn the whole distance into brown haze. Fog that removes the
+    // subject is not atmosphere.
+    fogDensity: 0.00072,
+    inscatter: 0.30,
+    inscatterDensity: 0.0015,
+    inscatterPower: 4.0,
+    godray: 0.16,
+    aoStrength: 0.50,
+  },
+
+  /**
    * Rainbow Skyway — deep space. Not a gradient dome: a nebula field, a
    * galactic band and a cool key light. Metering is off for this theme (the
    * point of a dark sky is that it stays dark), so these values are absolute.

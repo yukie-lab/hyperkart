@@ -32,7 +32,7 @@ src/
     TrackBuilder.js  路面・縁石・標示・地形のメッシュ生成
     Scenery.js       トラックサイドの世界
     SceneryKit.js    地形サンプラと生成ジオメトリの部品箱
-    Tracks.js        4コースの定義とテーマ。路面種別テーブルもここ
+    Tracks.js        5コースの定義とテーマ。路面種別テーブルもここ
   items/ItemSystem.js  ボックス・ルーレット・所持・弾体・障害物
   fx/
     KartFX.js        ドリフト火花・ブースト炎・衝突・取得
