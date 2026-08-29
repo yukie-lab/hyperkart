@@ -40,13 +40,50 @@ export const TERRAIN_INNER = Math.pow(1 / (TERRAIN_COLS / 2), 1.7) * TERRAIN_REA
 // Terrain
 // ---------------------------------------------------------------------------
 
+/**
+ * The height of the land beyond the barrier, as one function.
+ *
+ * There were two copies of this: `TrackBuilder._buildTerrain` built the mesh
+ * from one and `TerrainSampler` placed every prop in the game with the other,
+ * with a comment on the second promising it was "identical to" the first. They
+ * were keyed on different theme fields, so the promise held for exactly as long
+ * as the two tracks that existed happened to agree — and the first circuit that
+ * disagreed put its entire scenery layer in the sky, standing on a slope that
+ * was never drawn. A sampler that reproduces a mesh has to *be* the mesh's own
+ * function, not a transcription of it.
+ *
+ * Two shapes: `shore` falls away to water and then a seabed, `walled` climbs
+ * into the valley sides that box a circuit in.
+ */
+export function makeTerrainProfile(theme, waterLevel) {
+  const shore = theme.terrain === 'shore';
+  const noise = makeValueNoise2D(theme.terrainSeed ?? (shore ? 1201 : 3307), 256);
+  return (d, worldX, worldZ, edgeY) => {
+    const nz = fbm2D(noise, worldX * 0.006, worldZ * 0.006, 5);
+    const detail = fbm2D(noise, worldX * 0.05, worldZ * 0.05, 3);
+    if (shore) {
+      // Fall from the road edge down to a beach, meet the waterline, then
+      // continue onto the seabed so the shore reads as a real coast rather
+      // than a plane clipping through terrain.
+      const toWater = edgeY - waterLevel;
+      const beach = Math.pow(clamp01(d / 78), 1.45) * (toWater + 3.0);
+      const dune = Math.pow(clamp01(1 - d / 44), 2) * nz * 3.4;
+      const seabed = Math.pow(clamp01((d - 84) / 150), 1.3) * 22;
+      return edgeY - 0.9 - beach + dune - seabed + detail * 0.6 * clamp01(1 - d / 95);
+    }
+    const rise = Math.pow(clamp01((d - 18) / 90), 1.5) * (26 + nz * 34);
+    const dip = -1.2 - clamp01(d / 20) * 2.0;
+    return edgeY + dip + rise + detail * 1.4;
+  };
+}
+
 export class TerrainSampler {
   constructor(track) {
     this.track = track;
-    this.isCoast = track.theme.key === 'coast';
     this.isVoid = !!track.isVoid;
-    this.noise = makeValueNoise2D(this.isCoast ? 1201 : 3307, 256);
     this.waterLevel = track.waterLevel;
+    // The mesh builder's own function, not a copy of it.
+    this.profile = makeTerrainProfile(track.theme, track.waterLevel);
     this.n = Math.max(48, Math.round(track.length / TERRAIN_STEP));
     this.cols = TERRAIN_COLS;
     this._tmp = new THREE.Vector3();
@@ -61,22 +98,6 @@ export class TerrainSampler {
     const sp = track.spline;
     for (let i = 0; i < sp.count; i++) { cx += sp.pos[i * 3]; cz += sp.pos[i * 3 + 2]; }
     this.centre = new THREE.Vector3(cx / sp.count, 0, cz / sp.count);
-  }
-
-  /** Identical to TrackBuilder._buildTerrain's `profile`. */
-  profile(d, worldX, worldZ, edgeY) {
-    const nz = fbm2D(this.noise, worldX * 0.006, worldZ * 0.006, 5);
-    const detail = fbm2D(this.noise, worldX * 0.05, worldZ * 0.05, 3);
-    if (this.isCoast) {
-      const toWater = edgeY - this.waterLevel;
-      const shore = Math.pow(clamp01(d / 78), 1.45) * (toWater + 3.0);
-      const dune = Math.pow(clamp01(1 - d / 44), 2) * nz * 3.4;
-      const seabed = Math.pow(clamp01((d - 84) / 150), 1.3) * 22;
-      return edgeY - 0.9 - shore + dune - seabed + detail * 0.6 * clamp01(1 - d / 95);
-    }
-    const rise = Math.pow(clamp01((d - 18) / 90), 1.5) * (26 + nz * 34);
-    const dip = -1.2 - clamp01(d / 20) * 2.0;
-    return edgeY + dip + rise + detail * 1.4;
   }
 
   /** Distance beyond the barrier for terrain grid column `j`. */
@@ -962,10 +983,7 @@ export function neonMaterial(opts = {}) {
  * free in memory, free in generation time, and — the point — cannot drift out
  * of step with the ground when the ground's tint is retuned.
  */
-export function groundTexturesFor(theme) {
-  const fn = theme.key === 'coast' ? Tex.sand : Tex.dirt;
-  return fn({ size: 1024, tint: theme.groundColor });
-}
+export const groundTexturesFor = Tex.groundTexturesFor;
 
 /**
  * Landform material: ground texture projected triplanar, strata by world

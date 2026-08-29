@@ -146,7 +146,13 @@ export const TRACKS = {
       envIntensity: 0.74,
       ambientColor: 0x6a86b8,
       ambientIntensity: 0.16,
-      water: { enabled: true, level: -9.5, color: 0x18506b, sunColor: 0xffd9a0 },
+      fill: 0.045,
+      // `drop` is metres below the circuit's lowest point, not an absolute
+      // height: the layout is free to move without stranding the sea.
+      water: { enabled: true, drop: 11.5, color: 0x18506b, sunColor: 0xffd9a0 },
+      // Land beyond the barrier falls away to the water rather than climbing
+      // into walls. Read by TrackBuilder's terrain profile.
+      terrain: 'shore',
       groundColor: 0xc9b183,
       roadSurface: 'asphalt',
       // Pale, sun-bleached seaside tarmac. Measured: with the stock 0x4d4d54
@@ -156,8 +162,19 @@ export const TRACKS = {
       roadTint: 0x7a7a83,
       shoulder: 'sand',
       offroad: 'sand',
-      props: ['palm', 'rock', 'parasol', 'crowdStand', 'buoy', 'lighthouse'],
-      grandstands: true,
+      // Named builders, in build order. See `PROP_BUILDERS` in Scenery.js —
+      // the scatter shares one RNG stream, so this order places the props.
+      props: ['coastBackdrop', 'coastCover', 'palms', 'coastRocks',
+              'parasols', 'driftwood', 'buoysAndBoats', 'lighthouse'],
+      grandstands: {
+        at: [0.0, 0.235, 0.50, 0.735],
+        crowd: 40,
+        flags: [0xe2483c, 0xffcf3d, 0x7fd4ff, 0xffffff, 0x2b8a63],
+      },
+      signage: { sponsors: 'coast', gantries: [0.0, 0.42] },
+      verge: 0xd23c33,
+      barrierAccent: 0xe2483c,
+      birds: { count: 30, color: 0xf2e6d8, radius: 330, height: 60 },
     },
     // Positions are (arc fraction, lateral offset in road half-widths).
     itemBoxes: [
@@ -232,13 +249,26 @@ export const TRACKS = {
       envIntensity: 0.87,
       ambientColor: 0x9ab4d8,
       ambientIntensity: 0.20,
+      fill: 0.045,
       water: { enabled: false },
+      // Land beyond the barrier climbs into mesa walls that box the circuit in.
+      terrain: 'walled',
       groundColor: 0xb5714a,
       roadSurface: 'asphalt',
       shoulder: 'dirt',
       offroad: 'dirt',
-      props: ['cactus', 'mesa', 'rock', 'crowdStand', 'archway'],
-      grandstands: true,
+      props: ['canyonBackdrop', 'mesas', 'canyonCover', 'cacti',
+              'canyonRocks', 'telegraphLine', 'rockArch'],
+      rockArches: [0.30, 0.72],
+      grandstands: {
+        at: [0.0, 0.26, 0.545, 0.80],
+        crowd: 40,
+        flags: [0xc9541f, 0xf0a63c, 0xffffff, 0x2f3d52, 0xffe3a8],
+      },
+      signage: { sponsors: 'canyon', gantries: [0.0, 0.47] },
+      verge: 0xdb8a2a,
+      barrierAccent: 0xdb8a2a,
+      birds: { count: 20, color: 0x3a2e26, radius: 300, height: 78 },
     },
     itemBoxes: [
       { t: 0.10, lanes: [-0.55, -0.18, 0.18, 0.55] },
@@ -318,12 +348,20 @@ export const TRACKS = {
       meterSky: false,
       ambientColor: 0x4a4a9a,
       ambientIntensity: 0.30,
+      // Twice the daylight circuits'. With no metered sky the probe delivers
+      // almost no ambient, so the opposite-side fill is what keeps an unlit
+      // face from going to black.
+      fill: 0.10,
       water: { enabled: false },
       groundColor: 0x0a0620,
       roadSurface: 'rainbow',
       shoulder: 'none',
       offroad: 'void',
-      props: ['starfield', 'planet', 'neonPylon', 'ring'],
+      props: ['planets', 'skyDust', 'shards', 'pylons',
+              'skyRings', 'skyPlatforms', 'skyBanners'],
+      skyRings: [0.10, 0.44, 0.79],
+      // No hoardings, no grandstands, no verge, no gantries, no birds: there is
+      // nothing out there for any of them to stand on.
       grandstands: false,
       voidFall: true,
     },
@@ -346,9 +384,19 @@ export const TRACKS = {
   },
 };
 
+// Ordered by difficulty, which is also the order the circuit picker and
+// NEXT CIRCUIT walk in.
 export const TRACK_ORDER = ['sunsetCoast', 'canyonRush', 'rainbowSkyway'];
 
-/** Surface constants shared by physics and audio. */
+/**
+ * Surface constants shared by physics and audio.
+ *
+ * `grip` is steering authority and acceleration, not a lateral friction limit —
+ * this physics has none (see AIDriver). So a low-grip surface understeers; it
+ * does not break away. A circuit may therefore put one under the *driving*
+ * surface and not only beside it: the kart runs wide, which a player can read
+ * and correct, rather than snapping around.
+ */
 export const SURFACE = {
   ROAD:   { id: 0, grip: 1.00, speed: 1.00, drag: 0.0,  rumble: 0.00, dust: 0.0 },
   BOOST:  { id: 1, grip: 1.00, speed: 1.00, drag: 0.0,  rumble: 0.00, dust: 0.0 },
@@ -359,11 +407,18 @@ export const SURFACE = {
   VOID:   { id: 6, grip: 0.00, speed: 1.00, drag: 0.0,  rumble: 0.00, dust: 0.0 },
 };
 
-export function offroadSurfaceFor(themeKey) {
-  switch (themeKey) {
-    case 'coast': return SURFACE.SAND;
-    case 'canyon': return SURFACE.DIRT;
-    case 'rainbow': return SURFACE.VOID;
-    default: return SURFACE.GRASS;
-  }
+/** Physics for a surface named by a theme (`offroad`, `shoulder`, `roadSurface`). */
+export function surfaceNamed(name, fallback = SURFACE.GRASS) {
+  return SURFACE[String(name || '').toUpperCase()] ?? fallback;
+}
+
+/**
+ * What a kart drives on beyond the kerb.
+ *
+ * Keyed on `theme.offroad`, which is the field that already names the surface,
+ * rather than on `theme.key`. Two fields that have to agree about one fact is
+ * how `offroad: 'sand'` sat next to a switch that ignored it.
+ */
+export function offroadSurfaceFor(theme) {
+  return surfaceNamed(theme?.offroad, SURFACE.GRASS);
 }

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { TrackSpline } from './Spline.js';
-import { SURFACE, offroadSurfaceFor } from './Tracks.js';
+import { SURFACE, offroadSurfaceFor, surfaceNamed } from './Tracks.js';
 import { clamp, clamp01, lerp, mod, ringDelta, smoothstep } from '../core/MathX.js';
 
 /**
@@ -31,8 +31,16 @@ export class Track {
     this.laps = def.laps ?? 3;
     this.spline = new TrackSpline(def.nodes, { samples: 2600, closed: true });
     this.length = this.spline.length;
-    this.offroadSurface = offroadSurfaceFor(def.theme.key);
-    this.isVoid = def.theme.key === 'rainbow';
+    this.offroadSurface = offroadSurfaceFor(def.theme);
+    /**
+     * Physics for the driving surface itself, named by the same field that
+     * decides how it is *drawn*. A circuit whose road is rendered as ice is
+     * therefore driven as ice, and there is no second field that can quietly
+     * disagree with the first. Surfaces with no physics entry — `asphalt`,
+     * `rainbow` — fall through to plain ROAD, which is what they were.
+     */
+    this.roadSurface = surfaceNamed(def.theme.roadSurface, SURFACE.ROAD);
+    this.isVoid = !!def.theme.voidFall;
 
     this.startS = mod((def.startLineT ?? 0) * this.length, this.length);
 
@@ -48,7 +56,12 @@ export class Track {
     }
     this.minY = minY;
     this.maxY = maxY;
-    this.waterLevel = minY - 11.5;
+    // How far the water sits below the circuit's lowest point. Authored per
+    // theme because how high a circuit stands over its water is a composition
+    // decision, not one the layout can be trusted to imply. Themes with no
+    // water still get a level: the terrain's damp band and the coast's seabed
+    // both reference it, and it costs nothing to be defined everywhere.
+    this.waterLevel = minY - (def.theme.water?.drop ?? 11.5);
 
     this.ramps = (def.ramps || []).map((r) => ({
       s: mod(r.t * this.length, this.length),
@@ -136,7 +149,7 @@ export class Track {
 
     let surface;
     if (absLat <= half - TRACK_LAYOUT.curbWidth) {
-      surface = this.isOnBoostPad(p.s, p.lateral) ? SURFACE.BOOST : SURFACE.ROAD;
+      surface = this.isOnBoostPad(p.s, p.lateral) ? SURFACE.BOOST : this.roadSurface;
     } else if (absLat <= half + 0.15) {
       surface = SURFACE.CURB;
     } else {

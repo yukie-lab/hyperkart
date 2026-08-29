@@ -2,6 +2,12 @@ import { clamp01 } from '../core/MathX.js';
 import { KEYMAP } from '../core/Input.js';
 import { TRACKS, TRACK_ORDER } from '../track/Tracks.js';
 
+/** Difficulty as filled pips out of the hardest circuit in the game. */
+function difficultyPips(level = 1) {
+  const max = Math.max(...TRACK_ORDER.map((id) => TRACKS[id].difficulty ?? 1));
+  return '\u25c6'.repeat(level) + '\u25c7'.repeat(Math.max(0, max - level));
+}
+
 /** `KeyW` -> `W`, `ArrowUp` -> `↑`, and so on. */
 function keyLabel(code) {
   const named = {
@@ -479,7 +485,7 @@ const CSS = `
 .hk-help-circuits { margin-top:calc(var(--u)*2.2); display:flex; gap:calc(var(--u)*.9); flex-wrap:wrap; }
 .hk-help-sub { flex:0 0 100%; font:700 calc(var(--u)*1.5)/1 var(--hkf);
   letter-spacing:.16em; color:#7d90ad; margin-bottom:calc(var(--u)*.5); }
-.hk-help-track { flex:1 1 calc(33% - var(--u)); cursor:pointer; border:0;
+.hk-help-track { flex:1 1 calc(50% - var(--u)); cursor:pointer; border:0;
   padding:calc(var(--u)*1.05) calc(var(--u)*.6); color:#dbe6f7;
   font:700 calc(var(--u)*1.75)/1.2 var(--hkf);
   background:rgba(255,255,255,.08);
@@ -491,6 +497,14 @@ const CSS = `
 .hk-help-track.here { background:rgba(255,215,94,.22); color:#ffe694;
   box-shadow:0 0 0 calc(var(--u)*.2) rgba(255,215,94,.7) inset; cursor:default; }
 .hk-help-track.here i { color:#d8bd6e; }
+/* Difficulty and lap count on one baseline: the pips carry the ranking the
+   circuit list is ordered by, and the laps are the fact the old label showed.
+   Filled pips are the circuit's difficulty out of the four the game has. */
+.hk-help-track u { display:flex; align-items:center; justify-content:space-between;
+  gap:calc(var(--u)*.5); margin-top:calc(var(--u)*.45); text-decoration:none;
+  font:700 calc(var(--u)*1.25)/1 var(--hkf); letter-spacing:.16em; color:#7f93b0; }
+.hk-help-track u b { font-weight:500; letter-spacing:.1em; }
+.hk-help-track.here u { color:#c8ab5f; }
 
 /* ---- FINISH SHEET --------------------------------------------------------
    The layout is the one every kart racer has taught players to read: the full
@@ -1269,7 +1283,8 @@ export class HUD {
             <div class="hk-help-sub">CIRCUIT</div>
             ${TRACK_ORDER.map((id) => `
             <button class="hk-help-track" data-track="${id}" type="button">
-              ${TRACKS[id].name}<i>${TRACKS[id].laps} laps</i>
+              ${TRACKS[id].name}<i>${TRACKS[id].subtitle}</i>
+              <u>${difficultyPips(TRACKS[id].difficulty)}<b>${TRACKS[id].laps} laps</b></u>
             </button>`).join('')}
           </div>
           <div class="hk-help-foot">
@@ -1361,7 +1376,12 @@ export class HUD {
     if (this.dom.finishNum) this.dom.finishNum.textContent = place;
     if (this.dom.finishOrd) this.dom.finishOrd.textContent = ordinal(place);
     if (this.dom.finishTrack) {
-      this.dom.finishTrack.textContent = TRACKS[this._trackId]?.name ?? '';
+      const def = TRACKS[this._trackId];
+      // The circuit's own name, then what kind of circuit it is. The subtitle
+      // is the one place a track's character is written down for the player.
+      this.dom.finishTrack.textContent = def
+        ? `${def.name} — ${def.subtitle}`
+        : '';
     }
     this.dom.finishSheet?.classList.add(`p${Math.min(place, 4)}`);
     if (portrait && this.dom.finPortrait) {
