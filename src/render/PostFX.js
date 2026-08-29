@@ -236,6 +236,29 @@ export class PostFX {
         this.bloom.threshold = 1.10;
         this.bloom.radius = 0.52;
         break;
+      case 'frost':
+        this.u.uGrain.value = 0.020;
+        // The lowest saturation and the highest contrast in the game, and both
+        // for the same reason: a snowfield has no hue to push, so a punchy
+        // grade only tints it. What separates a kart from the basin it is
+        // driving across is *value*, so that is the axis that gets spent.
+        this.u.uSaturation.value = 1.06;
+        this.u.uContrast.value = 1.16;
+        this.u.uGain.value.setRGB(0.985, 1.00, 1.05);
+        this.u.uLift.value.setRGB(0.006, 0.010, 0.022);
+        // Threshold above the snow, not below it.
+        //
+        // This is the Rainbow Skyway's bloom bug arrived at from the opposite
+        // side. There the road was the brightest thing in the world and a
+        // threshold under it bleached the circuit away; here the *ground* is,
+        // at roughly 0.8 linear albedo against tarmac's 0.07. A coast-like
+        // 1.05 puts the entire basin over the line and the frame turns to
+        // paste. On the one track where the run-off is the brightest surface,
+        // the threshold has to clear it.
+        this.bloom.strength = 0.13;
+        this.bloom.threshold = 1.24;
+        this.bloom.radius = 0.55;
+        break;
       case 'rainbow':
         // A quarter of the others'. Grain is capped as a fraction of local
         // luminance, and this road sits squarely in the mid band where that cap

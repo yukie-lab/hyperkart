@@ -422,7 +422,13 @@ export class TrackMesh {
       // the same tarmac that reads correctly at noon reads as a void at golden
       // hour. Physically that is just true, and the answer a circuit designer
       // reaches for is a lighter surface, not a brighter sun.
-      const t = Tex.asphalt({ size: 1024, tint: this.theme.roadTint ?? 0x4d4d54 });
+      // Ice returns the same shape asphalt does — map, normal, roughness, and
+      // the two means the wear pass pivots on — so it runs through the
+      // identical road-space storytelling below rather than needing a third
+      // branch that would then have to reimplement all of it.
+      const t = this.theme.roadSurface === 'ice'
+        ? Tex.ice({ size: 1024, tint: this.theme.roadTint ?? 0x8fa3b5 })
+        : Tex.asphalt({ size: 1024, tint: this.theme.roadTint ?? 0x4d4d54 });
       mat = this._mat({
         map: t.map,
         normalMap: t.normalMap,

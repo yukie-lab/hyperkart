@@ -1,6 +1,6 @@
 # HyperKart
 
-ブラウザで走るカートレーサー。12台、3周、3コース。
+ブラウザで走るカートレーサー。12台、3周、4コース。
 
 **素材ファイルを持たない。** 地形もテクスチャもモデルも音も、すべて実行時にコードから生成される。
 依存は `three` 一つだけ。
@@ -18,7 +18,7 @@ npm run dev        # http://localhost:5178
 npm run build:single     # → dist/hyperkart.html
 ```
 
-**1ファイル 1.10 MB、外部リクエスト 0。ダブルクリックで開く。**
+**1ファイル 1.13 MB、外部リクエスト 0。ダブルクリックで開く。**
 
 > `index.html` を直接開いても動かない。`<script type="module">` は `file://` から読めない（ブラウザの CORS 規則で、null オリジンのページは自分の隣のファイルすら取得できない）。
 > `npm run build` の `dist/` は**任意の静的サーバ**で動くが、ダブルクリックでは開けない。
@@ -28,10 +28,11 @@ npm run build:single     # → dist/hyperkart.html
 
 ## これは何か
 
-- Three.js 一枚、実装 21,709 行（30 モジュール）
+- Three.js 一枚、実装 23,533 行（30 モジュール）
 - **画像も音声もリポジトリに無い** — `ProcTex` がテクスチャを描き、`KartModel` と `SceneryKit` がジオメトリを組み、`AudioEngine` が Web Audio で音を合成する
 - 固定 120Hz の決定論的シミュレーション。同じ種からは同じレースが出る
-- 3コース：**Sunset Coast**（海沿い）、**Canyon Rush**（峡谷）、**Rainbow Skyway**（壁の無い虹路）
+- 4コース：**Sunset Coast**（海沿い）、**Canyon Rush**（峡谷）、**Frostline Basin**（氷の路面。**路面グリップが低い唯一のコース**）、**Rainbow Skyway**（壁の無い虹路）
+- コースは**データで定義される**。地形の形、プロップの一覧、看板の色、空、路面の物理は全部テーマのフィールドで、`TRACKS` に足せば周回選択にも次コースにも出る
 - 12キャラクターが軽・中・重の三クラスに分かれ、**クラスごとに車体が違う**
 - アイテム 11 種、三段のドリフトチャージ、ゲームパッド対応
 
@@ -52,6 +53,7 @@ npm run build:single     # → dist/hyperkart.html
 
 ```bash
 node tools/shot.mjs --series 0,12,20,52 --track sunsetCoast --outdir shots/
+node tools/analyze.mjs --track frostlineBasin   # コーナー半径と、AI が導く速度プロファイル
 node tools/sim.mjs   --track canyonRush --field 12 --seeds 3
 node tools/audioaudit.mjs        # OfflineAudioContext で音を描画して測る
 node tools/fxaudit.mjs           # エフェクトの実面積と自車の遮蔽率

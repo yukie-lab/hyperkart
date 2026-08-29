@@ -188,6 +188,99 @@ export const SKY_PRESETS = {
   },
 
   /**
+   * Frostline Basin — winter daylight, sun at ~20 deg through high thin cloud.
+   *
+   * Two things make this preset different in kind from the other daylight
+   * circuits, and both follow from one fact: the ground is brighter than the
+   * sky for the first time in this game.
+   *
+   * A snowfield is about 0.8 linear albedo. Sand is 0.5 and tarmac is 0.07, so
+   * every tuning instinct the other two tracks were built on is inverted here.
+   * The sky is therefore metered *lower* (`exposureTarget` 0.40 against the
+   * coast's 0.46) to leave the snow headroom, and the bloom threshold sits
+   * above everything on the ground rather than below it — the same failure the
+   * Rainbow Skyway's comment describes, arrived at from the other direction. A
+   * threshold under the snow blooms the entire basin into a white paste and
+   * takes the circuit with it.
+   *
+   * Colour is nearly all in the *sky*, because nothing on the ground has any.
+   * A saturated grade on a white world reads as a colourised photograph, so
+   * the separation this track lives on is value, not hue — which is also why
+   * the road is the darkest driving surface in the game (see ProcTex.ice).
+   */
+  frost: {
+    // Winter zenith is paler and less saturated than summer's: a low sun means
+    // a long path, and the deep blue overhead never arrives.
+    zenith: [0.052, 0.115, 0.330],
+    upper: [0.135, 0.235, 0.465],
+    // Milky rather than coloured. Cold air over a frozen basin holds ice fog,
+    // and the horizon is the one part of the sky that shows it.
+    horizon: [0.72, 0.74, 0.80],
+    sunHorizon: [1.35, 1.20, 1.02],
+    sunWash: [1.00, 0.90, 0.80],
+    sunGlow: [1.95, 1.80, 1.62],
+    sunDisc: [30.0, 28.0, 24.0],
+    groundHaze: [0.40, 0.43, 0.50],
+    gradLow: 0.30,
+    gradHighA: 0.15,
+    gradHighB: 0.78,
+    // Wide and weak. Winter sun through cloud has no tight warm band — it has
+    // a large pale area that is merely brighter than the rest of the sky.
+    washPower: 1.8,
+    washFalloff: 4.2,
+    washStrength: 0.55,
+    glowTight: 1.3,
+    glowBroad: 0.42,
+    sunSize: 0.038,
+    hazeFalloff: 12.0,
+    hazeStrength: 0.72,
+
+    // Heavy, flat-bottomed and low-contrast: the cloud deck is the diffuser
+    // that makes this light soft, so it has to actually cover the sky.
+    cloudLit: [1.95, 1.98, 2.06],
+    cloudShadow: [0.44, 0.48, 0.60],
+    cloudRim: [2.30, 2.30, 2.40],
+    cloudCoverage: 0.66,
+    cloudSharp: 0.11,
+    cloudScale: 0.00034,
+    cloudHeight: 1150,
+    cloudOpacity: 0.98,
+    cloudSpeed: 0.0042,
+    cirrusStrength: 0.40,
+    cirrusCoverage: 0.70,
+    cirrusScale: 0.00013,
+    cirrusHeight: 3600,
+
+    // A soft key: the sun-to-sky ratio is the lowest of the three daylight
+    // circuits on purpose. Hard shadows on snow are a clear-day phenomenon and
+    // this is not a clear day.
+    sunScale: 1.60,
+    // Lands theme.envIntensity 0.80 on 1.0, the same "believe the probe" the
+    // other two daylight circuits arrive at. Snow's enormous bounce is *not*
+    // bought here — the probe is generated from the dome alone and contains no
+    // light coming back off the ground, so inflating it would be claiming the
+    // sky is brighter than it was metered to be. It is bought in the hemisphere
+    // light, whose ground colour is the snow itself. See the theme.
+    envScale: 1.25,
+    fogColor: [0.70, 0.73, 0.80],
+    fogSunColor: [1.15, 1.10, 1.02],
+    // Second only to the coast's, not first. A basin does trap cold air, and
+    // this is the layer that separates a white foreground from a white
+    // background — with no hue difference between them, aerial perspective is
+    // the only cue left. But it was 0.00165, which is 82% opacity at 800 m: it
+    // erased the bottom of the peak range and left the lit tops hanging in the
+    // sky as detached slabs. Fog that removes the base of a landform does not
+    // create distance, it creates floating objects.
+    fogDensity: 0.00128,
+    inscatter: 0.45,
+    inscatterDensity: 0.0021,
+    inscatterPower: 5.0,
+    godray: 0.34,
+    godrayLength: 0.95,
+    aoStrength: 0.75,
+  },
+
+  /**
    * Rainbow Skyway — deep space. Not a gradient dome: a nebula field, a
    * galactic band and a cool key light. Metering is off for this theme (the
    * point of a dark sky is that it stays dark), so these values are absolute.

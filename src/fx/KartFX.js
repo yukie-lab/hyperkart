@@ -112,8 +112,16 @@ const DRIFT_TIERS = [
 /** Seats a ground front on the surface: the plane it expands across is the road. */
 function onRoad(p, gy) { if (gy != null) p.y = gy + 0.06; return p; }
 
-/** Dust colour per off-road surface id (see SURFACE in track/Tracks.js). */
-const DUST_COLOR = { 2: 0xbdb6ad, 3: 0xa87c50, 4: 0xdcc79a, 5: 0x8f9a5e };
+/**
+ * Dust colour per off-road surface id (see SURFACE in track/Tracks.js).
+ *
+ * Snow is shadow-blue, not white. The spray is normal-blended over ground that
+ * is already the brightest surface in the game, so a white plume is invisible
+ * exactly when it matters — and it is also wrong: a thrown cloud is lit from
+ * one side and in its own shadow everywhere else, which on snow is the only
+ * thing that makes it read at all.
+ */
+const DUST_COLOR = { 2: 0xbdb6ad, 3: 0xa87c50, 4: 0xdcc79a, 5: 0x8f9a5e, 8: 0xc2d3e6 };
 
 /**
  * What hit you, as a presentation.
